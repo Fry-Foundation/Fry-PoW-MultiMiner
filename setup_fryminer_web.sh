@@ -1,8 +1,10 @@
 #!/bin/sh
-# FryMiner Setup - VERIFIED FINAL VERSION
-# This version has been tested to ensure manual stop is ALWAYS respected
+# FryMiner Setup - COMPLETE RESTORED VERSION
+# Fixed stratum URL doubling, all 35+ coins restored
+# Monitor and Statistics tabs included
 
-set -e
+# DO NOT USE set -e - it causes silent failures
+# set -e
 
 log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
@@ -14,1040 +16,1472 @@ PORT=8080
 BASE=/opt/frynet-config
 MINERS_DIR=/opt/miners
 
-# Set hostname based on MAC address
+# Detect architecture - supports ALL CPU architectures
+detect_architecture() {
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64|amd64)
+            ARCH_TYPE="x86_64"
+            log "Detected architecture: x86_64/amd64"
+            ;;
+        aarch64|arm64)
+            ARCH_TYPE="arm64"
+            log "Detected architecture: ARM64/AArch64"
+            ;;
+        armv8*|armv9*)
+            ARCH_TYPE="arm64"
+            log "Detected architecture: ARMv8/ARMv9 (using ARM64 build)"
+            ;;
+        armv7*|armhf|armv7l)
+            ARCH_TYPE="armv7"
+            log "Detected architecture: ARMv7"
+            ;;
+        armv6*|armv6l)
+            ARCH_TYPE="armv6"
+            log "Detected architecture: ARMv6 (Raspberry Pi 1/Zero)"
+            ;;
+        armv5*|armv4*|arm)
+            ARCH_TYPE="armv5"
+            log "Detected architecture: ARMv5/ARMv4 (legacy ARM)"
+            ;;
+        i686|i386|i586)
+            ARCH_TYPE="x86"
+            log "Detected architecture: x86 32-bit"
+            ;;
+        riscv64)
+            ARCH_TYPE="riscv64"
+            log "Detected architecture: RISC-V 64-bit"
+            ;;
+        ppc64le|ppc64)
+            ARCH_TYPE="ppc64"
+            log "Detected architecture: PowerPC 64-bit"
+            ;;
+        mips|mipsel|mips64)
+            ARCH_TYPE="mips"
+            log "Detected architecture: MIPS"
+            ;;
+        *)
+            ARCH_TYPE="unknown"
+            warn "Unknown architecture: $ARCH - will attempt generic build"
+            ;;
+    esac
+}
+
+# Set hostname
 set_hostname() {
     log "Setting hostname..."
-    
-    # Get MAC address from first network interface
-    MAC=""
-    if command -v ip >/dev/null 2>&1; then
-        MAC=$(ip link | grep -m 1 'link/ether' | awk '{print $2}' | tr -d ':' | tail -c 5)
-    elif command -v ifconfig >/dev/null 2>&1; then
-        MAC=$(ifconfig | grep -m 1 'HWaddr\|ether' | awk '{print $NF}' | tr -d ':' | tail -c 5)
-    fi
-    
+    MAC=$(ip link 2>/dev/null | grep -m 1 'link/ether' | awk '{print $2}' | tr -d ':' | tail -c 5)
     if [ -n "$MAC" ]; then
         NEW_HOSTNAME="FryNetworks${MAC}"
-        log "Setting hostname to: $NEW_HOSTNAME"
-        
-        # Set the hostname
-        hostname "$NEW_HOSTNAME"
-        
-        # Persist hostname across reboots
-        if [ -f /etc/hostname ]; then
-            echo "$NEW_HOSTNAME" > /etc/hostname
-        fi
-        
-        # Update /etc/hosts
-        if [ -f /etc/hosts ]; then
-            # Remove old hostname entries and add new one
-            sed -i "/127.0.1.1/d" /etc/hosts
-            echo "127.0.1.1 $NEW_HOSTNAME" >> /etc/hosts
-        fi
-        
-        # For systems using hostnamectl
-        if command -v hostnamectl >/dev/null 2>&1; then
-            hostnamectl set-hostname "$NEW_HOSTNAME" 2>/dev/null || true
-        fi
-        
+        hostname "$NEW_HOSTNAME" 2>/dev/null || true
+        echo "$NEW_HOSTNAME" > /etc/hostname 2>/dev/null || true
         log "Hostname set to: $NEW_HOSTNAME"
-    else
-        warn "Could not detect MAC address, hostname unchanged"
     fi
 }
 
-# Create PID sync daemon - SIMPLIFIED VERSION that respects stop flag
-create_pid_sync_daemon() {
-    log "Creating PID sync daemon (respects stop flag)..."
-    
-    cat > /usr/local/bin/fryminer_pid_sync <<'PID_SYNC'
-#!/bin/sh
-# FryMiner PID Sync Daemon - STOP FLAG AWARE
-# Only updates PID when miner is running
-# Respects the stop flag - does nothing if mining was manually stopped
-
-PIDFILE="/opt/frynet-config/miner.pid"
-STATUSFILE="/opt/frynet-config/logs/status.txt"
-LOGFILE="/opt/frynet-config/logs/log.txt"
-STOPFLAG="/opt/frynet-config/MINING_STOPPED"
-
-# Find actual miner PID
-find_miner_pid() {
-    # Check for xmrig
-    PID=$(pgrep -x "xmrig" 2>/dev/null | head -1)
-    if [ -n "$PID" ]; then
-        echo "$PID"
-        return 0
-    fi
-    
-    # Check for cpuminer
-    PID=$(pgrep -x "cpuminer" 2>/dev/null | head -1)
-    if [ -n "$PID" ]; then
-        echo "$PID"
-        return 0
-    fi
-    
-    # Check for minerd
-    PID=$(pgrep -x "minerd" 2>/dev/null | head -1)
-    if [ -n "$PID" ]; then
-        echo "$PID"
-        return 0
-    fi
-    
-    return 1
-}
-
-echo "[$(date)] PID sync daemon started (stop-flag aware)" >> "$LOGFILE"
-
-# Main sync loop
-while true; do
-    # If stop flag exists, do nothing at all
-    if [ -f "$STOPFLAG" ]; then
-        sleep 30
-        continue
-    fi
-    
-    ACTUAL_PID=$(find_miner_pid)
-    
-    if [ -n "$ACTUAL_PID" ]; then
-        # Miner is running - update PID if needed
-        if [ -f "$PIDFILE" ]; then
-            STORED_PID=$(cat "$PIDFILE")
-            if [ "$STORED_PID" != "$ACTUAL_PID" ]; then
-                echo "$ACTUAL_PID" > "$PIDFILE"
-                echo "[$(date)] PID sync: Updated PID from $STORED_PID to $ACTUAL_PID" >> "$LOGFILE"
-            fi
-        else
-            echo "$ACTUAL_PID" > "$PIDFILE"
-            echo "RUNNING" > "$STATUSFILE"
-            echo "[$(date)] PID sync: Created PID file for running miner: $ACTUAL_PID" >> "$LOGFILE"
-        fi
-    else
-        # No miner running - update status only
-        if [ -f "$STATUSFILE" ]; then
-            STATUS=$(cat "$STATUSFILE")
-            if [ "$STATUS" = "RUNNING" ]; then
-                echo "STOPPED" > "$STATUSFILE"
-            fi
-        fi
-    fi
-    
-    sleep 30
-done
-PID_SYNC
-    
-    chmod +x /usr/local/bin/fryminer_pid_sync
-}
-
-# Create activity monitor that NEVER starts miners
-create_activity_monitor() {
-    log "Creating activity monitor (display only)..."
-    
-    cat > /usr/local/bin/fryminer_monitor <<'MONITOR'
-#!/bin/sh
-# FryMiner Activity Monitor - DISPLAY ONLY
-# This ONLY logs status, NEVER starts or restarts miners
-
-LOGFILE="/opt/frynet-config/logs/log.txt"
-PIDFILE="/opt/frynet-config/miner.pid"
-STOPFLAG="/opt/frynet-config/MINING_STOPPED"
-
-while true; do
-    # If stop flag exists, don't log activity
-    if [ -f "$STOPFLAG" ]; then
-        sleep 30
-        continue
-    fi
-    
-    if [ -f "$PIDFILE" ]; then
-        PID=$(cat "$PIDFILE")
-        # Check if this PID actually exists and is a miner
-        if kill -0 "$PID" 2>/dev/null; then
-            # Verify it's actually a miner process
-            PROCESS_NAME=$(ps -p "$PID" -o comm= 2>/dev/null || echo "")
-            if echo "$PROCESS_NAME" | grep -qE "xmrig|cpuminer|minerd"; then
-                # It's a real miner, log activity
-                TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-                CPU_USAGE=$(ps aux | grep "^[^ ]*[ ]*$PID " | awk '{print $3}')
-                
-                echo "[$TIMESTAMP] Mining active - CPU: ${CPU_USAGE}% - Process: $PID" >> "$LOGFILE"
-                
-                # Add periodic messages
-                if [ $(($(date +%s) % 10)) -eq 0 ]; then
-                    echo "[$TIMESTAMP] Submitting shares to pool..." >> "$LOGFILE"
-                elif [ $(($(date +%s) % 7)) -eq 0 ]; then
-                    echo "[$TIMESTAMP] Calculating hashes..." >> "$LOGFILE"
-                elif [ $(($(date +%s) % 5)) -eq 0 ]; then
-                    echo "[$TIMESTAMP] Pool connection stable" >> "$LOGFILE"
-                fi
-            fi
-        fi
-    fi
-    
-    # Keep log file size manageable
-    if [ -f "$LOGFILE" ] && [ $(wc -l < "$LOGFILE" 2>/dev/null || echo 0) -gt 1000 ]; then
-        tail -500 "$LOGFILE" > "${LOGFILE}.tmp"
-        mv "${LOGFILE}.tmp" "$LOGFILE"
-    fi
-    
-    sleep 30
-done
-MONITOR
-    
-    chmod +x /usr/local/bin/fryminer_monitor
-}
-
-# Create startup script
-create_startup_script() {
-    log "Creating startup script..."
-    
-    cat > /usr/local/bin/fryminer_startup <<'STARTUP'
-#!/bin/sh
-# FryMiner Startup Script
-
-PORT=8080
-BASE=/opt/frynet-config
-LOGFILE="/var/log/fryminer_startup.log"
-STOPFLAG="/opt/frynet-config/MINING_STOPPED"
-
-# Function to log messages
-log_msg() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOGFILE"
-}
-
-# Function to find miner process
-find_miner_pid() {
-    for proc in xmrig cpuminer minerd; do
-        PID=$(pgrep -x "$proc" 2>/dev/null | head -1)
-        if [ -n "$PID" ]; then
-            echo "$PID"
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Wait for network to be ready
-wait_for_network() {
-    local count=0
-    while [ $count -lt 30 ]; do
-        if ping -c 1 8.8.8.8 >/dev/null 2>&1; then
-            return 0
-        fi
-        sleep 2
-        count=$((count + 1))
-    done
-    return 1
-}
-
-log_msg "FryMiner startup initiated"
-
-# Wait for network
-log_msg "Waiting for network..."
-if wait_for_network; then
-    log_msg "Network is ready"
-else
-    log_msg "Network timeout, continuing anyway"
-fi
-
-# Kill any existing processes
-pkill -f "python3 -m http.server $PORT" 2>/dev/null || true
-pkill -f "fryminer_monitor" 2>/dev/null || true
-pkill -f "fryminer_pid_sync" 2>/dev/null || true
-
-# Start the web server
-if [ -d "$BASE" ]; then
-    cd "$BASE"
-    nohup python3 -m http.server "$PORT" --cgi >/dev/null 2>&1 &
-    WEB_PID=$!
-    log_msg "Web server started with PID $WEB_PID"
-    echo $WEB_PID > /var/run/fryminer_web.pid
-else
-    log_msg "ERROR: $BASE directory not found"
-fi
-
-# Start the activity monitor
-if [ -x /usr/local/bin/fryminer_monitor ]; then
-    nohup /usr/local/bin/fryminer_monitor >/dev/null 2>&1 &
-    MONITOR_PID=$!
-    log_msg "Activity monitor started with PID $MONITOR_PID"
-    echo $MONITOR_PID > /var/run/fryminer_monitor.pid
-fi
-
-# Start PID sync daemon
-if [ -x /usr/local/bin/fryminer_pid_sync ]; then
-    nohup /usr/local/bin/fryminer_pid_sync >/dev/null 2>&1 &
-    SYNC_PID=$!
-    log_msg "PID sync daemon started with PID $SYNC_PID"
-    echo $SYNC_PID > /var/run/fryminer_pid_sync.pid
-fi
-
-# Check if mining should restart after boot
-# ONLY if stop flag doesn't exist AND it was running before
-if [ ! -f "$STOPFLAG" ] && [ -f "$BASE/mining_was_running" ]; then
-    log_msg "Restarting mining after boot..."
-    
-    if [ -f "$BASE/config.txt" ]; then
-        . "$BASE/config.txt"
-        SCRIPT="$BASE/output/$miner/start_mining.sh"
-        
-        if [ -f "$SCRIPT" ]; then
-            echo "[$(date)] AUTO-RESTART: Resuming mining after boot" >> "$BASE/logs/log.txt"
-            
-            sh "$SCRIPT" >> "$BASE/logs/log.txt" 2>&1 &
-            sleep 5
-            
-            ACTUAL_PID=$(find_miner_pid)
-            if [ -n "$ACTUAL_PID" ]; then
-                echo $ACTUAL_PID > "$BASE/miner.pid"
-                echo "RUNNING" > "$BASE/logs/status.txt"
-                log_msg "Miner restarted with PID $ACTUAL_PID"
-            fi
-        fi
-    fi
-    
-    rm -f "$BASE/mining_was_running"
-else
-    if [ -f "$STOPFLAG" ]; then
-        log_msg "Not restarting mining - stop flag exists"
-    else
-        log_msg "Not restarting mining - was not running before"
-    fi
-fi
-
-log_msg "FryMiner startup completed"
-STARTUP
-    
-    chmod +x /usr/local/bin/fryminer_startup
-}
-
-# Setup auto-start based on init system
-setup_autostart() {
-    log "Setting up auto-start at boot..."
-    
-    # Create the startup script first
-    create_startup_script
-    
-    # Method 1: Systemd (most modern Linux distributions)
-    if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
-        log "Detected systemd, creating service..."
-        
-        cat > /etc/systemd/system/fryminer.service <<'SYSTEMD'
-[Unit]
-Description=FryMiner Web Interface and Monitor
-After=network.target network-online.target
-Wants=network-online.target
-
-[Service]
-Type=forking
-ExecStart=/usr/local/bin/fryminer_startup
-ExecStop=/usr/local/bin/fryminer_stop
-Restart=on-failure
-RestartSec=10
-User=root
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-SYSTEMD
-        
-        # Create stop script for systemd
-        cat > /usr/local/bin/fryminer_stop <<'STOP'
-#!/bin/sh
-# System shutdown script
-# Check if mining is running and save state
-if [ -f /opt/frynet-config/miner.pid ]; then
-    PID=$(cat /opt/frynet-config/miner.pid)
-    if kill -0 "$PID" 2>/dev/null; then
-        # Check if it's actually a miner
-        PROCESS_NAME=$(ps -p "$PID" -o comm= 2>/dev/null || echo "")
-        if echo "$PROCESS_NAME" | grep -qE "xmrig|cpuminer|minerd"; then
-            # Mining was actually running
-            if [ ! -f /opt/frynet-config/MINING_STOPPED ]; then
-                # And wasn't manually stopped
-                touch /opt/frynet-config/mining_was_running
-                echo "[$(date)] System shutdown - mining was running" >> /opt/frynet-config/logs/log.txt
-            fi
-        fi
-    fi
-fi
-
-# Stop all processes
-[ -f /var/run/fryminer_web.pid ] && kill $(cat /var/run/fryminer_web.pid) 2>/dev/null
-[ -f /var/run/fryminer_monitor.pid ] && kill $(cat /var/run/fryminer_monitor.pid) 2>/dev/null  
-[ -f /var/run/fryminer_pid_sync.pid ] && kill $(cat /var/run/fryminer_pid_sync.pid) 2>/dev/null
-[ -f /opt/frynet-config/miner.pid ] && kill $(cat /opt/frynet-config/miner.pid) 2>/dev/null
-
-pkill -f "python3 -m http.server" 2>/dev/null || true
-pkill -f "fryminer_monitor" 2>/dev/null || true
-pkill -f "fryminer_pid_sync" 2>/dev/null || true
-pkill -x xmrig 2>/dev/null || true
-pkill -x cpuminer 2>/dev/null || true
-pkill -x minerd 2>/dev/null || true
-STOP
-        chmod +x /usr/local/bin/fryminer_stop
-        
-        # Enable the service
-        systemctl daemon-reload
-        systemctl enable fryminer.service
-        systemctl start fryminer.service
-        log "Systemd service installed and started"
-        
-    # Method 2: SysV init / OpenRC
-    elif [ -d /etc/init.d ]; then
-        log "Detected SysV/OpenRC init, creating init script..."
-        
-        cat > /etc/init.d/fryminer <<'SYSV'
-#!/bin/sh
-### BEGIN INIT INFO
-# Provides:          fryminer
-# Required-Start:    $network $remote_fs
-# Required-Stop:     $network $remote_fs
-# Default-Start:     2 3 4 5
-# Default-Stop:      0 1 6
-# Short-Description: FryMiner Web Interface
-# Description:       FryMiner mining configuration web interface
-### END INIT INFO
-
-case "$1" in
-    start)
-        echo "Starting FryMiner..."
-        /usr/local/bin/fryminer_startup
-        ;;
-    stop)
-        echo "Stopping FryMiner..."
-        /usr/local/bin/fryminer_stop
-        ;;
-    restart)
-        $0 stop
-        sleep 2
-        $0 start
-        ;;
-    status)
-        if [ -f /var/run/fryminer_web.pid ]; then
-            if kill -0 $(cat /var/run/fryminer_web.pid) 2>/dev/null; then
-                echo "FryMiner is running"
-            else
-                echo "FryMiner is not running (stale PID)"
-            fi
-        else
-            echo "FryMiner is not running"
-        fi
-        ;;
-    *)
-        echo "Usage: $0 {start|stop|restart|status}"
-        exit 1
-        ;;
-esac
-exit 0
-SYSV
-        
-        chmod +x /etc/init.d/fryminer
-        
-        # Create stop script for SysV  
-        cat > /usr/local/bin/fryminer_stop <<'STOP'
-#!/bin/sh
-# Save mining state if it was running and not manually stopped
-if [ -f /opt/frynet-config/miner.pid ]; then
-    PID=$(cat /opt/frynet-config/miner.pid)
-    if kill -0 "$PID" 2>/dev/null; then
-        PROCESS_NAME=$(ps -p "$PID" -o comm= 2>/dev/null || echo "")
-        if echo "$PROCESS_NAME" | grep -qE "xmrig|cpuminer|minerd"; then
-            if [ ! -f /opt/frynet-config/MINING_STOPPED ]; then
-                touch /opt/frynet-config/mining_was_running
-            fi
-        fi
-    fi
-fi
-
-# Stop all processes
-[ -f /var/run/fryminer_web.pid ] && kill $(cat /var/run/fryminer_web.pid) 2>/dev/null
-[ -f /var/run/fryminer_monitor.pid ] && kill $(cat /var/run/fryminer_monitor.pid) 2>/dev/null
-[ -f /var/run/fryminer_pid_sync.pid ] && kill $(cat /var/run/fryminer_pid_sync.pid) 2>/dev/null
-[ -f /opt/frynet-config/miner.pid ] && kill $(cat /opt/frynet-config/miner.pid) 2>/dev/null
-
-pkill -f "python3 -m http.server" 2>/dev/null || true
-pkill -f "fryminer_monitor" 2>/dev/null || true
-pkill -f "fryminer_pid_sync" 2>/dev/null || true
-pkill -x xmrig 2>/dev/null || true
-pkill -x cpuminer 2>/dev/null || true
-pkill -x minerd 2>/dev/null || true
-STOP
-        chmod +x /usr/local/bin/fryminer_stop
-        
-        # Enable service based on distribution
-        if command -v update-rc.d >/dev/null 2>&1; then
-            update-rc.d fryminer defaults
-            log "Service registered with update-rc.d"
-        elif command -v chkconfig >/dev/null 2>&1; then
-            chkconfig --add fryminer
-            chkconfig fryminer on
-            log "Service registered with chkconfig"
-        elif command -v rc-update >/dev/null 2>&1; then
-            rc-update add fryminer default
-            log "Service registered with rc-update (OpenRC)"
-        else
-            log "Manual service registration may be needed"
-        fi
-        
-        # Start the service
-        /etc/init.d/fryminer start
-        
-    # Method 3: rc.local fallback
-    elif [ -f /etc/rc.local ] || [ -d /etc/rc.d ]; then
-        log "Using rc.local for auto-start..."
-        
-        # Create stop script for rc.local method
-        cat > /usr/local/bin/fryminer_stop <<'STOP'
-#!/bin/sh
-if [ -f /opt/frynet-config/miner.pid ]; then
-    PID=$(cat /opt/frynet-config/miner.pid)
-    if kill -0 "$PID" 2>/dev/null; then
-        if [ ! -f /opt/frynet-config/MINING_STOPPED ]; then
-            touch /opt/frynet-config/mining_was_running
-        fi
-    fi
-fi
-
-pkill -f "python3 -m http.server" 2>/dev/null || true
-pkill -f "fryminer_monitor" 2>/dev/null || true
-pkill -f "fryminer_pid_sync" 2>/dev/null || true
-pkill -x xmrig 2>/dev/null || true
-pkill -x cpuminer 2>/dev/null || true
-pkill -x minerd 2>/dev/null || true
-[ -f /opt/frynet-config/miner.pid ] && kill $(cat /opt/frynet-config/miner.pid) 2>/dev/null
-STOP
-        chmod +x /usr/local/bin/fryminer_stop
-        
-        # Add to rc.local
-        if [ -f /etc/rc.local ]; then
-            sed -i '/fryminer_startup/d' /etc/rc.local
-            sed -i '/^exit 0/i /usr/local/bin/fryminer_startup &' /etc/rc.local
-            log "Added to /etc/rc.local"
-        fi
-        
-    # Method 4: Cron @reboot as last resort
-    else
-        log "Using cron @reboot for auto-start..."
-        (crontab -l 2>/dev/null | grep -v fryminer_startup; echo "@reboot /usr/local/bin/fryminer_startup") | crontab -
-        log "Added @reboot cron job"
-    fi
-}
-
-# All the miner installation functions remain the same...
-# [Keeping all the detect_arch, detect_os, install_dependencies, install_xmrig, install_cpuminer, etc. functions]
-# ... [Truncated for brevity - these don't change] ...
-
-# Main installation routine
-main() {
-    log "FryMiner Setup Starting - VERIFIED FINAL VERSION"
-    
-    # Set hostname first
-    set_hostname
-    
-    # Detect system
-    ARCH=$(uname -m | sed 's/x86_64/x86_64/;s/i.86/x86/;s/aarch64/arm64/;s/armv7.*/armv7/')
-    OS_TYPE="linux"
-    [ -f /etc/alpine-release ] && OS_TYPE="alpine"
-    
-    log "Detected architecture: $ARCH"
-    log "Detected OS type: $OS_TYPE"
-    
-    # Install dependencies
+# Install dependencies
+install_dependencies() {
     log "Installing dependencies..."
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update
-        apt-get install -y wget curl tar gzip unzip python3 build-essential git automake autoconf libcurl4-openssl-dev libjansson-dev libssl-dev libgmp-dev zlib1g-dev make g++ cmake libuv1-dev libhwloc-dev || true
-    elif command -v apk >/dev/null 2>&1; then
-        apk update
-        apk add wget curl tar gzip unzip python3 build-base git automake autoconf curl-dev jansson-dev openssl-dev gmp-dev zlib-dev make g++ cmake libuv-dev hwloc-dev || true
+        apt-get install -y wget curl tar gzip python3 build-essential git \
+            automake autoconf libcurl4-openssl-dev libjansson-dev libssl-dev \
+            libgmp-dev make g++ cmake ca-certificates lsof || true
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y wget curl tar gzip unzip python3 gcc gcc-c++ make git automake autoconf libcurl-devel jansson-devel openssl-devel gmp-devel zlib-devel cmake libuv-devel hwloc-devel || true
+        yum install -y wget curl tar gzip python3 gcc gcc-c++ make git \
+            automake autoconf libcurl-devel jansson-devel openssl-devel \
+            gmp-devel cmake ca-certificates lsof || true
     fi
+}
+
+# Install XMRig - SUPPORTS ALL ARCHITECTURES
+install_xmrig() {
+    log "=== Starting XMRig installation ==="
     
-    # Install miners if needed
-    if ! command -v xmrig >/dev/null 2>&1; then
-        log "Installing xmrig..."
-        mkdir -p /opt/miners
-        cd /opt/miners
-        wget --no-check-certificate https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-linux-x64.tar.gz -O xmrig.tar.gz 2>/dev/null || \
-        curl -L https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-linux-x64.tar.gz -o xmrig.tar.gz 2>/dev/null || \
-        warn "Failed to download xmrig"
-        
-        if [ -f xmrig.tar.gz ]; then
-            tar -xzf xmrig.tar.gz
-            find . -name "xmrig" -type f -executable | head -1 | while read -r binary; do
-                cp "$binary" /usr/local/bin/xmrig
-                chmod +x /usr/local/bin/xmrig
-            done
-            rm -rf xmrig*
+    # Test if existing xmrig works
+    if command -v xmrig >/dev/null 2>&1; then
+        log "Testing existing xmrig..."
+        if xmrig --version >/dev/null 2>&1; then
+            log "XMRig already installed and working"
+            return 0
+        else
+            warn "Existing XMRig is broken, reinstalling..."
+            rm -f /usr/local/bin/xmrig 2>/dev/null
         fi
     fi
     
-    # Create activity monitor (display only)
-    create_activity_monitor
+    log "Installing XMRig for $ARCH_TYPE..."
+    mkdir -p "$MINERS_DIR"
+    cd "$MINERS_DIR" || { warn "Failed to cd to $MINERS_DIR"; return 1; }
+    rm -rf xmrig xmrig.tar.gz xmrig-* 2>/dev/null
     
-    # Create PID sync daemon
-    create_pid_sync_daemon
+    case "$ARCH_TYPE" in
+        x86_64)
+            log "Downloading pre-built XMRig for x86_64..."
+            if command -v curl >/dev/null 2>&1; then
+                curl -sL -o xmrig.tar.gz "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-linux-x64.tar.gz"
+            elif command -v wget >/dev/null 2>&1; then
+                wget -q -O xmrig.tar.gz "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-linux-x64.tar.gz"
+            else
+                warn "Neither curl nor wget available"
+                return 1
+            fi
+            
+            if [ -f xmrig.tar.gz ]; then
+                log "Extracting..."
+                tar -xzf xmrig.tar.gz 2>/dev/null
+                find . -name "xmrig" -type f -executable -exec cp {} /usr/local/bin/xmrig \; 2>/dev/null
+                chmod +x /usr/local/bin/xmrig 2>/dev/null
+                rm -rf xmrig* 2>/dev/null
+            fi
+            ;;
+            
+        arm64)
+            log "Downloading pre-built XMRig for ARM64..."
+            if command -v curl >/dev/null 2>&1; then
+                curl -sL -o xmrig.tar.gz "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-linux-static-arm64.tar.gz" 2>/dev/null
+            elif command -v wget >/dev/null 2>&1; then
+                wget -q -O xmrig.tar.gz "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-linux-static-arm64.tar.gz" 2>/dev/null
+            fi
+            
+            if [ -f xmrig.tar.gz ] && tar -tzf xmrig.tar.gz >/dev/null 2>&1; then
+                log "Extracting..."
+                tar -xzf xmrig.tar.gz 2>/dev/null
+                find . -name "xmrig" -type f -executable -exec cp {} /usr/local/bin/xmrig \; 2>/dev/null
+                chmod +x /usr/local/bin/xmrig 2>/dev/null
+                rm -rf xmrig* 2>/dev/null
+            else
+                log "Building from source for ARM64..."
+                rm -f xmrig.tar.gz 2>/dev/null
+                git clone --depth 1 --progress https://github.com/xmrig/xmrig.git 2>&1 || return 1
+                cd xmrig || return 1
+                mkdir -p build && cd build || return 1
+                cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_HWLOC=OFF >/dev/null 2>&1
+                make -j"$(nproc)" >/dev/null 2>&1
+                cp xmrig /usr/local/bin/xmrig 2>/dev/null
+                cd "$MINERS_DIR"
+                rm -rf xmrig
+            fi
+            ;;
+            
+        armv7|armv6)
+            log "Building XMRig from source for $ARCH_TYPE (15-30 min)..."
+            git clone --depth 1 --progress https://github.com/xmrig/xmrig.git 2>&1 || return 1
+            cd xmrig || return 1
+            mkdir -p build && cd build || return 1
+            cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_HWLOC=OFF -DARM_TARGET=7 >/dev/null 2>&1
+            make -j"$(nproc)" >/dev/null 2>&1
+            cp xmrig /usr/local/bin/xmrig 2>/dev/null
+            cd "$MINERS_DIR"
+            rm -rf xmrig
+            ;;
+            
+        *)
+            log "Building XMRig from source for $ARCH_TYPE..."
+            git clone --depth 1 --progress https://github.com/xmrig/xmrig.git 2>&1 || return 1
+            cd xmrig || return 1
+            mkdir -p build && cd build || return 1
+            cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_HWLOC=OFF >/dev/null 2>&1
+            make -j"$(nproc)" >/dev/null 2>&1 || warn "XMRig build may have failed"
+            cp xmrig /usr/local/bin/xmrig 2>/dev/null
+            cd "$MINERS_DIR"
+            rm -rf xmrig
+            ;;
+    esac
     
-    # Set up web interface
-    log "Setting up FryMiner Web Interface..."
+    if command -v xmrig >/dev/null 2>&1; then
+        log "XMRig installed successfully"
+        xmrig --version 2>&1 | head -1 || true
+        return 0
+    else
+        warn "XMRig installation failed for $ARCH_TYPE"
+        return 1
+    fi
+}
+
+# Install cpuminer - FORCE REBUILD for compatibility - SUPPORTS ALL ARCHITECTURES
+install_cpuminer() {
+    log "=== Starting cpuminer installation ==="
     
-    # Stop any existing processes
-    pkill -f "python3 -m http.server $PORT" 2>/dev/null || true
-    pkill -f "fryminer_monitor" 2>/dev/null || true
-    pkill -f "fryminer_pid_sync" 2>/dev/null || true
+    # Remove existing binaries
+    log "Removing existing cpuminer binaries..."
+    rm -f /usr/local/bin/cpuminer /usr/local/bin/minerd /usr/local/bin/cpuminer-opt /usr/local/bin/cpuminer-multi 2>/dev/null
+    rm -f /usr/bin/cpuminer /usr/bin/minerd 2>/dev/null
+    rm -f /opt/miners/cpuminer /opt/miners/minerd 2>/dev/null
+    log "Binaries removed"
     
-    # Prepare directories
+    # Check for git
+    log "Checking for git..."
+    if ! command -v git >/dev/null 2>&1; then
+        warn "git not found - attempting to install..."
+        apt-get install -y git 2>/dev/null || yum install -y git 2>/dev/null || {
+            warn "Could not install git - cpuminer installation skipped"
+            return 1
+        }
+    fi
+    log "git is available"
+    
+    # Setup build directory
+    log "Setting up build directory..."
+    mkdir -p "$MINERS_DIR"
+    cd "$MINERS_DIR" || {
+        warn "Failed to cd to $MINERS_DIR"
+        return 1
+    }
+    log "Working in $MINERS_DIR"
+    
+    # Clean old builds
+    log "Cleaning old builds..."
+    rm -rf cpuminer-opt cpuminer-multi pooler-cpuminer 2>/dev/null
+    log "Old builds cleaned"
+    
+    log "Architecture: $ARCH_TYPE"
+    
+    # Build based on architecture
+    case "$ARCH_TYPE" in
+        x86_64)
+            log "=== Building cpuminer-multi for x86_64 ==="
+            log "Cloning repository..."
+            if git clone --depth 1 --progress https://github.com/tpruvot/cpuminer-multi.git 2>&1; then
+                log "Clone complete"
+            else
+                warn "Failed to clone cpuminer-multi - check network"
+                return 1
+            fi
+            
+            cd cpuminer-multi || { warn "Failed to cd"; return 1; }
+            
+            log "Running autogen.sh..."
+            if ! ./autogen.sh >/dev/null 2>&1; then
+                warn "autogen failed"
+                return 1
+            fi
+            log "autogen complete"
+            
+            log "Running configure..."
+            CFLAGS="-O2 -march=x86-64 -mtune=generic" ./configure --with-curl --with-crypto >/dev/null 2>&1 || {
+                warn "configure failed"
+                return 1
+            }
+            log "configure complete"
+            
+            log "Compiling (this takes a few minutes)..."
+            if make -j"$(nproc)" >/dev/null 2>&1; then
+                log "Compilation successful"
+                cp cpuminer /usr/local/bin/cpuminer
+                chmod +x /usr/local/bin/cpuminer
+                ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                cd "$MINERS_DIR"
+                rm -rf cpuminer-multi
+                log "cpuminer-multi installed successfully"
+                /usr/local/bin/cpuminer --version 2>&1 | head -1 || true
+                return 0
+            else
+                warn "make failed, trying pooler cpuminer..."
+            fi
+            
+            cd "$MINERS_DIR"
+            rm -rf cpuminer-multi
+            
+            # Fallback to pooler
+            log "=== Trying pooler cpuminer ==="
+            git clone --depth 1 --progress https://github.com/pooler/cpuminer.git pooler-cpuminer 2>&1 || {
+                warn "Failed to clone pooler cpuminer"
+                return 1
+            }
+            cd pooler-cpuminer || return 1
+            ./autogen.sh >/dev/null 2>&1
+            CFLAGS="-O2 -march=x86-64" ./configure >/dev/null 2>&1
+            
+            if make -j"$(nproc)" >/dev/null 2>&1; then
+                cp minerd /usr/local/bin/cpuminer
+                chmod +x /usr/local/bin/cpuminer
+                ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                cd "$MINERS_DIR"
+                rm -rf pooler-cpuminer
+                log "pooler cpuminer installed successfully"
+                return 0
+            fi
+            ;;
+            
+        x86)
+            log "=== Building cpuminer-multi for x86 32-bit ==="
+            git clone --depth 1 --progress https://github.com/tpruvot/cpuminer-multi.git 2>&1 || return 1
+            cd cpuminer-multi || return 1
+            ./autogen.sh >/dev/null 2>&1
+            CFLAGS="-O2 -march=i686" ./configure --with-curl --with-crypto >/dev/null 2>&1
+            
+            if make -j"$(nproc)" >/dev/null 2>&1; then
+                cp cpuminer /usr/local/bin/cpuminer
+                chmod +x /usr/local/bin/cpuminer
+                ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                cd "$MINERS_DIR"
+                rm -rf cpuminer-multi
+                log "cpuminer-multi installed for x86"
+                return 0
+            fi
+            ;;
+            
+        arm64)
+            log "=== Building cpuminer-opt for ARM64 ==="
+            log "Cloning cpuminer-opt..."
+            git clone --depth 1 --progress https://github.com/JayDDee/cpuminer-opt.git 2>&1 || {
+                warn "Failed to clone"
+                return 1
+            }
+            cd cpuminer-opt || return 1
+            
+            log "Running autogen..."
+            ./autogen.sh >/dev/null 2>&1
+            
+            log "Configuring..."
+            CFLAGS="-O2" ./configure --disable-assembly >/dev/null 2>&1
+            
+            log "Compiling (10-15 minutes on ARM)..."
+            if make -j"$(nproc)" >/dev/null 2>&1; then
+                cp cpuminer /usr/local/bin/cpuminer
+                chmod +x /usr/local/bin/cpuminer
+                ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                cd "$MINERS_DIR"
+                rm -rf cpuminer-opt
+                log "cpuminer-opt installed for ARM64"
+                /usr/local/bin/cpuminer --version 2>&1 | head -1 || true
+                return 0
+            fi
+            ;;
+            
+        armv7)
+            log "=== Building cpuminer-opt for ARMv7 ==="
+            git clone --depth 1 --progress https://github.com/JayDDee/cpuminer-opt.git 2>&1 || return 1
+            cd cpuminer-opt || return 1
+            ./autogen.sh >/dev/null 2>&1
+            
+            log "Configuring with NEON..."
+            CFLAGS="-O2 -mfpu=neon-vfpv4 -mfloat-abi=hard" ./configure --disable-assembly >/dev/null 2>&1 || {
+                log "NEON failed, trying without..."
+                CFLAGS="-O2" ./configure --disable-assembly >/dev/null 2>&1
+            }
+            
+            log "Compiling (15-20 minutes)..."
+            if make -j"$(nproc)" >/dev/null 2>&1; then
+                cp cpuminer /usr/local/bin/cpuminer
+                chmod +x /usr/local/bin/cpuminer
+                ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                cd "$MINERS_DIR"
+                rm -rf cpuminer-opt
+                log "cpuminer-opt installed for ARMv7"
+                return 0
+            fi
+            ;;
+            
+        armv6)
+            log "=== Building for ARMv6 (Pi Zero) ==="
+            log "Trying pooler cpuminer (most compatible)..."
+            git clone --depth 1 --progress https://github.com/pooler/cpuminer.git pooler-cpuminer 2>&1 || return 1
+            cd pooler-cpuminer || return 1
+            ./autogen.sh >/dev/null 2>&1
+            CFLAGS="-O2" ./configure >/dev/null 2>&1
+            
+            log "Compiling (20-30 minutes on Pi Zero)..."
+            if make -j"$(nproc)" >/dev/null 2>&1; then
+                cp minerd /usr/local/bin/cpuminer
+                chmod +x /usr/local/bin/cpuminer
+                ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                cd "$MINERS_DIR"
+                rm -rf pooler-cpuminer
+                log "pooler cpuminer installed for ARMv6"
+                return 0
+            fi
+            ;;
+            
+        *)
+            log "=== Building pooler cpuminer for $ARCH_TYPE ==="
+            git clone --depth 1 --progress https://github.com/pooler/cpuminer.git pooler-cpuminer 2>&1 || return 1
+            cd pooler-cpuminer || return 1
+            ./autogen.sh >/dev/null 2>&1
+            CFLAGS="-O2" ./configure >/dev/null 2>&1
+            
+            if make -j"$(nproc)" >/dev/null 2>&1; then
+                cp minerd /usr/local/bin/cpuminer
+                chmod +x /usr/local/bin/cpuminer
+                ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                cd "$MINERS_DIR"
+                rm -rf pooler-cpuminer
+                log "pooler cpuminer installed for $ARCH_TYPE"
+                return 0
+            fi
+            ;;
+    esac
+    
+    cd "$MINERS_DIR" 2>/dev/null
+    rm -rf cpuminer-opt cpuminer-multi pooler-cpuminer 2>/dev/null
+    warn "cpuminer installation failed"
+    return 1
+}
+
+# Main installation
+main() {
+    log "================================================"
+    log "FryMiner Complete Setup Starting..."
+    log "================================================"
+    
+    detect_architecture
+    set_hostname
+    install_dependencies
+    
+    # Install miners
+    install_xmrig
+    install_cpuminer
+    
+    # Stop any existing FryMiner processes gracefully
+    log "Stopping existing FryMiner processes..."
+    
+    # Stop web server
+    if pgrep -f "python3 -m http.server $PORT" >/dev/null 2>&1; then
+        pkill -f "python3 -m http.server $PORT" 2>/dev/null || true
+        sleep 1
+    fi
+    
+    # Stop miners
+    pkill -f xmrig 2>/dev/null || true
+    pkill -f cpuminer 2>/dev/null || true
+    pkill -f minerd 2>/dev/null || true
+    
+    # Stop old daemons
+    pkill -f fryminer_pidmon 2>/dev/null || true
+    pkill -f fryminer_thermal 2>/dev/null || true
+    
+    # Wait for processes to stop
+    sleep 2
+    
+    # Setup directory structure
+    log "Setting up FryMiner directory..."
     rm -rf "$BASE"
-    mkdir -p "$BASE/cgi-bin" "$BASE/output" "$BASE/logs"
-    chmod -R 777 "$BASE"
+    mkdir -p "$BASE"
+    mkdir -p "$BASE/cgi-bin"
+    mkdir -p "$BASE/output"
+    mkdir -p "$BASE/logs"
     
-    # Clean up any old flags
-    rm -f "$BASE/MINING_STOPPED" "$BASE/mining_was_running"
+    # Set permissions
+    chmod 777 "$BASE"
+    chmod 777 "$BASE/cgi-bin"
+    chmod 777 "$BASE/output"
+    chmod 777 "$BASE/logs"
     
-    # Write HTML page
+    log "Creating web interface..."
+    
+    # Create index.html with ALL coins and full UI
     cat > "$BASE/index.html" <<'HTML'
 <!DOCTYPE html>
-<html><head>
+<html>
+<head>
 <meta charset="UTF-8">
-<title>FryMiner Config</title>
+<title>FryMiner Control Panel</title>
 <style>
-body { font-family: Arial, sans-serif; margin: 20px; }
-.status-running { color: green; font-weight: bold; }
-.status-stopped { color: red; font-weight: bold; }
-input, select { margin: 5px 0; padding: 5px; }
-button { margin: 5px; padding: 8px 15px; cursor: pointer; }
-.success { color: green; }
-.error { color: red; }
-iframe { border: 1px solid #ccc; }
+body { 
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 50%, #1a1a1a 100%);
+    color: #fff;
+    margin: 0;
+    padding: 20px;
+}
+.container { 
+    max-width: 1200px;
+    margin: 0 auto;
+    background: #0a0a0a;
+    border-radius: 20px;
+    box-shadow: 0 20px 60px rgba(255, 0, 0, 0.1);
+    border: 1px solid rgba(255, 0, 0, 0.2);
+}
+.header {
+    background: linear-gradient(135deg, #000000 0%, #1a0000 50%, #000000 100%);
+    color: white;
+    padding: 30px;
+    text-align: center;
+    border-bottom: 3px solid #dc143c;
+    position: relative;
+}
+h1 {
+    font-size: 2.5em;
+    margin-bottom: 10px;
+    text-shadow: 0 0 20px rgba(220, 20, 60, 0.5);
+    background: linear-gradient(90deg, #ffffff, #dc143c, #ffffff);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+.tabs {
+    display: flex;
+    background: #0f0f0f;
+    border-bottom: 2px solid #dc143c;
+}
+.tab {
+    flex: 1;
+    padding: 15px;
+    text-align: center;
+    cursor: pointer;
+    color: #888;
+    background: #0a0a0a;
+}
+.tab:hover { background: #1a0000; color: #dc143c; }
+.tab.active { background: #0f0f0f; color: #dc143c; font-weight: 600; }
+.content { padding: 30px; background: #0f0f0f; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.form-group { margin-bottom: 25px; }
+.form-group label { display: block; margin-bottom: 8px; color: #dc143c; }
+.form-group input, .form-group select {
+    width: 100%;
+    padding: 12px;
+    border: 2px solid #2a2a2a;
+    border-radius: 8px;
+    background: #1a1a1a;
+    color: #fff;
+    box-sizing: border-box;
+}
+button {
+    padding: 15px 30px;
+    border: none;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #dc143c 0%, #8b0000 100%);
+    color: white;
+    cursor: pointer;
+    margin: 10px;
+    font-size: 1.1em;
+}
+button:hover { transform: translateY(-2px); }
+.success { background: #1a3d1a; color: #4caf50; padding: 15px; border-radius: 5px; margin: 10px 0; }
+.error { background: #3d1a1a; color: #f44336; padding: 15px; border-radius: 5px; margin: 10px 0; }
+.status-card { background: #1a1a1a; padding: 20px; margin: 20px 0; border-radius: 10px; border: 1px solid #dc143c; }
+.log-viewer { background: #000; color: #0f0; padding: 15px; height: 300px; overflow-y: auto; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-top: 20px; }
+.stat-card { background: #1a1a1a; border: 2px solid #dc143c; border-radius: 12px; padding: 20px; text-align: center; }
+.stat-value { font-size: 2em; color: #dc143c; font-weight: 700; }
+.stat-label { color: #888; font-size: 0.9em; text-transform: uppercase; }
+optgroup { background: #1a1a1a; color: #dc143c; }
+.info-box { background: #1a2a1a; border: 1px solid #4caf50; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 0.9em; }
+.warning-box { background: #2a2a1a; border: 1px solid #ffa500; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 0.9em; }
 </style>
-</head><body>
-<h2>FryMiner Web Config</h2>
-<div id="status-message"></div>
-<form method="POST" action="/cgi-bin/save_config.cgi" id="configForm">
-  <label>Miner:</label>
-  <select name="miner" id="miner" onchange="adjust()">
-    <option value="">-- select --</option>
-    <option value="ape">ApeCoin</option><option value="babydoge">Baby Doge</option>
-    <option value="bome">Book of Meme</option><option value="clore">Clore AI</option>
-    <option value="elon">Dogelon Mars</option><option value="wif">dogwifhat</option>
-    <option value="erg">Ergo</option><option value="etc">Ethereum Classic</option>
-    <option value="eth">Ethereum</option><option value="kda">Kadena</option>
-    <option value="kaspa">Kaspa</option><option value="nano">Nano</option>
-    <option value="pepe">Pepe</option><option value="shib">Shiba Inu</option>
-    <option value="sol">Solana</option><option value="wen">Wen</option>
-    <option value="zec">ZCash</option>
-    <option value="btc">Bitcoin</option><option value="lotto">Bitcoin Lottery</option>
-    <option value="dash">Dash</option><option value="dcr">Decred</option>
-    <option value="doge">Dogecoin</option><option value="ltc">Litecoin</option>
-    <option value="zen">Horizen</option>
-  </select><br>
-  <label>Wallet:</label><input name="wallet" id="wallet"><br>
-  <label>Worker:</label><input name="worker" id="worker" value="worker1"><br>
-  <label>Pool:</label><input name="pool" id="pool"><br>
-  <input type="submit" value="Save Config">
-</form>
-
-<p>
-  <button onclick="startMining()">Start Mining</button>
-  <button onclick="stopMining()">Stop Mining</button>
-  <button onclick="loadConfig()">Reload Config</button>
-</p>
-<h3>Status: <span id="mining-status">Loading...</span></h3>
-<h3>Miner Log:</h3>
-<iframe src="/logs/log.txt" width="100%" height="300" id="logFrame" onload="scrollLogToBottom()"></iframe>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>⛏️ FryMiner Control Panel</h1>
+        <div style="color: #ff6b6b;">Professional Cryptocurrency Mining System - 35+ Coins Supported</div>
+    </div>
+    
+    <div class="tabs">
+        <div class="tab active" onclick="showTab('configure')">⚙️ Configure</div>
+        <div class="tab" onclick="showTab('monitor')">📊 Monitor</div>
+        <div class="tab" onclick="showTab('statistics')">📈 Statistics</div>
+    </div>
+    
+    <div class="content">
+        <div id="configure" class="tab-content active">
+            <h2 style="color: #dc143c;">Mining Configuration</h2>
+            
+            <form id="configForm">
+                <div class="form-group">
+                    <label>Select Cryptocurrency:</label>
+                    <select id="miner" name="miner" required>
+                        <option value="">-- Select Coin --</option>
+                        <optgroup label="Popular Coins">
+                            <option value="btc">Bitcoin (BTC) - SHA256d</option>
+                            <option value="ltc">Litecoin (LTC) - Scrypt</option>
+                            <option value="doge">Dogecoin (DOGE) - Scrypt</option>
+                            <option value="xmr">Monero (XMR) - RandomX</option>
+                        </optgroup>
+                        <optgroup label="CPU Mineable">
+                            <option value="scala">Scala (XLA) - Panthera</option>
+                            <option value="verus">Verus (VRSC) - VerusHash</option>
+                            <option value="aeon">Aeon (AEON) - K12</option>
+                            <option value="dero">Dero (DERO) - AstroBWT</option>
+                            <option value="yadacoin">Yadacoin (YDA) - RandomX</option>
+                            <option value="arionum">Arionum (ARO) - Argon2</option>
+                        </optgroup>
+                        <optgroup label="Other Minable">
+                            <option value="dash">Dash (DASH) - X11</option>
+                            <option value="dcr">Decred (DCR) - Blake256</option>
+                            <option value="zen">Horizen (ZEN) - Equihash</option>
+                        </optgroup>
+                        <optgroup label="Solo Lottery Mining">
+                            <option value="bch-lotto">Bitcoin Cash Lottery (BCH)</option>
+                            <option value="ltc-lotto">Litecoin Lottery (LTC)</option>
+                            <option value="doge-lotto">Dogecoin Lottery (DOGE)</option>
+                            <option value="xmr-lotto">Monero Lottery (XMR)</option>
+                        </optgroup>
+                        <optgroup label="Unmineable Coins">
+                            <option value="shib">Shiba Inu (SHIB)</option>
+                            <option value="ada">Cardano (ADA)</option>
+                            <option value="sol">Solana (SOL)</option>
+                            <option value="zec">Zcash (ZEC)</option>
+                            <option value="rvn">Ravencoin (RVN)</option>
+                            <option value="trx">Tron (TRX)</option>
+                            <option value="vet">VeChain (VET)</option>
+                            <option value="xrp">Ripple (XRP)</option>
+                            <option value="dot">Polkadot (DOT)</option>
+                            <option value="matic">Polygon (MATIC)</option>
+                            <option value="atom">Cosmos (ATOM)</option>
+                            <option value="link">Chainlink (LINK)</option>
+                            <option value="xlm">Stellar (XLM)</option>
+                            <option value="algo">Algorand (ALGO)</option>
+                            <option value="avax">Avalanche (AVAX)</option>
+                            <option value="near">NEAR Protocol (NEAR)</option>
+                            <option value="ftm">Fantom (FTM)</option>
+                            <option value="one">Harmony (ONE)</option>
+                        </optgroup>
+                        <optgroup label="Special Mining">
+                            <option value="tera">TERA (Node Mining)</option>
+                            <option value="minima">Minima (Mobile Only)</option>
+                        </optgroup>
+                    </select>
+                </div>
+                
+                <div id="coinInfo" class="info-box" style="display:none;"></div>
+                
+                <div class="form-group">
+                    <label>Wallet Address:</label>
+                    <input type="text" id="wallet" name="wallet" required placeholder="Enter your wallet address">
+                </div>
+                
+                <div class="form-group">
+                    <label>Worker Name:</label>
+                    <input type="text" id="worker" name="worker" value="worker1">
+                </div>
+                
+                <div class="form-group">
+                    <label>CPU Threads:</label>
+                    <input type="number" id="threads" name="threads" min="1" max="128" value="2">
+                </div>
+                
+                <div class="form-group" id="poolGroup">
+                    <label>Mining Pool:</label>
+                    <input type="text" id="pool" name="pool" placeholder="pool.example.com:3333">
+                    <small style="color: #888;">Enter without stratum+tcp:// prefix (will be added automatically)</small>
+                </div>
+                
+                <button type="submit">💾 Save Configuration</button>
+            </form>
+            
+            <div id="message"></div>
+            
+            <div style="text-align: center; margin-top: 20px;">
+                <button onclick="startMining()">▶️ Start Mining</button>
+                <button onclick="stopMining()">⏹️ Stop Mining</button>
+            </div>
+        </div>
+        
+        <div id="monitor" class="tab-content">
+            <h2 style="color: #dc143c;">Mining Monitor</h2>
+            
+            <div class="status-card">
+                <h3>Status: <span id="statusText">Checking...</span></h3>
+                <p>Temperature: <span id="temperature">--°C</span></p>
+                <p>Current Coin: <span id="currentCoin">None</span></p>
+            </div>
+            
+            <div class="status-card">
+                <h3>Activity Log</h3>
+                <div class="log-viewer" id="logViewer">Loading...</div>
+            </div>
+            
+            <button onclick="refreshLogs()">🔄 Refresh Logs</button>
+            <button onclick="clearLogs()">🗑️ Clear Logs</button>
+        </div>
+        
+        <div id="statistics" class="tab-content">
+            <h2 style="color: #dc143c;">Mining Statistics</h2>
+            
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value" id="hashrate">0 H/s</div>
+                    <div class="stat-label">Hashrate</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="shares">0</div>
+                    <div class="stat-label">Accepted Shares</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="uptime">0h</div>
+                    <div class="stat-label">Uptime</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="efficiency">0%</div>
+                    <div class="stat-label">Efficiency</div>
+                </div>
+            </div>
+            
+            <div class="status-card" style="margin-top: 20px;">
+                <h3>Session Info</h3>
+                <p>Algorithm: <span id="currentAlgo">--</span></p>
+                <p>Pool: <span id="currentPool">--</span></p>
+                <p>Difficulty: <span id="currentDiff">--</span></p>
+            </div>
+        </div>
+    </div>
+</div>
 
 <script>
-const unmine = [
-  'ape','babydoge','bome','clore','elon','wif','erg',
-  'etc','eth','kda','kaspa','nano','pepe','shib','sol','wen','zec'
-];
+// Default pools for each coin
+const defaultPools = {
+    'btc': 'pool.btc.com:3333',
+    'ltc': 'litecoin.nerdpool.xyz:5320',
+    'doge': 'prohashing.com:3332',
+    'xmr': 'pool.supportxmr.com:3333',
+    'scala': 'scala.herominers.com:10131',
+    'verus': 'pool.verus.io:9999',
+    'aeon': 'aeon.herominers.com:10650',
+    'dero': 'dero-node-sk.mysrv.cloud:10300',
+    'yadacoin': 'pool.yadacoin.io:3333',
+    'arionum': 'aropool.com:80',
+    'dash': 'dash.suprnova.cc:9989',
+    'dcr': 'dcr.suprnova.cc:3252',
+    'zen': 'zen.suprnova.cc:3618',
+    'bch-lotto': 'bch.solopool.org:3333',
+    'ltc-lotto': 'litesolo.org:3333',
+    'doge-lotto': 'litesolo.org:3334',
+    'xmr-lotto': 'xmr.solopool.org:3333',
+    'shib': 'rx.unmineable.com:3333',
+    'ada': 'rx.unmineable.com:3333',
+    'sol': 'rx.unmineable.com:3333',
+    'zec': 'rx.unmineable.com:3333',
+    'rvn': 'rx.unmineable.com:3333',
+    'trx': 'rx.unmineable.com:3333',
+    'vet': 'rx.unmineable.com:3333',
+    'xrp': 'rx.unmineable.com:3333',
+    'dot': 'rx.unmineable.com:3333',
+    'matic': 'rx.unmineable.com:3333',
+    'atom': 'rx.unmineable.com:3333',
+    'link': 'rx.unmineable.com:3333',
+    'xlm': 'rx.unmineable.com:3333',
+    'algo': 'rx.unmineable.com:3333',
+    'avax': 'rx.unmineable.com:3333',
+    'near': 'rx.unmineable.com:3333',
+    'ftm': 'rx.unmineable.com:3333',
+    'one': 'rx.unmineable.com:3333'
+};
 
-function scrollLogToBottom() {
-    const frame = document.getElementById('logFrame');
-    if (frame && frame.contentWindow) {
-        frame.contentWindow.scrollTo(0, frame.contentDocument.body.scrollHeight);
+// Fixed pools (cannot be changed)
+const fixedPools = ['bch-lotto', 'ltc-lotto', 'doge-lotto', 'xmr-lotto', 'shib', 'ada', 'sol', 'zec', 'rvn', 'trx', 'vet', 'xrp', 'dot', 'matic', 'atom', 'link', 'xlm', 'algo', 'avax', 'near', 'ftm', 'one'];
+
+// Coin info messages
+const coinInfo = {
+    'tera': '⚠️ TERA requires running a full node. Visit teraexplorer.org for setup instructions.',
+    'minima': '⚠️ Minima is mobile-only. Download the Minima app from your app store.',
+    'bch-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!',
+    'ltc-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!',
+    'doge-lotto': '🎰 Solo lottery mining - merged with LTC, very low odds!',
+    'xmr-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!'
+};
+
+function showTab(tabName) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    event.target.classList.add('active');
+    document.getElementById(tabName).classList.add('active');
+    if (tabName === 'monitor') refreshLogs();
+    if (tabName === 'statistics') {
+        updateStats();
+        // Start stats refresh when on statistics tab
+        if (!window.statsInterval) {
+            window.statsInterval = setInterval(updateStats, 5000);
+        }
+    } else {
+        // Stop stats refresh when leaving statistics tab
+        if (window.statsInterval) {
+            clearInterval(window.statsInterval);
+            window.statsInterval = null;
+        }
     }
 }
 
-window.onload = function() {
-    loadConfig();
-    updateStatus();
-    setInterval(function() {
-        const frame = document.getElementById('logFrame');
-        frame.src = '/logs/log.txt?' + new Date().getTime();
-        updateStatus();
-    }, 5000);
-};
+document.getElementById('miner').addEventListener('change', function() {
+    const coin = this.value;
+    const poolGroup = document.getElementById('poolGroup');
+    const poolInput = document.getElementById('pool');
+    const infoBox = document.getElementById('coinInfo');
+    
+    // Show/hide pool field
+    if (coin === 'tera' || coin === 'minima') {
+        poolGroup.style.display = 'none';
+    } else {
+        poolGroup.style.display = 'block';
+        if (defaultPools[coin]) {
+            poolInput.value = defaultPools[coin];
+        }
+        poolInput.disabled = fixedPools.includes(coin);
+    }
+    
+    // Show coin info if available
+    if (coinInfo[coin]) {
+        infoBox.innerHTML = coinInfo[coin];
+        infoBox.style.display = 'block';
+    } else {
+        infoBox.style.display = 'none';
+    }
+});
+
+document.getElementById('configForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    
+    // Validate threads
+    const threadsInput = document.getElementById('threads');
+    const maxThreads = parseInt(threadsInput.max) || 32;
+    const threads = parseInt(threadsInput.value) || 1;
+    if (threads > maxThreads) {
+        document.getElementById('message').innerHTML = '<div class="error">❌ Cannot use more than ' + maxThreads + ' threads on this system</div>';
+        return;
+    }
+    if (threads < 1) {
+        threadsInput.value = 1;
+    }
+    
+    const formData = new FormData(this);
+    const params = new URLSearchParams();
+    for (const [key, value] of formData) params.append(key, value);
+    
+    fetch('/cgi-bin/save.cgi', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: params.toString()
+    })
+    .then(r => r.text())
+    .then(result => {
+        document.getElementById('message').innerHTML = result;
+        loadConfig();
+    });
+});
 
 function loadConfig() {
-    fetch('/cgi-bin/load_config.cgi')
-        .then(response => response.text())
+    fetch('/cgi-bin/load.cgi')
+        .then(r => r.json())
         .then(data => {
-            try {
-                const config = JSON.parse(data);
-                if (config.miner) document.getElementById('miner').value = config.miner;
-                if (config.wallet) document.getElementById('wallet').value = config.wallet;
-                if (config.worker) document.getElementById('worker').value = config.worker;
-                if (config.pool) document.getElementById('pool').value = config.pool;
-                adjust();
-            } catch (e) {
-                console.log('No config found');
+            if (data.miner) {
+                document.getElementById('miner').value = data.miner;
+                document.getElementById('wallet').value = data.wallet;
+                document.getElementById('worker').value = data.worker || 'worker1';
+                document.getElementById('threads').value = data.threads || '2';
+                if (data.pool) document.getElementById('pool').value = data.pool;
+                document.getElementById('miner').dispatchEvent(new Event('change'));
+                document.getElementById('currentCoin').textContent = data.miner.toUpperCase();
+                document.getElementById('currentPool').textContent = data.pool || 'Default';
             }
+        })
+        .catch(() => {});
+}
+
+function checkStatus() {
+    fetch('/cgi-bin/status.cgi')
+        .then(r => r.json())
+        .then(data => {
+            const statusEl = document.getElementById('statusText');
+            if (data.crashed && !data.running) {
+                statusEl.textContent = 'Miner Crashed ❌';
+                statusEl.style.color = '#ff6b6b';
+            } else if (data.running) {
+                statusEl.textContent = 'Mining Active ✅';
+                statusEl.style.color = '#4caf50';
+            } else {
+                statusEl.textContent = 'Mining Stopped ⏹️';
+                statusEl.style.color = '#f44336';
+            }
+        })
+        .catch(() => {});
+    
+    fetch('/cgi-bin/thermal.cgi')
+        .then(r => r.json())
+        .then(data => {
+            const temp = data.temperature;
+            document.getElementById('temperature').textContent = temp + '°C';
+            document.getElementById('temperature').style.color = 
+                temp > 80 ? '#f44336' : temp > 60 ? '#ffa500' : '#4caf50';
+        })
+        .catch(() => {});
+}
+
+function refreshLogs() {
+    fetch('/logs/miner.log')
+        .then(r => r.text())
+        .then(logs => {
+            const viewer = document.getElementById('logViewer');
+            viewer.textContent = logs.split('\n').slice(-100).join('\n');
+            viewer.scrollTop = viewer.scrollHeight;
+        })
+        .catch(() => {
+            document.getElementById('logViewer').textContent = 'No logs available';
         });
 }
 
-function adjust(){
-    var m = document.getElementById('miner').value.toLowerCase();
-    var p = document.getElementById('pool');
-    var w = document.getElementById('wallet');
-    if(unmine.indexOf(m) !== -1){
-        p.value = 'rx.unmineable.com:3333';
-        p.disabled = true;
-        if(w.value && !w.value.startsWith(m.toUpperCase()+':')){
-            w.value = m.toUpperCase()+':' + w.value.replace(/^[A-Z]+:/, '');
-        } else if(!w.value) {
-            w.value = m.toUpperCase()+':';
-        }
-    }else if(m === 'lotto'){
-        p.value = 'solo.ckpool.org:3333';
-        p.disabled = true;
-        var cur = w.value || '';
-        var idx = cur.indexOf(':');
-        if(idx !== -1) w.value = cur.substring(idx+1);
-    }else{
-        p.disabled = false;
-        if(p.value === 'rx.unmineable.com:3333' || p.value === 'solo.ckpool.org:3333') p.value='';
-        var c2 = w.value||'';
-        var id2 = c2.indexOf(':');
-        if(id2 !== -1) w.value = c2.substring(id2+1);
-    }
+function clearLogs() {
+    fetch('/cgi-bin/clearlogs.cgi')
+        .then(() => refreshLogs());
+}
+
+function updateStats() {
+    fetch('/cgi-bin/stats.cgi')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('hashrate').textContent = data.hashrate || '--';
+            document.getElementById('shares').textContent = data.shares || '0';
+            document.getElementById('uptime').textContent = data.uptime || '0h 0m';
+            document.getElementById('efficiency').textContent = (data.efficiency || 0) + '%';
+            document.getElementById('currentAlgo').textContent = data.algo || '--';
+            document.getElementById('currentDiff').textContent = data.diff || '--';
+            document.getElementById('currentPool').textContent = data.pool || '--';
+        })
+        .catch(() => {
+            document.getElementById('hashrate').textContent = '--';
+        });
 }
 
 function startMining() {
+    document.getElementById('message').innerHTML = '<div class="info-box">Starting miner...</div>';
     fetch('/cgi-bin/start.cgi')
-        .then(response => response.text())
-        .then(data => {
-            document.getElementById('status-message').innerHTML = data;
-            updateStatus();
-            setTimeout(() => {
-                document.getElementById('status-message').innerHTML = '';
-            }, 3000);
+        .then(r => r.text())
+        .then(result => {
+            document.getElementById('message').innerHTML = result;
+            setTimeout(checkStatus, 3000);
         });
 }
 
 function stopMining() {
     fetch('/cgi-bin/stop.cgi')
-        .then(response => response.text())
-        .then(data => {
-            document.getElementById('status-message').innerHTML = data;
-            updateStatus();
-            setTimeout(() => {
-                document.getElementById('status-message').innerHTML = '';
-            }, 3000);
+        .then(r => r.text())
+        .then(result => {
+            document.getElementById('message').innerHTML = result;
+            checkStatus();
         });
 }
 
-function updateStatus() {
-    fetch('/logs/status.txt?' + new Date().getTime())
-        .then(response => response.text())
+// Initialize
+loadConfig();
+checkStatus();
+fetchCpuCores();
+setInterval(checkStatus, 5000);
+setInterval(refreshLogs, 10000);
+
+// Fetch CPU cores and set max threads
+function fetchCpuCores() {
+    fetch('/cgi-bin/cores.cgi')
+        .then(r => r.json())
         .then(data => {
-            const statusEl = document.getElementById('mining-status');
-            if (data.includes('RUNNING')) {
-                statusEl.className = 'status-running';
-                statusEl.textContent = 'RUNNING';
-            } else {
-                statusEl.className = 'status-stopped';
-                statusEl.textContent = 'STOPPED';
+            const threadsInput = document.getElementById('threads');
+            threadsInput.max = data.cores;
+            threadsInput.placeholder = '1-' + data.cores;
+            // Add label hint
+            const label = threadsInput.previousElementSibling;
+            if (label && !label.textContent.includes('(')) {
+                label.textContent = 'CPU Threads (max ' + data.cores + '):';
             }
-        });
+        })
+        .catch(() => {});
 }
-
-document.getElementById('configForm').onsubmit = function() {
-    event.preventDefault();
-    const data = new FormData(this);
-    fetch('/cgi-bin/save_config.cgi', {
-        method: 'POST',
-        body: new URLSearchParams(data)
-    })
-    .then(response => response.text())
-    .then(html => {
-        document.getElementById('status-message').innerHTML = html;
-        setTimeout(() => {
-            document.getElementById('status-message').innerHTML = '';
-            loadConfig();
-        }, 2000);
-    });
-    return false;
-};
 </script>
-</body></html>
+</body>
+</html>
 HTML
     
-    # Save config CGI
-    cat > "$BASE/cgi-bin/save_config.cgi" <<'CGI'
+    # Create CGI scripts
+    log "Creating CGI scripts..."
+    
+    # Info CGI
+    cat > "$BASE/cgi-bin/info.cgi" <<'SCRIPT'
+#!/bin/sh
+echo "Content-type: text/plain"
+echo ""
+uname -m
+SCRIPT
+    chmod 755 "$BASE/cgi-bin/info.cgi"
+    
+    # CPU Cores CGI - Returns number of CPU cores
+    cat > "$BASE/cgi-bin/cores.cgi" <<'SCRIPT'
+#!/bin/sh
+echo "Content-type: application/json"
+echo ""
+CORES=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "4")
+printf '{"cores":%d}' "$CORES"
+SCRIPT
+    chmod 755 "$BASE/cgi-bin/cores.cgi"
+    
+    # Save CGI - WITH STRATUM URL FIX
+    cat > "$BASE/cgi-bin/save.cgi" <<'SCRIPT'
 #!/bin/sh
 echo "Content-type: text/html"
 echo ""
 
-POST=""
-if [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ]; then
-  POST=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
+if [ "$REQUEST_METHOD" = "POST" ]; then
+    if [ -n "$CONTENT_LENGTH" ]; then
+        POST_DATA=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
+    else
+        read POST_DATA
+    fi
+else
+    POST_DATA="$QUERY_STRING"
 fi
 
-urldecode() {
-  local data="$1"
-  data=$(echo "$data" | sed 's/+/ /g')
-  data=$(echo "$data" | sed 's/%3A/:/g;s/%3a/:/g;s/%2F/\//g;s/%2f/\//g')
-  data=$(echo "$data" | sed 's/%3D/=/g;s/%3d/=/g;s/%26/\&/g;s/%40/@/g')
-  data=$(echo "$data" | sed 's/%2B/+/g;s/%2b/+/g;s/%20/ /g;s/%21/!/g')
-  data=$(echo "$data" | sed 's/%2C/,/g;s/%2c/,/g')
-  echo "$data"
-}
+MINER=""
+WALLET=""
+WORKER="worker1"
+THREADS="2"
+POOL=""
 
-MINER=""; WALLET=""; WORKER=""; POOL=""
-OLD_IFS=$IFS
-set -f
 IFS='&'
-for pair in $POST; do
-  key=${pair%%=*}
-  val=${pair#*=}
-  val=$(urldecode "$val")
-  case "$key" in
-    miner)  MINER="$val" ;;
-    wallet) WALLET="$val" ;;
-    worker) WORKER="$val" ;;
-    pool)   POOL="$val" ;;
-  esac
+for param in $POST_DATA; do
+    IFS='='
+    set -- $param
+    key="$1"
+    value="$2"
+    value=$(echo "$value" | sed 's/+/ /g' | sed 's/%\([0-9A-F][0-9A-F]\)/\\x\1/g' | xargs -0 printf "%b")
+    
+    case "$key" in
+        miner) MINER="$value" ;;
+        wallet) WALLET="$value" ;;
+        worker) WORKER="$value" ;;
+        threads) THREADS="$value" ;;
+        pool) POOL="$value" ;;
+    esac
 done
-IFS=$OLD_IFS
-set +f
-
-[ -z "$WORKER" ] && WORKER="worker1"
+IFS=' '
 
 if [ -z "$MINER" ] || [ -z "$WALLET" ]; then
-  echo "<span class='error'>ERROR: Missing miner or wallet.</span>"
-  exit 0
+    echo "<div class='error'>❌ Missing required fields</div>"
+    exit 0
 fi
 
+# STRIP any existing stratum protocol prefix from pool URL
+POOL=$(echo "$POOL" | sed 's|^stratum+tcp://||' | sed 's|^stratum+ssl://||' | sed 's|^stratum://||')
+
+# Set default pools if not provided
 case "$MINER" in
-  btc|ltc|doge|dash|dcr|zen)
-    WALLET_USE="${WALLET#*:}"
-    if [ -z "$POOL" ]; then
-      echo "<span class='error'>ERROR: Pool is required for $MINER.</span>"
-      exit 0
-    fi
-    ;;
-  lotto)
-    WALLET_USE="${WALLET#*:}"
-    POOL="solo.ckpool.org:3333"
-    ;;
-  *)
-    WALLET_USE="$WALLET"
-    POOL="rx.unmineable.com:3333"
-    ;;
+    btc) [ -z "$POOL" ] && POOL="pool.btc.com:3333" ;;
+    ltc) [ -z "$POOL" ] && POOL="litecoin.nerdpool.xyz:5320" ;;
+    doge) [ -z "$POOL" ] && POOL="prohashing.com:3332" ;;
+    xmr) [ -z "$POOL" ] && POOL="pool.supportxmr.com:3333" ;;
+    scala) [ -z "$POOL" ] && POOL="scala.herominers.com:10131" ;;
+    verus) [ -z "$POOL" ] && POOL="pool.verus.io:9999" ;;
+    aeon) [ -z "$POOL" ] && POOL="aeon.herominers.com:10650" ;;
+    dero) [ -z "$POOL" ] && POOL="dero-node-sk.mysrv.cloud:10300" ;;
+    yadacoin) [ -z "$POOL" ] && POOL="pool.yadacoin.io:3333" ;;
+    arionum) [ -z "$POOL" ] && POOL="aropool.com:80" ;;
+    dash) [ -z "$POOL" ] && POOL="dash.suprnova.cc:9989" ;;
+    dcr) [ -z "$POOL" ] && POOL="dcr.suprnova.cc:3252" ;;
+    zen) [ -z "$POOL" ] && POOL="zen.suprnova.cc:3618" ;;
+    bch-lotto) POOL="bch.solopool.org:3333" ;;
+    ltc-lotto) POOL="litesolo.org:3333" ;;
+    doge-lotto) POOL="litesolo.org:3334" ;;
+    xmr-lotto) POOL="xmr.solopool.org:3333" ;;
+    *) [ -z "$POOL" ] && POOL="rx.unmineable.com:3333" ;;
 esac
 
-OUTDIR="/opt/frynet-config/output/$MINER"
-mkdir -p "$OUTDIR"
-START_SCRIPT="$OUTDIR/start_mining.sh"
-
-cat > "$START_SCRIPT" <<EOF
-#!/bin/sh
-echo "[$(date)] Starting $MINER mining..." >> /opt/frynet-config/logs/log.txt
-echo "[$(date)] Pool: $POOL" >> /opt/frynet-config/logs/log.txt
-echo "[$(date)] Wallet: $WALLET_USE.$WORKER" >> /opt/frynet-config/logs/log.txt
-
-EOF
-
-if [ "$MINER" = "btc" ] || [ "$MINER" = "ltc" ] || [ "$MINER" = "doge" ] || [ "$MINER" = "dash" ] || [ "$MINER" = "dcr" ] || [ "$MINER" = "zen" ] || [ "$MINER" = "lotto" ]; then
-  cat >> "$START_SCRIPT" <<'EOF'
-if command -v cpuminer >/dev/null 2>&1; then
-  echo "[$(date)] Using cpuminer..." >> /opt/frynet-config/logs/log.txt
-  exec cpuminer --algo=auto -o $POOL -u $WALLET_USE.$WORKER -p x >> /opt/frynet-config/logs/log.txt 2>&1
-elif command -v minerd >/dev/null 2>&1; then
-  echo "[$(date)] Using minerd..." >> /opt/frynet-config/logs/log.txt
-  exec minerd --algo=auto -o $POOL -u $WALLET_USE.$WORKER -p x >> /opt/frynet-config/logs/log.txt 2>&1
-else
-  echo "[ERROR] cpuminer/minerd not found!" >> /opt/frynet-config/logs/log.txt
-  exit 1
-fi
-EOF
-else
-  cat >> "$START_SCRIPT" <<'EOF'
-if command -v xmrig >/dev/null 2>&1; then
-  echo "[$(date)] Using xmrig..." >> /opt/frynet-config/logs/log.txt
-  exec xmrig -o $POOL -u $WALLET_USE.$WORKER -p x >> /opt/frynet-config/logs/log.txt 2>&1
-else
-  echo "[ERROR] xmrig not found!" >> /opt/frynet-config/logs/log.txt
-  exit 1
-fi
-EOF
-fi
-
-sed -i "s|\$POOL|$POOL|g" "$START_SCRIPT"
-sed -i "s|\$WALLET_USE|$WALLET_USE|g" "$START_SCRIPT"
-sed -i "s|\$WORKER|$WORKER|g" "$START_SCRIPT"
-
-chmod +x "$START_SCRIPT"
+mkdir -p /opt/frynet-config/output
+chmod 777 /opt/frynet-config/output
 
 cat > /opt/frynet-config/config.txt <<EOF
 miner=$MINER
 wallet=$WALLET
 worker=$WORKER
+threads=$THREADS
 pool=$POOL
 EOF
+chmod 666 /opt/frynet-config/config.txt
 
-chmod 644 /opt/frynet-config/config.txt
+SCRIPT_DIR="/opt/frynet-config/output/$MINER"
+mkdir -p "$SCRIPT_DIR"
+SCRIPT_FILE="$SCRIPT_DIR/start.sh"
 
-echo "<span class='success'>SUCCESS: Config saved for $MINER</span>"
-CGI
-    chmod +x "$BASE/cgi-bin/save_config.cgi"
+# Determine algorithm and miner type
+case "$MINER" in
+    btc)
+        ALGO="sha256d"
+        USE_CPUMINER=true
+        ;;
+    ltc|ltc-lotto)
+        ALGO="scrypt"
+        USE_CPUMINER=true
+        ;;
+    doge|doge-lotto)
+        ALGO="scrypt"
+        USE_CPUMINER=true
+        ;;
+    dash)
+        ALGO="x11"
+        USE_CPUMINER=true
+        ;;
+    dcr)
+        ALGO="blake256r14"
+        USE_CPUMINER=true
+        ;;
+    verus)
+        ALGO="verushash"
+        USE_CPUMINER=true
+        ;;
+    arionum)
+        ALGO="argon2d4096"
+        USE_CPUMINER=true
+        ;;
+    xmr|xmr-lotto)
+        ALGO="rx/0"
+        USE_CPUMINER=false
+        ;;
+    scala)
+        ALGO="panthera"
+        USE_CPUMINER=false
+        ;;
+    aeon)
+        ALGO="rx/0"
+        USE_CPUMINER=false
+        ;;
+    dero)
+        ALGO="astrobwt"
+        USE_CPUMINER=false
+        ;;
+    yadacoin)
+        ALGO="rx/yada"
+        USE_CPUMINER=false
+        ;;
+    bch-lotto)
+        ALGO="sha256d"
+        USE_CPUMINER=true
+        ;;
+    *)
+        # Unmineable coins use XMRig with RandomX
+        ALGO="rx/0"
+        USE_CPUMINER=false
+        ;;
+esac
+
+# Create start script - use FULL PATH to ensure correct binary
+cat > "$SCRIPT_FILE" <<EOF
+#!/bin/sh
+echo "[\$(date)] Starting $MINER mining" >> /opt/frynet-config/logs/miner.log
+echo "Pool: $POOL" >> /opt/frynet-config/logs/miner.log
+echo "Algorithm: $ALGO" >> /opt/frynet-config/logs/miner.log
+
+EOF
+
+if [ "$USE_CPUMINER" = "true" ]; then
+    cat >> "$SCRIPT_FILE" <<EOF
+/usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u $WALLET.$WORKER -p x --threads=$THREADS 2>&1
+EOF
+else
+    cat >> "$SCRIPT_FILE" <<EOF
+/usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER -p x --threads=$THREADS -a $ALGO --no-color 2>&1
+EOF
+fi
+
+chmod 755 "$SCRIPT_FILE"
+echo "<div class='success'>✅ Configuration saved for $MINER!</div>"
+SCRIPT
+    chmod 755 "$BASE/cgi-bin/save.cgi"
     
-    # Load config CGI
-    cat > "$BASE/cgi-bin/load_config.cgi" <<'CGI'
+    # Load CGI
+    cat > "$BASE/cgi-bin/load.cgi" <<'SCRIPT'
 #!/bin/sh
 echo "Content-type: application/json"
 echo ""
 
-CONFIG="/opt/frynet-config/config.txt"
-if [ -f "$CONFIG" ]; then
-    . "$CONFIG"
-    printf '{"miner":"%s","wallet":"%s","worker":"%s","pool":"%s"}' "$miner" "$wallet" "$worker" "$pool"
+if [ -f /opt/frynet-config/config.txt ]; then
+    . /opt/frynet-config/config.txt
+    printf '{"miner":"%s","wallet":"%s","worker":"%s","threads":"%s","pool":"%s"}' \
+        "$miner" "$wallet" "$worker" "$threads" "$pool"
 else
     echo "{}"
 fi
-CGI
-    chmod +x "$BASE/cgi-bin/load_config.cgi"
+SCRIPT
+    chmod 755 "$BASE/cgi-bin/load.cgi"
     
-    # Start CGI - removes stop flag
-    cat > "$BASE/cgi-bin/start.cgi" <<'CGI'
+    # Status CGI - Uses multiple detection methods for reliability
+    cat > "$BASE/cgi-bin/status.cgi" <<'SCRIPT'
+#!/bin/sh
+echo "Content-type: application/json"
+echo ""
+
+RUNNING="false"
+CRASHED="false"
+PID_FILE="/opt/frynet-config/miner.pid"
+LOG_FILE="/opt/frynet-config/logs/miner.log"
+
+# Check for crash indicators in log
+if [ -f "$LOG_FILE" ]; then
+    if tail -5 "$LOG_FILE" 2>/dev/null | grep -qiE "segmentation fault|core dumped|killed|signal|error|failed"; then
+        CRASHED="true"
+    fi
+fi
+
+# Method 1: Check if PID file exists and process is running
+if [ -f "$PID_FILE" ]; then
+    PID=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        RUNNING="true"
+    fi
+fi
+
+# Method 2: Check for miner processes directly using ps
+if [ "$RUNNING" = "false" ]; then
+    if ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[m]inerd" | grep -v grep >/dev/null 2>&1; then
+        RUNNING="true"
+        # Update PID file with found process
+        ACTUAL_PID=$(ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig" | grep -v grep | awk '{print $2}' | head -1)
+        if [ -n "$ACTUAL_PID" ]; then
+            echo "$ACTUAL_PID" > "$PID_FILE" 2>/dev/null
+        fi
+    fi
+fi
+
+printf '{"running":%s,"crashed":%s}' "$RUNNING" "$CRASHED"
+SCRIPT
+    chmod 755 "$BASE/cgi-bin/status.cgi"
+    
+    # Thermal CGI
+    cat > "$BASE/cgi-bin/thermal.cgi" <<'SCRIPT'
+#!/bin/sh
+echo "Content-type: application/json"
+echo ""
+
+TEMP=45
+if [ -f /sys/class/thermal/thermal_zone0/temp ]; then
+    TEMP=$(($(cat /sys/class/thermal/thermal_zone0/temp) / 1000))
+fi
+
+printf '{"temperature":%d}' "$TEMP"
+SCRIPT
+    chmod 755 "$BASE/cgi-bin/thermal.cgi"
+    
+    # Stats CGI - Fixed to parse cpuminer-opt output format
+    cat > "$BASE/cgi-bin/stats.cgi" <<'SCRIPT'
+#!/bin/sh
+echo "Content-type: application/json"
+echo ""
+
+HASHRATE="--"
+SHARES="0"
+UPTIME="0h 0m"
+EFFICIENCY="0"
+ALGO="--"
+DIFF="--"
+POOL="--"
+
+LOG_FILE="/opt/frynet-config/logs/miner.log"
+CONFIG_FILE="/opt/frynet-config/config.txt"
+
+if [ -f "$LOG_FILE" ]; then
+    # Strip ANSI codes for parsing
+    CLEAN_LOG=$(cat "$LOG_FILE" | sed 's/\x1b\[[0-9;]*m//g' 2>/dev/null)
+    
+    # Get hashrate - cpuminer-opt formats: "1.23 kH/s" or "123.45 H/s"
+    HR=$(echo "$CLEAN_LOG" | grep -oE '[0-9]+\.?[0-9]* [kKMG]?H/s' | tail -1)
+    [ -n "$HR" ] && HASHRATE="$HR"
+    
+    # Count accepted shares
+    ACC=$(echo "$CLEAN_LOG" | grep -ciE "accepted|yay" 2>/dev/null || echo "0")
+    SHARES="$ACC"
+    
+    # Get algorithm from log
+    ALG=$(echo "$CLEAN_LOG" | grep -oE "using '[^']+' algorithm" | head -1 | sed "s/using '//;s/' algorithm//")
+    [ -z "$ALG" ] && ALG=$(echo "$CLEAN_LOG" | grep "Algorithm:" | tail -1 | cut -d: -f2 | tr -d ' ')
+    [ -n "$ALG" ] && ALGO="$ALG"
+    
+    # Get difficulty
+    DIFF_VAL=$(echo "$CLEAN_LOG" | grep -oE "Stratum Diff [0-9]+" | tail -1 | grep -oE "[0-9]+")
+    [ -n "$DIFF_VAL" ] && DIFF="$DIFF_VAL"
+    
+    # Get pool from log
+    POOL_VAL=$(echo "$CLEAN_LOG" | grep "Pool:" | tail -1 | cut -d: -f2- | tr -d ' ')
+    [ -n "$POOL_VAL" ] && POOL="$POOL_VAL"
+fi
+
+# Calculate uptime from PID file
+PID_FILE="/opt/frynet-config/miner.pid"
+if [ -f "$PID_FILE" ]; then
+    PID=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -n "$PID" ] && [ -d "/proc/$PID" ]; then
+        # Get process start time
+        START_TIME=$(stat -c %Y "/proc/$PID" 2>/dev/null || echo "0")
+        if [ "$START_TIME" != "0" ]; then
+            NOW=$(date +%s)
+            DIFF_SEC=$((NOW - START_TIME))
+            HOURS=$((DIFF_SEC / 3600))
+            MINS=$(((DIFF_SEC % 3600) / 60))
+            UPTIME="${HOURS}h ${MINS}m"
+        fi
+    fi
+fi
+
+# Calculate efficiency (accepted / total if we have rejected info)
+REJ=$(cat "$LOG_FILE" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -ciE "rejected|booo" 2>/dev/null || echo "0")
+TOTAL=$((SHARES + REJ))
+if [ "$TOTAL" -gt 0 ]; then
+    EFFICIENCY=$((SHARES * 100 / TOTAL))
+fi
+
+printf '{"hashrate":"%s","shares":"%s","uptime":"%s","efficiency":%d,"algo":"%s","diff":"%s","pool":"%s"}' \
+    "$HASHRATE" "$SHARES" "$UPTIME" "$EFFICIENCY" "$ALGO" "$DIFF" "$POOL"
+SCRIPT
+    chmod 755 "$BASE/cgi-bin/stats.cgi"
+    
+    # Clear logs CGI
+    cat > "$BASE/cgi-bin/clearlogs.cgi" <<'SCRIPT'
+#!/bin/sh
+echo "Content-type: text/plain"
+echo ""
+> /opt/frynet-config/logs/miner.log
+echo "Logs cleared"
+SCRIPT
+    chmod 755 "$BASE/cgi-bin/clearlogs.cgi"
+    
+    # Start CGI - Uses nohup and multiple detection methods
+    cat > "$BASE/cgi-bin/start.cgi" <<'SCRIPT'
 #!/bin/sh
 echo "Content-type: text/html"
 echo ""
 
-CONFIG="/opt/frynet-config/config.txt"
-if [ ! -f "$CONFIG" ]; then 
-  echo "<span class='error'>ERROR: No config found. Please save configuration first.</span>"
-  exit 0
+PID_FILE="/opt/frynet-config/miner.pid"
+LOG_FILE="/opt/frynet-config/logs/miner.log"
+
+if [ ! -f /opt/frynet-config/config.txt ]; then
+    echo "<div class='error'>❌ No configuration found. Please save configuration first.</div>"
+    exit 0
 fi
 
-. "$CONFIG"
+. /opt/frynet-config/config.txt
 
-SCRIPT="/opt/frynet-config/output/$miner/start_mining.sh"
-if [ ! -f "$SCRIPT" ]; then 
-  echo "<span class='error'>ERROR: Mining script not found. Please save configuration again.</span>"
-  exit 0
-fi
-
-# CRITICAL: Remove stop flag when starting
-rm -f /opt/frynet-config/MINING_STOPPED
-
-echo "[$(date)] MANUAL START: User clicked Start Mining button" >> /opt/frynet-config/logs/log.txt
-
-# Stop any existing miners first  
-pkill -9 xmrig 2>/dev/null || true
-pkill -9 cpuminer 2>/dev/null || true
-pkill -9 minerd 2>/dev/null || true
-
-# Remove old PID file
-rm -f /opt/frynet-config/miner.pid
-
+# Stop any existing miners first
+pkill -9 -f "xmrig" 2>/dev/null || true
+pkill -9 -f "cpuminer" 2>/dev/null || true
+pkill -9 -f "minerd" 2>/dev/null || true
+rm -f "$PID_FILE" 2>/dev/null
 sleep 2
 
-# Start the miner
-echo "[$(date)] Starting $miner mining..." >> /opt/frynet-config/logs/log.txt
-sh "$SCRIPT" >> /opt/frynet-config/logs/log.txt 2>&1 &
-
-sleep 3
-
-# Find the actual miner PID
-for proc in xmrig cpuminer minerd; do
-    PID=$(pgrep -x "$proc" 2>/dev/null | head -1)
-    if [ -n "$PID" ]; then
-        echo $PID > /opt/frynet-config/miner.pid
-        echo "RUNNING" > /opt/frynet-config/logs/status.txt
-        echo "[$(date)] Miner started successfully (PID: $PID)" >> /opt/frynet-config/logs/log.txt
-        echo "<span class='success'>Miner started ($miner) - PID: $PID</span>"
-        exit 0
-    fi
-done
-
-echo "STOPPED" > /opt/frynet-config/logs/status.txt
-echo "[$(date)] Failed to start miner" >> /opt/frynet-config/logs/log.txt
-echo "<span class='error'>Failed to start miner. Check logs.</span>"
-CGI
-    chmod +x "$BASE/cgi-bin/start.cgi"
+SCRIPT_FILE="/opt/frynet-config/output/$miner/start.sh"
+if [ -f "$SCRIPT_FILE" ]; then
+    # Clear old log and mark start time
+    echo "[$(date)] Starting $miner mining..." > "$LOG_FILE"
     
-    # Stop CGI - sets stop flag and REALLY kills miners
-    cat > "$BASE/cgi-bin/stop.cgi" <<'CGI'
+    # Start miner using nohup, redirect to log, write PID
+    nohup sh "$SCRIPT_FILE" >> "$LOG_FILE" 2>&1 &
+    MINER_PID=$!
+    echo "$MINER_PID" > "$PID_FILE"
+    chmod 666 "$PID_FILE"
+    
+    # Wait for miner to initialize
+    sleep 4
+    
+    # Check multiple ways if mining is active
+    RUNNING=false
+    
+    # Method 1: Check if our PID is still running
+    if kill -0 "$MINER_PID" 2>/dev/null; then
+        RUNNING=true
+    fi
+    
+    # Method 2: Check for any miner process
+    if [ "$RUNNING" = "false" ]; then
+        if ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[m]inerd" | grep -v grep >/dev/null 2>&1; then
+            # Found a miner, update PID file with actual PID
+            ACTUAL_PID=$(ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig" | grep -v grep | awk '{print $2}' | head -1)
+            if [ -n "$ACTUAL_PID" ]; then
+                echo "$ACTUAL_PID" > "$PID_FILE"
+                RUNNING=true
+            fi
+        fi
+    fi
+    
+    # Method 3: Check log for activity
+    if [ "$RUNNING" = "false" ]; then
+        if grep -qE "Stratum|threads started|algorithm|accepted" "$LOG_FILE" 2>/dev/null; then
+            RUNNING=true
+        fi
+    fi
+    
+    if [ "$RUNNING" = "true" ]; then
+        COIN_UPPER=$(echo "$miner" | tr 'a-z' 'A-Z')
+        echo "<div class='success'>✅ Mining started for $COIN_UPPER!</div>"
+    else
+        echo "<div class='error'>⚠️ Miner may not have started. Check logs for details.</div>"
+    fi
+else
+    echo "<div class='error'>❌ Script not found. Please save configuration again.</div>"
+fi
+SCRIPT
+    chmod 755 "$BASE/cgi-bin/start.cgi"
+    
+    # Stop CGI
+    cat > "$BASE/cgi-bin/stop.cgi" <<'SCRIPT'
 #!/bin/sh
 echo "Content-type: text/html"
 echo ""
 
-# CRITICAL: Set stop flag FIRST
-touch /opt/frynet-config/MINING_STOPPED
-echo "[$(date)] MANUAL STOP: User clicked Stop Mining button" >> /opt/frynet-config/logs/log.txt
+PID_FILE="/opt/frynet-config/miner.pid"
 
-# Really kill ALL miners - use -9 to ensure they die
-pkill -9 xmrig 2>/dev/null || true
-pkill -9 cpuminer 2>/dev/null || true
-pkill -9 minerd 2>/dev/null || true
-
-# Double-check and kill by PID if exists
-if [ -f /opt/frynet-config/miner.pid ]; then
-    PID=$(cat /opt/frynet-config/miner.pid)
-    kill -9 "$PID" 2>/dev/null || true
+# Kill by PID file first
+if [ -f "$PID_FILE" ]; then
+    PID=$(cat "$PID_FILE" 2>/dev/null)
+    if [ -n "$PID" ]; then
+        kill "$PID" 2>/dev/null || true
+        kill -9 "$PID" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
 fi
 
-# Remove PID file
-rm -f /opt/frynet-config/miner.pid
+# Also kill any stray miners
+pkill -f xmrig 2>/dev/null || true
+pkill -f cpuminer 2>/dev/null || true
+pkill -f minerd 2>/dev/null || true
 
-# Remove any auto-restart flag
-rm -f /opt/frynet-config/mining_was_running
-
-# Update status
-echo "STOPPED" > /opt/frynet-config/logs/status.txt
-
-echo "[$(date)] All miners stopped successfully" >> /opt/frynet-config/logs/log.txt
-echo "<span class='success'>Mining stopped successfully</span>"
-CGI
-    chmod +x "$BASE/cgi-bin/stop.cgi"
+echo "<div class='success'>✅ Mining stopped</div>"
+SCRIPT
+    chmod 755 "$BASE/cgi-bin/stop.cgi"
     
-    # Initialize logs
-    echo "STOPPED" > "$BASE/logs/status.txt"
-    echo "[$(date)] FryMiner Web UI initialized" > "$BASE/logs/log.txt"
-    echo "[$(date)] Hostname: $(hostname)" >> "$BASE/logs/log.txt"
-    chmod 666 "$BASE/logs/status.txt" "$BASE/logs/log.txt"
+    # Create log files
+    touch "$BASE/logs/miner.log"
+    chmod 666 "$BASE/logs/miner.log"
     
-    # Setup auto-start
-    setup_autostart
+    # Final permissions
+    chmod -R 777 "$BASE"
     
-    # Start services
+    # Start web server
+    log "Starting web server..."
     cd "$BASE"
-    nohup python3 -m http.server "$PORT" --cgi >/dev/null 2>&1 &
+    nohup python3 -m http.server $PORT --cgi > /dev/null 2>&1 &
     SERVER_PID=$!
     
-    nohup /usr/local/bin/fryminer_monitor >/dev/null 2>&1 &
-    MONITOR_PID=$!
+    sleep 2
     
-    nohup /usr/local/bin/fryminer_pid_sync >/dev/null 2>&1 &
-    SYNC_PID=$!
+    # Verify server started
+    if kill -0 $SERVER_PID 2>/dev/null; then
+        log "Web server started successfully (PID: $SERVER_PID)"
+    else
+        warn "Web server may not have started properly"
+    fi
     
-    log "==============================================="
-    log "FryMiner Setup Complete! - VERIFIED FINAL"
-    log "==============================================="
-    log "Web UI: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo "YOUR-IP"):$PORT"
+    # Get IP
+    IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+    
+    log "================================================"
+    log "✅ FryMiner Installation Complete!"
+    log "================================================"
     log ""
-    log "STOP FLAG MECHANISM:"
-    log "  - Stop creates /opt/frynet-config/MINING_STOPPED"
-    log "  - All daemons check this flag"
-    log "  - Start removes the flag"
-    log "  - Uses kill -9 to ensure miners die"
-    log "==============================================="
+    log "Web Interface: http://$IP:$PORT"
+    log ""
+    log "Supported Cryptocurrencies (35+):"
+    log "  • Popular: BTC, LTC, DOGE, XMR"
+    log "  • CPU Mineable: Scala, Verus, Aeon, Dero, Yadacoin, Arionum"
+    log "  • Other: DASH, DCR, ZEN"
+    log "  • Solo Lottery: BCH, LTC, DOGE, XMR"
+    log "  • Unmineable: SHIB, ADA, SOL, XRP, DOT, and many more"
+    log ""
+    log "Features:"
+    log "  • All 35+ coins restored"
+    log "  • Stratum URL fix (no more doubling)"
+    log "  • Monitor tab with live logs"
+    log "  • Statistics tab with hashrate"
+    log "  • Thermal monitoring"
+    log ""
+    log "Your miner is ready to use!"
+    log "================================================"
 }
 
-# Run main installation
-main "$@"
+# Run installation
+main
+
+exit 0
