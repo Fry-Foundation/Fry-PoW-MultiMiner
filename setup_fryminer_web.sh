@@ -913,10 +913,11 @@ optgroup { background: #1a1a1a; color: #dc143c; }
                         </optgroup>
                         <optgroup label="Other Minable">
                             <option value="dash">Dash (DASH) - X11</option>
-                            <option value="dcr">Decred (DCR) - Blake256</option>
-                            <option value="zen">Horizen (ZEN) - Equihash</option>
+                            <option value="dcr">Decred (DCR) - Blake</option>
+                            <option value="kda">Kadena (KDA) - Blake2s</option>
                         </optgroup>
                         <optgroup label="Solo Lottery Mining">
+                            <option value="btc-lotto">Bitcoin Lottery (BTC)</option>
                             <option value="bch-lotto">Bitcoin Cash Lottery (BCH)</option>
                             <option value="ltc-lotto">Litecoin Lottery (LTC)</option>
                             <option value="doge-lotto">Dogecoin Lottery (DOGE)</option>
@@ -1089,8 +1090,9 @@ const defaultPools = {
     'arionum': 'aropool.com:80',
     'dash': 'dash.suprnova.cc:9989',
     'dcr': 'dcr.suprnova.cc:3252',
-    'zen': 'zen.suprnova.cc:3618',
-    'bch-lotto': 'bch.solopool.org:3333',
+    'kda': 'pool.woolypooly.com:3112',
+    'bch-lotto': 'solo.ckpool.org:3333',
+    'btc-lotto': 'btc.solopool.org:3333',
     'ltc-lotto': 'litesolo.org:3333',
     'doge-lotto': 'litesolo.org:3334',
     'xmr-lotto': 'xmr.solopool.org:3333',
@@ -1115,7 +1117,7 @@ const defaultPools = {
 };
 
 // Fixed pools (cannot be changed)
-const fixedPools = ['bch-lotto', 'ltc-lotto', 'doge-lotto', 'xmr-lotto', 'shib', 'ada', 'sol', 'zec', 'rvn', 'trx', 'vet', 'xrp', 'dot', 'matic', 'atom', 'link', 'xlm', 'algo', 'avax', 'near', 'ftm', 'one'];
+const fixedPools = ['btc-lotto', 'bch-lotto', 'ltc-lotto', 'doge-lotto', 'xmr-lotto', 'shib', 'ada', 'sol', 'zec', 'rvn', 'trx', 'vet', 'xrp', 'dot', 'matic', 'atom', 'link', 'xlm', 'algo', 'avax', 'near', 'ftm', 'one'];
 
 // Coin info messages
 const coinInfo = {
@@ -1159,7 +1161,8 @@ document.getElementById('miner').addEventListener('change', function() {
         poolGroup.style.display = 'none';
     } else {
         poolGroup.style.display = 'block';
-        if (defaultPools[coin]) {
+        // Only set default pool if field is empty (preserve custom pools)
+        if (defaultPools[coin] && !poolInput.value) {
             poolInput.value = defaultPools[coin];
         }
         poolInput.disabled = fixedPools.includes(coin);
@@ -1502,7 +1505,9 @@ case "$MINER" in
     dash) [ -z "$POOL" ] && POOL="dash.suprnova.cc:9989" ;;
     dcr) [ -z "$POOL" ] && POOL="dcr.suprnova.cc:3252" ;;
     zen) [ -z "$POOL" ] && POOL="zen.suprnova.cc:3618" ;;
-    bch-lotto) POOL="bch.solopool.org:3333" ;;
+    kda) [ -z "$POOL" ] && POOL="pool.woolypooly.com:3112" ;;
+    bch-lotto) POOL="solo.ckpool.org:3333" ;;
+    btc-lotto) POOL="btc.solopool.org:3333" ;;
     ltc-lotto) POOL="litesolo.org:3333" ;;
     doge-lotto) POOL="litesolo.org:3334" ;;
     xmr-lotto) POOL="xmr.solopool.org:3333" ;;
@@ -1547,7 +1552,11 @@ case "$MINER" in
         USE_CPUMINER=true
         ;;
     dcr)
-        ALGO="blake256r14"
+        ALGO="decred"
+        USE_CPUMINER=true
+        ;;
+    kda)
+        ALGO="blake2s"
         USE_CPUMINER=true
         ;;
     verus)
@@ -1556,6 +1565,10 @@ case "$MINER" in
         ;;
     arionum)
         ALGO="argon2d4096"
+        USE_CPUMINER=true
+        ;;
+    btc-lotto)
+        ALGO="sha256d"
         USE_CPUMINER=true
         ;;
     xmr|xmr-lotto)
@@ -1784,88 +1797,68 @@ CONFIG_FILE="/opt/frynet-config/config.txt"
 PID_FILE="/opt/frynet-config/miner.pid"
 
 if [ -f "$LOG_FILE" ]; then
-    # Strip ANSI codes for parsing
+    # Strip ANSI codes
     CLEAN_LOG=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG_FILE" 2>/dev/null)
     
-    # Get hashrate - various formats from different miners
-    # cpuminer-multi: "2.45 kH/s" or "123.4 H/s"
-    # xmrig: "speed 10s/60s/15m 45.2 45.1 45.0 H/s"
-    HR=$(echo "$CLEAN_LOG" | grep -oE '[0-9]+\.?[0-9]* [kKMGT]?H/s' | tail -1)
-    if [ -z "$HR" ]; then
-        # Try xmrig format
-        HR=$(echo "$CLEAN_LOG" | grep "speed" | tail -1 | grep -oE '[0-9]+\.[0-9]+ H/s' | head -1)
+    # Get hashrate - XMRig format: "speed 10s/60s/15m 218.2 220.6 n/a H/s"
+    # Take the 60s average (middle value)
+    HR=$(echo "$CLEAN_LOG" | grep -E "miner.*speed" | tail -1 | grep -oE 'speed [0-9.]+/[0-9.]+/[0-9.n/a]+ [0-9.]+ [0-9.]+ [0-9.n/a]+ [kKMGT]?H/s')
+    if [ -n "$HR" ]; then
+        # Extract 60s value (second number after "speed")
+        HR_60S=$(echo "$HR" | awk '{print $4}')
+        HR_UNIT=$(echo "$HR" | grep -oE '[kKMGT]?H/s')
+        HASHRATE="${HR_60S} ${HR_UNIT}"
+    else
+        # Try cpuminer format
+        HR=$(echo "$CLEAN_LOG" | grep -oE '[0-9]+\.?[0-9]* [kKMGT]?H/s' | tail -1)
+        [ -n "$HR" ] && HASHRATE="$HR"
     fi
-    if [ -z "$HR" ]; then
-        # Try another common format
-        HR=$(echo "$CLEAN_LOG" | grep -iE "hashrate|hash rate" | tail -1 | grep -oE '[0-9]+\.?[0-9]*' | head -1)
-        [ -n "$HR" ] && HR="${HR} H/s"
-    fi
-    [ -n "$HR" ] && HASHRATE="$HR"
     
-    # Count accepted shares - various formats
-    # cpuminer: "accepted: 5/5 (100.00%)" or just "accepted"
-    # xmrig: "accepted (5/0)"
-    ACC=$(echo "$CLEAN_LOG" | grep -ciE "accepted|yay!" 2>/dev/null || echo "0")
-    # Also try to get from summary line
-    ACC_LINE=$(echo "$CLEAN_LOG" | grep -oE "accepted[: ]+[0-9]+" | tail -1 | grep -oE "[0-9]+")
-    [ -n "$ACC_LINE" ] && [ "$ACC_LINE" -gt "$ACC" ] && ACC="$ACC_LINE"
+    # Count accepted shares
+    # XMRig: "[timestamp]  net      accepted (1/0) diff 100001 (42 ms)"
+    ACC=$(echo "$CLEAN_LOG" | grep -c "net.*accepted" 2>/dev/null || echo "0")
+    if [ "$ACC" -eq 0 ]; then
+        # Try cpuminer format
+        ACC=$(echo "$CLEAN_LOG" | grep -ciE "accepted|yay!" 2>/dev/null || echo "0")
+    fi
     SHARES="$ACC"
     
     # Count rejected
-    REJ=$(echo "$CLEAN_LOG" | grep -ciE "rejected|booo" 2>/dev/null || echo "0")
-    REJ_LINE=$(echo "$CLEAN_LOG" | grep -oE "rejected[: ]+[0-9]+" | tail -1 | grep -oE "[0-9]+")
-    [ -n "$REJ_LINE" ] && [ "$REJ_LINE" -gt "$REJ" ] && REJ="$REJ_LINE"
+    REJ=$(echo "$CLEAN_LOG" | grep -c "net.*rejected" 2>/dev/null || echo "0")
+    if [ "$REJ" -eq 0 ]; then
+        REJ=$(echo "$CLEAN_LOG" | grep -ciE "rejected|booo" 2>/dev/null || echo "0")
+    fi
     REJECTED="$REJ"
     
     # Get algorithm from log
-    ALG=$(echo "$CLEAN_LOG" | grep -oE "using '[^']+' algorithm" | tail -1 | sed "s/using '//;s/' algorithm//")
-    [ -z "$ALG" ] && ALG=$(echo "$CLEAN_LOG" | grep -oE "algo[: ]+[a-zA-Z0-9/_-]+" | tail -1 | sed 's/algo[: ]*//')
+    ALG=$(echo "$CLEAN_LOG" | grep "POOL.*algo" | tail -1 | grep -oE "algo [a-zA-Z0-9/_-]+" | cut -d' ' -f2)
     [ -z "$ALG" ] && ALG=$(echo "$CLEAN_LOG" | grep "Algorithm:" | tail -1 | cut -d: -f2 | tr -d ' ')
     [ -n "$ALG" ] && ALGO="$ALG"
     
-    # Get difficulty
-    DIFF_VAL=$(echo "$CLEAN_LOG" | grep -oE "[Dd]iff[iculty]*[: ]+[0-9]+" | tail -1 | grep -oE "[0-9]+")
-    [ -z "$DIFF_VAL" ] && DIFF_VAL=$(echo "$CLEAN_LOG" | grep -oE "Stratum Diff [0-9]+" | tail -1 | grep -oE "[0-9]+")
+    # Get difficulty - XMRig format: "new job from pool diff 100001"
+    DIFF_VAL=$(echo "$CLEAN_LOG" | grep "new job.*diff" | tail -1 | grep -oE "diff [0-9]+" | cut -d' ' -f2)
+    [ -z "$DIFF_VAL" ] && DIFF_VAL=$(echo "$CLEAN_LOG" | grep -oE "[Dd]iff[: ]+[0-9]+" | tail -1 | grep -oE "[0-9]+")
     [ -n "$DIFF_VAL" ] && DIFF="$DIFF_VAL"
     
-    # Get pool from config or log
+    # Get pool from config
     if [ -f "$CONFIG_FILE" ]; then
         . "$CONFIG_FILE" 2>/dev/null
         [ -n "$pool" ] && POOL="$pool"
     fi
-    [ "$POOL" = "--" ] && POOL=$(echo "$CLEAN_LOG" | grep -oE "stratum\+tcp://[^ ]+" | tail -1 | sed 's/stratum+tcp:\/\///')
 fi
 
-# Calculate uptime from PID file or log start
+# Calculate uptime from PID
 if [ -f "$PID_FILE" ]; then
     PID=$(cat "$PID_FILE" 2>/dev/null)
-    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-        # Get process start time
-        if [ -f "/proc/$PID/stat" ]; then
-            # Calculate from process start
-            BOOT_TIME=$(awk '{print $1}' /proc/uptime 2>/dev/null | cut -d. -f1)
-            PROC_START=$(awk '{print $22}' "/proc/$PID/stat" 2>/dev/null)
-            CLK_TCK=$(getconf CLK_TCK 2>/dev/null || echo 100)
-            if [ -n "$PROC_START" ] && [ -n "$BOOT_TIME" ]; then
-                PROC_UPTIME=$((BOOT_TIME - (PROC_START / CLK_TCK)))
-                [ "$PROC_UPTIME" -lt 0 ] && PROC_UPTIME=0
-                HOURS=$((PROC_UPTIME / 3600))
-                MINS=$(((PROC_UPTIME % 3600) / 60))
-                UPTIME="${HOURS}h ${MINS}m"
-            fi
-        fi
-    fi
-fi
-
-# Fallback: estimate from log file modification time
-if [ "$UPTIME" = "0h 0m" ] && [ -f "$LOG_FILE" ]; then
-    LOG_START=$(stat -c %Y "$LOG_FILE" 2>/dev/null)
-    if [ -n "$LOG_START" ]; then
-        NOW=$(date +%s)
-        DIFF_SEC=$((NOW - LOG_START))
-        if [ "$DIFF_SEC" -gt 0 ] && [ "$DIFF_SEC" -lt 86400 ]; then
-            HOURS=$((DIFF_SEC / 3600))
-            MINS=$(((DIFF_SEC % 3600) / 60))
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null && [ -f "/proc/$PID/stat" ]; then
+        BOOT_TIME=$(awk '{print $1}' /proc/uptime 2>/dev/null | cut -d. -f1)
+        PROC_START=$(awk '{print $22}' "/proc/$PID/stat" 2>/dev/null)
+        CLK_TCK=$(getconf CLK_TCK 2>/dev/null || echo 100)
+        if [ -n "$PROC_START" ] && [ -n "$BOOT_TIME" ] && [ "$CLK_TCK" -gt 0 ]; then
+            PROC_UPTIME=$((BOOT_TIME - PROC_START / CLK_TCK))
+            [ "$PROC_UPTIME" -lt 0 ] && PROC_UPTIME=0
+            HOURS=$((PROC_UPTIME / 3600))
+            MINS=$(((PROC_UPTIME % 3600) / 60))
             UPTIME="${HOURS}h ${MINS}m"
         fi
     fi
