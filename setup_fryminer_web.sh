@@ -194,8 +194,8 @@ if [ $UPDATE_STATUS -eq 0 ]; then
             pkill -9 -f "cpuminer" 2>/dev/null || true
             sleep 2
             
-            # Start miner
-            nohup sh "$SCRIPT_FILE" >> /opt/frynet-config/logs/miner.log 2>&1 &
+            # Start miner - script handles its own logging
+            nohup sh "$SCRIPT_FILE" >/dev/null 2>&1 &
             NEW_PID=$!
             echo "$NEW_PID" > "$PID_FILE"
             log_msg "Mining restarted with PID $NEW_PID"
@@ -301,21 +301,26 @@ optimize_for_mining() {
     # 1. Enable huge pages (gives 20-30% boost for RandomX)
     log "  Configuring huge pages..."
     
-    # Calculate optimal huge pages (1GB per thread + buffer)
-    THREADS=$(nproc)
-    HUGE_PAGES=$((THREADS * 3 + 8))  # ~3GB per thread for RandomX dataset
+    # RandomX needs ~2336 MB for dataset + scratchpads
+    # 2MB huge pages: need at least 1200 pages
+    # Plus some buffer for the system
+    HUGE_PAGES=1280
     
     # Set huge pages
     sysctl -w vm.nr_hugepages=$HUGE_PAGES >/dev/null 2>&1 || true
     
     # Make persistent across reboots
-    if ! grep -q "vm.nr_hugepages" /etc/sysctl.conf 2>/dev/null; then
+    if grep -q "vm.nr_hugepages" /etc/sysctl.conf 2>/dev/null; then
+        sed -i "s/vm.nr_hugepages=.*/vm.nr_hugepages=$HUGE_PAGES/" /etc/sysctl.conf 2>/dev/null || true
+    else
         echo "vm.nr_hugepages=$HUGE_PAGES" >> /etc/sysctl.conf 2>/dev/null || true
     fi
     
-    # Set huge page permissions
-    echo "* soft memlock 262144" >> /etc/security/limits.conf 2>/dev/null || true
-    echo "* hard memlock 262144" >> /etc/security/limits.conf 2>/dev/null || true
+    # Set huge page permissions for all users
+    if ! grep -q "memlock" /etc/security/limits.conf 2>/dev/null; then
+        echo "* soft memlock unlimited" >> /etc/security/limits.conf 2>/dev/null || true
+        echo "* hard memlock unlimited" >> /etc/security/limits.conf 2>/dev/null || true
+    fi
     
     # 2. Enable MSR for RandomX boost (10-15% improvement)
     log "  Enabling MSR access..."
@@ -328,18 +333,9 @@ optimize_for_mining() {
     
     # 3. Set CPU governor to performance mode
     log "  Setting CPU to performance mode..."
-    if command -v cpufreq-set >/dev/null 2>&1; then
-        for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-            echo "performance" > "$cpu" 2>/dev/null || true
-        done
-    fi
-    
-    # Alternative method
-    if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
-        for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-            echo "performance" > "$cpu" 2>/dev/null || true
-        done
-    fi
+    for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        [ -f "$gov" ] && echo "performance" > "$gov" 2>/dev/null || true
+    done
     
     # 4. Disable CPU frequency scaling limits
     for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq; do
@@ -354,10 +350,8 @@ optimize_for_mining() {
 #!/bin/sh
 # Mining optimization script - run before starting miner
 
-# Enable huge pages
-THREADS=$(nproc)
-HUGE_PAGES=$((THREADS * 3 + 8))
-sysctl -w vm.nr_hugepages=$HUGE_PAGES >/dev/null 2>&1
+# Enable huge pages (need ~1200 for RandomX dataset)
+sysctl -w vm.nr_hugepages=1280 >/dev/null 2>&1
 
 # Load MSR module
 modprobe msr 2>/dev/null
@@ -369,16 +363,16 @@ for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
 done
 
 # Verify huge pages
-HP_TOTAL=$(cat /proc/meminfo 2>/dev/null | grep HugePages_Total | awk '{print $2}')
-HP_FREE=$(cat /proc/meminfo 2>/dev/null | grep HugePages_Free | awk '{print $2}')
-echo "Huge Pages: $HP_FREE free of $HP_TOTAL total"
+HP_TOTAL=$(grep HugePages_Total /proc/meminfo 2>/dev/null | awk '{print $2}')
+HP_FREE=$(grep HugePages_Free /proc/meminfo 2>/dev/null | awk '{print $2}')
+echo "Huge Pages: $HP_FREE free of $HP_TOTAL total (need ~1200 for RandomX)"
 OPTSCRIPT
     chmod 755 /opt/frynet-config/optimize.sh
     
     # Check results
-    HP_TOTAL=$(cat /proc/meminfo 2>/dev/null | grep HugePages_Total | awk '{print $2}')
+    HP_TOTAL=$(grep HugePages_Total /proc/meminfo 2>/dev/null | awk '{print $2}')
     if [ -n "$HP_TOTAL" ] && [ "$HP_TOTAL" -gt 0 ]; then
-        log "  Huge pages enabled: $HP_TOTAL pages"
+        log "  Huge pages enabled: $HP_TOTAL pages (2MB each)"
     else
         warn "  Could not enable huge pages (may need reboot)"
     fi
@@ -1569,7 +1563,7 @@ esac
 
 # For Unmineable coins, prepend the coin ticker to the wallet address
 # Also add referral code for Unmineable (dev fee)
-UNMINEABLE_REFERRAL="fryk-bgy4"  # Dev referral code
+UNMINEABLE_REFERRAL="efz3-b4fb"  # Referral code for Unmineable
 if [ "$IS_UNMINEABLE" = "true" ]; then
     COIN_UPPER=$(echo "$MINER" | tr 'a-z' 'A-Z')
     # Check if wallet already has the prefix
@@ -1628,37 +1622,25 @@ if [ "$USE_CPUMINER" = "true" ]; then
     # cpuminer - use stdbuf for unbuffered output
     cat >> "$SCRIPT_FILE" <<EOF
 # Run cpuminer with unbuffered output
-if command -v stdbuf >/dev/null 2>&1; then
-    stdbuf -oL -eL /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u $WALLET.$WORKER -p x --threads=$THREADS 2>&1 | tee -a "\$LOG"
-else
-    /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u $WALLET.$WORKER -p x --threads=$THREADS 2>&1 | while IFS= read -r line; do echo "[\$(date)] \$line" >> "\$LOG"; echo "\$line"; done
-fi
+exec /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u $WALLET.$WORKER -p x --threads=$THREADS 2>&1 | tee -a "\$LOG"
 EOF
 else
     # xmrig - optimized flags for better hashrate
-    # --randomx-1gb-pages: Use 1GB huge pages (major boost)
     # --cpu-priority 5: Highest priority
-    # --randomx-no-numa: Better for single socket
-    XMRIG_OPTS="--cpu-priority 5 --randomx-1gb-pages --randomx-no-numa"
+    # --randomx-no-numa: Better for single socket systems
+    # Note: 1GB pages removed - requires boot-time kernel config
+    XMRIG_OPTS="--cpu-priority 5 --randomx-no-numa"
     
     if [ "$IS_UNMINEABLE" = "true" ]; then
         # For Unmineable, add referral code to worker name
         cat >> "$SCRIPT_FILE" <<EOF
 # Run xmrig for Unmineable with referral code and optimizations
-if command -v stdbuf >/dev/null 2>&1; then
-    stdbuf -oL -eL /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER#$UNMINEABLE_REFERRAL -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 $XMRIG_OPTS 2>&1 | tee -a "\$LOG"
-else
-    /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER#$UNMINEABLE_REFERRAL -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 $XMRIG_OPTS 2>&1 | while IFS= read -r line; do echo "[\$(date)] \$line" >> "\$LOG"; echo "\$line"; done
-fi
+exec /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER#$UNMINEABLE_REFERRAL -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 $XMRIG_OPTS 2>&1 | tee -a "\$LOG"
 EOF
     else
         cat >> "$SCRIPT_FILE" <<EOF
 # Run xmrig with 1% dev donation and optimizations
-if command -v stdbuf >/dev/null 2>&1; then
-    stdbuf -oL -eL /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 $XMRIG_OPTS 2>&1 | tee -a "\$LOG"
-else
-    /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 $XMRIG_OPTS 2>&1 | while IFS= read -r line; do echo "[\$(date)] \$line" >> "\$LOG"; echo "\$line"; done
-fi
+exec /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 $XMRIG_OPTS 2>&1 | tee -a "\$LOG"
 EOF
     fi
 fi
@@ -1910,8 +1892,8 @@ if [ -f "$SCRIPT_FILE" ]; then
     # Clear old log and mark start time
     echo "[$(date)] Starting $miner mining..." > "$LOG_FILE"
     
-    # Start miner using nohup, redirect to log, write PID
-    nohup sh "$SCRIPT_FILE" >> "$LOG_FILE" 2>&1 &
+    # Start miner - script handles its own logging via tee
+    nohup sh "$SCRIPT_FILE" >/dev/null 2>&1 &
     MINER_PID=$!
     echo "$MINER_PID" > "$PID_FILE"
     chmod 666 "$PID_FILE"
