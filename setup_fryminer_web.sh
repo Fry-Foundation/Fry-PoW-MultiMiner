@@ -281,17 +281,60 @@ install_dependencies() {
     log "Installing dependencies..."
     if command -v apt-get >/dev/null 2>&1; then
         apt-get update >/dev/null 2>&1
-        apt-get install -y wget curl tar gzip python3 build-essential git \
-            automake autoconf libcurl4-openssl-dev libjansson-dev libssl-dev \
-            libgmp-dev make g++ cmake ca-certificates lsof coreutils cron \
-            msr-tools cpufrequtils >/dev/null 2>&1 || true
+        # Core dependencies
+        apt-get install -y wget curl tar gzip python3 ca-certificates lsof coreutils cron >/dev/null 2>&1 || true
+        
+        # Build tools for compiling from source
+        apt-get install -y build-essential git automake autoconf make g++ cmake pkg-config >/dev/null 2>&1 || true
+        
+        # XMRig specific dependencies
+        apt-get install -y libuv1-dev libssl-dev libhwloc-dev >/dev/null 2>&1 || true
+        
+        # cpuminer dependencies  
+        apt-get install -y libcurl4-openssl-dev libjansson-dev libgmp-dev >/dev/null 2>&1 || true
+        
+        # Mining optimizations
+        apt-get install -y msr-tools cpufrequtils >/dev/null 2>&1 || true
+        
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y wget curl tar gzip python3 gcc gcc-c++ make git \
-            automake autoconf libcurl-devel jansson-devel openssl-devel \
-            gmp-devel cmake ca-certificates lsof coreutils cronie \
-            msr-tools cpufrequtils >/dev/null 2>&1 || true
+        # Core dependencies
+        yum install -y wget curl tar gzip python3 ca-certificates lsof coreutils cronie >/dev/null 2>&1 || true
+        
+        # Build tools
+        yum install -y gcc gcc-c++ make git automake autoconf cmake pkgconfig >/dev/null 2>&1 || true
+        
+        # XMRig specific dependencies
+        yum install -y libuv-devel openssl-devel hwloc-devel >/dev/null 2>&1 || true
+        
+        # cpuminer dependencies
+        yum install -y libcurl-devel jansson-devel gmp-devel >/dev/null 2>&1 || true
+        
+        # Mining optimizations
+        yum install -y msr-tools cpufrequtils >/dev/null 2>&1 || true
+        
+    elif command -v pacman >/dev/null 2>&1; then
+        # Arch Linux
+        pacman -Sy --noconfirm wget curl tar gzip python3 ca-certificates lsof coreutils cronie >/dev/null 2>&1 || true
+        pacman -Sy --noconfirm base-devel git cmake libuv openssl hwloc curl jansson gmp >/dev/null 2>&1 || true
+        
+    elif command -v apk >/dev/null 2>&1; then
+        # Alpine Linux
+        apk add --no-cache wget curl tar gzip python3 ca-certificates lsof coreutils >/dev/null 2>&1 || true
+        apk add --no-cache build-base git cmake libuv-dev openssl-dev hwloc-dev curl-dev jansson-dev gmp-dev >/dev/null 2>&1 || true
     fi
+    
     log "Dependencies installed"
+    
+    # Verify critical build tools
+    if ! command -v cmake >/dev/null 2>&1; then
+        warn "⚠️  cmake not installed - XMRig will fail to build from source"
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+        warn "⚠️  git not installed - Cannot clone source repositories"
+    fi
+    if ! command -v gcc >/dev/null 2>&1; then
+        warn "⚠️  gcc not installed - Cannot compile from source"
+    fi
 }
 
 # Optimize system for mining (huge pages, MSR, CPU governor)
@@ -441,32 +484,59 @@ install_xmrig() {
                 log "Building XMRig from source for x86_64..."
                 rm -rf xmrig xmrig.tar.gz 2>/dev/null
                 
+                # Check dependencies
                 if ! command -v git >/dev/null 2>&1; then
-                    warn "git not installed, cannot build from source"
+                    warn "❌ git not installed - install it first: apt-get install git"
                     return 1
                 fi
                 
                 if ! command -v cmake >/dev/null 2>&1; then
-                    warn "cmake not installed, cannot build from source"
+                    warn "❌ cmake not installed - install it first: apt-get install cmake"
                     return 1
                 fi
                 
-                git clone --depth 1 --progress https://github.com/xmrig/xmrig.git 2>&1 || { warn "git clone failed"; return 1; }
-                cd xmrig || return 1
-                mkdir -p build && cd build || return 1
+                if ! command -v gcc >/dev/null 2>&1; then
+                    warn "❌ gcc not installed - install it first: apt-get install build-essential"
+                    return 1
+                fi
                 
-                log "Running cmake..."
-                cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_HWLOC=OFF >/dev/null 2>&1 || { warn "cmake failed"; cd "$MINERS_DIR"; return 1; }
+                log "Cloning XMRig repository..."
+                if ! git clone --depth 1 https://github.com/xmrig/xmrig.git 2>&1; then
+                    warn "❌ git clone failed - check network connection"
+                    return 1
+                fi
                 
-                log "Building (this takes a few minutes)..."
-                make -j"$(nproc)" 2>&1 | grep -E "error|Error|ERROR" || true
+                cd xmrig || { warn "❌ Failed to cd to xmrig directory"; return 1; }
+                mkdir -p build && cd build || { warn "❌ Failed to create build directory"; return 1; }
+                
+                log "Running cmake (this may take a minute)..."
+                CMAKE_OUTPUT=$(cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_HWLOC=OFF 2>&1)
+                CMAKE_EXIT=$?
+                
+                if [ $CMAKE_EXIT -ne 0 ]; then
+                    warn "❌ cmake configuration failed:"
+                    echo "$CMAKE_OUTPUT" | tail -20
+                    cd "$MINERS_DIR"
+                    return 1
+                fi
+                
+                log "Building XMRig (this takes 2-5 minutes)..."
+                BUILD_OUTPUT=$(make -j"$(nproc)" 2>&1)
+                BUILD_EXIT=$?
+                
+                if [ $BUILD_EXIT -ne 0 ]; then
+                    warn "❌ Build failed:"
+                    echo "$BUILD_OUTPUT" | grep -i "error" | tail -10
+                    cd "$MINERS_DIR"
+                    return 1
+                fi
                 
                 if [ -f xmrig ]; then
                     cp xmrig /usr/local/bin/xmrig 2>/dev/null
                     chmod +x /usr/local/bin/xmrig
                     log "✅ Built from source successfully"
                 else
-                    warn "Build failed - xmrig binary not found"
+                    warn "❌ Build completed but xmrig binary not found"
                     cd "$MINERS_DIR"
                     return 1
                 fi
