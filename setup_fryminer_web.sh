@@ -731,11 +731,13 @@ install_cpuminer() {
 setup_sudo_permissions() {
     log "Configuring sudo permissions for updates..."
     
-    # Detect web server user
-    WEB_USER="www-data"
-    if ! id "$WEB_USER" >/dev/null 2>&1; then
-        # Try other common web server users
-        for user in apache httpd nginx _www; do
+    # Detect who's running the web server by checking python http.server processes
+    WEB_USER=$(ps aux | grep "python3 -m http.server" | grep -v grep | awk '{print $1}' | head -1)
+    
+    if [ -z "$WEB_USER" ]; then
+        # Fallback: check common web server users
+        WEB_USER="www-data"
+        for user in fry root apache httpd nginx _www; do
             if id "$user" >/dev/null 2>&1; then
                 WEB_USER="$user"
                 break
@@ -743,12 +745,14 @@ setup_sudo_permissions() {
         done
     fi
     
-    log "Web server user: $WEB_USER"
+    log "Web server user detected: $WEB_USER"
     
     # Create sudoers file for FryMiner updates
+    # More permissive to handle different scenarios
     cat > /etc/sudoers.d/fryminer << EOF
-# Allow web server to run FryMiner operations without password
+# Allow web server user to run FryMiner operations without password
 $WEB_USER ALL=(ALL) NOPASSWD: /tmp/fryminer_update_*.sh
+$WEB_USER ALL=(ALL) NOPASSWD: /bin/sh /tmp/fryminer_update_*.sh
 $WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f xmrig
 $WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f cpuminer
 $WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f minerd
@@ -757,7 +761,22 @@ $WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -f cpuminer
 $WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -f minerd
 $WEB_USER ALL=(ALL) NOPASSWD: /bin/kill -9 [0-9]*
 $WEB_USER ALL=(ALL) NOPASSWD: /bin/kill [0-9]*
+
+# Also allow 'fry' user (common setup)
+fry ALL=(ALL) NOPASSWD: /tmp/fryminer_update_*.sh
+fry ALL=(ALL) NOPASSWD: /bin/sh /tmp/fryminer_update_*.sh
+fry ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f xmrig
+fry ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f cpuminer
+fry ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f minerd
+fry ALL=(ALL) NOPASSWD: /usr/bin/pkill -f xmrig
+fry ALL=(ALL) NOPASSWD: /usr/bin/pkill -f cpuminer
+fry ALL=(ALL) NOPASSWD: /usr/bin/pkill -f minerd
+fry ALL=(ALL) NOPASSWD: /bin/kill -9 [0-9]*
+fry ALL=(ALL) NOPASSWD: /bin/kill [0-9]*
+
+# Disable requiretty for both users
 Defaults:$WEB_USER !requiretty
+Defaults:fry !requiretty
 EOF
     
     chmod 440 /etc/sudoers.d/fryminer
@@ -765,8 +784,72 @@ EOF
     # Verify sudoers syntax
     if visudo -c -f /etc/sudoers.d/fryminer >/dev/null 2>&1; then
         log "✅ Sudo permissions configured successfully"
+        log "Configured for users: $WEB_USER, fry"
     else
-        warn "⚠️  Sudoers file may have syntax issues, but continuing..."
+        warn "⚠️  Sudoers file may have syntax issues"
+        # Show the error
+        visudo -c -f /etc/sudoers.d/fryminer 2>&1 || true
+    fi
+    
+    # Test if current user can use sudo
+    if sudo -n true 2>/dev/null; then
+        log "✅ Current user can use sudo without password"
+    else
+        warn "⚠️  Current user cannot use sudo without password (this is normal during setup)"
+    fi
+}
+
+# Start web server as correct user (not root)
+start_webserver() {
+    log "Starting web server..."
+    
+    # Get the real user (who ran sudo)
+    REAL_USER="${SUDO_USER:-$USER}"
+    if [ "$REAL_USER" = "root" ] || [ -z "$REAL_USER" ]; then
+        # Fallback to checking common users
+        for user in fry pi ubuntu; do
+            if id "$user" >/dev/null 2>&1; then
+                REAL_USER="$user"
+                break
+            fi
+        done
+    fi
+    
+    log "Starting web server as user: $REAL_USER"
+    
+    # Kill any existing web server
+    pkill -f "python3 -m http.server $PORT" 2>/dev/null || true
+    sleep 1
+    
+    # Start web server as the real user (not root)
+    if [ "$REAL_USER" != "root" ] && [ -n "$REAL_USER" ]; then
+        cd "$BASE"
+        # Use su to run as the correct user
+        su - "$REAL_USER" -c "cd $BASE && nohup python3 -m http.server $PORT --cgi > /dev/null 2>&1 &"
+        sleep 2
+        
+        # Verify it's running
+        if pgrep -f "python3 -m http.server $PORT" >/dev/null 2>&1; then
+            WEB_PID=$(pgrep -f "python3 -m http.server $PORT" | head -1)
+            WEB_USER=$(ps -o user= -p "$WEB_PID" 2>/dev/null)
+            log "✅ Web server started (PID: $WEB_PID, User: $WEB_USER)"
+            
+            # Verify the user is correct
+            if [ "$WEB_USER" = "root" ]; then
+                warn "⚠️  Web server is running as root (should be $REAL_USER)"
+                warn "Force Update may not work. Run setup again if issues occur."
+            else
+                log "✅ Web server running as correct user: $WEB_USER"
+            fi
+        else
+            warn "⚠️  Failed to start web server automatically"
+            log "You can start it manually with:"
+            log "  cd $BASE && python3 -m http.server $PORT --cgi &"
+        fi
+    else
+        warn "⚠️  Could not detect non-root user, skipping auto-start"
+        log "Start web server manually:"
+        log "  cd $BASE && python3 -m http.server $PORT --cgi &"
     fi
 }
 
@@ -2245,12 +2328,25 @@ case "$ACTION" in
             INSTALL_OUTPUT="/tmp/install_output_$$.log"
             
             # Check if we can use sudo without password
+            CURRENT_USER=$(whoami)
+            echo "[$(date)] 🔍 Running as user: $CURRENT_USER" >> "$MINER_LOG"
+            
             CAN_SUDO=false
             if sudo -n true 2>/dev/null; then
                 CAN_SUDO=true
-                echo "[$(date)] ✅ Sudo access confirmed" >> "$MINER_LOG"
+                echo "[$(date)] ✅ Sudo access confirmed for $CURRENT_USER" >> "$MINER_LOG"
             else
-                echo "[$(date)] ⚠️  No passwordless sudo - attempting direct install" >> "$MINER_LOG"
+                SUDO_ERROR=$(sudo -n true 2>&1)
+                echo "[$(date)] ⚠️  No passwordless sudo for $CURRENT_USER" >> "$MINER_LOG"
+                echo "[$(date)] Sudo error: $SUDO_ERROR" >> "$MINER_LOG"
+                
+                # Check if sudoers file exists
+                if [ -f /etc/sudoers.d/fryminer ]; then
+                    echo "[$(date)] ℹ️  Sudoers file exists, checking contents..." >> "$MINER_LOG"
+                    cat /etc/sudoers.d/fryminer >> "$MINER_LOG" 2>&1
+                else
+                    echo "[$(date)] ⚠️  Sudoers file missing: /etc/sudoers.d/fryminer" >> "$MINER_LOG"
+                fi
             fi
             
             # Run installation with sudo if available, otherwise try without
@@ -2413,6 +2509,15 @@ SCRIPT
     log "  • 1% dev fee (XMRig coins only)"
     log ""
     log "Your miner is ready to use!"
+    log "================================================"
+    
+    # Start web server automatically
+    start_webserver
+    
+    log ""
+    log "================================================"
+    log "Setup Complete!"
+    log "Web Interface: http://$IP:$PORT"
     log "================================================"
 }
 
