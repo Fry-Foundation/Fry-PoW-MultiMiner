@@ -928,6 +928,7 @@ optgroup { background: #1a1a1a; color: #dc143c; }
                             <option value="ada">Cardano (ADA)</option>
                             <option value="sol">Solana (SOL)</option>
                             <option value="zec">Zcash (ZEC)</option>
+                            <option value="etc">Ethereum Classic (ETC)</option>
                             <option value="rvn">Ravencoin (RVN)</option>
                             <option value="trx">Tron (TRX)</option>
                             <option value="vet">VeChain (VET)</option>
@@ -1092,7 +1093,7 @@ const defaultPools = {
     'dcr': 'dcr.suprnova.cc:3252',
     'kda': 'pool.woolypooly.com:3112',
     'bch-lotto': 'solo.ckpool.org:3333',
-    'btc-lotto': 'btc.solopool.org:3333',
+    'btc-lotto': 'solo.ckpool.org:3333',
     'ltc-lotto': 'litesolo.org:3333',
     'doge-lotto': 'litesolo.org:3334',
     'xmr-lotto': 'xmr.solopool.org:3333',
@@ -1100,6 +1101,7 @@ const defaultPools = {
     'ada': 'rx.unmineable.com:3333',
     'sol': 'rx.unmineable.com:3333',
     'zec': 'rx.unmineable.com:3333',
+    'etc': 'rx.unmineable.com:3333',
     'rvn': 'rx.unmineable.com:3333',
     'trx': 'rx.unmineable.com:3333',
     'vet': 'rx.unmineable.com:3333',
@@ -1117,7 +1119,7 @@ const defaultPools = {
 };
 
 // Fixed pools (cannot be changed)
-const fixedPools = ['btc-lotto', 'bch-lotto', 'ltc-lotto', 'doge-lotto', 'xmr-lotto', 'shib', 'ada', 'sol', 'zec', 'rvn', 'trx', 'vet', 'xrp', 'dot', 'matic', 'atom', 'link', 'xlm', 'algo', 'avax', 'near', 'ftm', 'one'];
+const fixedPools = ['btc-lotto', 'bch-lotto', 'ltc-lotto', 'doge-lotto', 'xmr-lotto', 'shib', 'ada', 'sol', 'zec', 'etc', 'rvn', 'trx', 'vet', 'xrp', 'dot', 'matic', 'atom', 'link', 'xlm', 'algo', 'avax', 'near', 'ftm', 'one'];
 
 // Coin info messages
 const coinInfo = {
@@ -1161,8 +1163,10 @@ document.getElementById('miner').addEventListener('change', function() {
         poolGroup.style.display = 'none';
     } else {
         poolGroup.style.display = 'block';
-        // Only set default pool if field is empty (preserve custom pools)
-        if (defaultPools[coin] && !poolInput.value) {
+        // Only set default pool if:
+        // 1. Field is empty, AND
+        // 2. Not loading saved config
+        if (defaultPools[coin] && !poolInput.value && !isLoadingConfig) {
             poolInput.value = defaultPools[coin];
         }
         poolInput.disabled = fixedPools.includes(coin);
@@ -1208,11 +1212,15 @@ document.getElementById('configForm').addEventListener('submit', function(e) {
     });
 });
 
+// Flag to prevent pool auto-fill during config load
+let isLoadingConfig = false;
+
 function loadConfig() {
     fetch('/cgi-bin/load.cgi')
         .then(r => r.json())
         .then(data => {
             if (data.miner) {
+                isLoadingConfig = true;
                 document.getElementById('miner').value = data.miner;
                 document.getElementById('wallet').value = data.wallet;
                 document.getElementById('worker').value = data.worker || 'worker1';
@@ -1221,6 +1229,7 @@ function loadConfig() {
                 document.getElementById('miner').dispatchEvent(new Event('change'));
                 document.getElementById('currentCoin').textContent = data.miner.toUpperCase();
                 document.getElementById('currentPool').textContent = data.pool || 'Default';
+                isLoadingConfig = false;
             }
         })
         .catch(() => {});
@@ -1507,7 +1516,7 @@ case "$MINER" in
     zen) [ -z "$POOL" ] && POOL="zen.suprnova.cc:3618" ;;
     kda) [ -z "$POOL" ] && POOL="pool.woolypooly.com:3112" ;;
     bch-lotto) POOL="solo.ckpool.org:3333" ;;
-    btc-lotto) POOL="btc.solopool.org:3333" ;;
+    btc-lotto) POOL="solo.ckpool.org:3333" ;;
     ltc-lotto) POOL="litesolo.org:3333" ;;
     doge-lotto) POOL="litesolo.org:3334" ;;
     xmr-lotto) POOL="xmr.solopool.org:3333" ;;
