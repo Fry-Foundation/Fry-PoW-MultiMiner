@@ -215,13 +215,13 @@ rm -f "$TEMP_SCRIPT"
 AUTOUPDATE
     chmod 755 "$UPDATE_SCRIPT"
     
-    # Set initial version from GitHub
+    # Set initial version from GitHub (with timeout to prevent hanging)
     log "Fetching current version from GitHub..."
     CURRENT_VER=""
     if command -v curl >/dev/null 2>&1; then
-        CURRENT_VER=$(curl -s "https://api.github.com/repos/Fry-Foundation/Fry-PoW-MultiMiner/commits/main" 2>/dev/null | grep -m1 '"sha"' | cut -d'"' -f4 | head -c 7)
+        CURRENT_VER=$(curl -s --connect-timeout 5 --max-time 10 "https://api.github.com/repos/Fry-Foundation/Fry-PoW-MultiMiner/commits/main" 2>/dev/null | grep -m1 '"sha"' | cut -d'"' -f4 | head -c 7)
     elif command -v wget >/dev/null 2>&1; then
-        CURRENT_VER=$(wget -qO- "https://api.github.com/repos/Fry-Foundation/Fry-PoW-MultiMiner/commits/main" 2>/dev/null | grep -m1 '"sha"' | cut -d'"' -f4 | head -c 7)
+        CURRENT_VER=$(wget -qO- --timeout=10 "https://api.github.com/repos/Fry-Foundation/Fry-PoW-MultiMiner/commits/main" 2>/dev/null | grep -m1 '"sha"' | cut -d'"' -f4 | head -c 7)
     fi
     
     if [ -n "$CURRENT_VER" ]; then
@@ -229,26 +229,39 @@ AUTOUPDATE
         log "Version set to: $CURRENT_VER"
     else
         echo "unknown" > "$VERSION_FILE"
-        log "Could not fetch version (will update on next check)"
+        warn "Could not fetch version (will update on next check)"
     fi
     
-    # Setup daily cron job
-    log "Setting up daily auto-update cron job..."
-    
-    # Remove any existing fryminer cron entries
-    crontab -l 2>/dev/null | grep -v "fryminer\|auto_update" > /tmp/crontab.tmp 2>/dev/null || true
-    
-    # Add new cron job - runs at 4 AM daily
-    echo "0 4 * * * /opt/frynet-config/auto_update.sh >/dev/null 2>&1" >> /tmp/crontab.tmp
-    
-    crontab /tmp/crontab.tmp 2>/dev/null || warn "Could not set up cron job - auto-update may need manual setup"
-    rm -f /tmp/crontab.tmp
+    # Setup daily cron job (skip if cron not available)
+    if command -v crontab >/dev/null 2>&1; then
+        log "Setting up daily auto-update cron job..."
+        
+        # Ensure cron service is running
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable cron 2>/dev/null || systemctl enable crond 2>/dev/null || true
+            systemctl start cron 2>/dev/null || systemctl start crond 2>/dev/null || true
+        elif command -v service >/dev/null 2>&1; then
+            service cron start 2>/dev/null || service crond start 2>/dev/null || true
+        fi
+        
+        # Remove any existing fryminer cron entries
+        (crontab -l 2>/dev/null || echo "") | grep -v "fryminer\|auto_update" > /tmp/crontab.tmp 2>/dev/null || true
+        
+        # Add new cron job - runs at 4 AM daily
+        echo "0 4 * * * /opt/frynet-config/auto_update.sh >/dev/null 2>&1" >> /tmp/crontab.tmp
+        
+        crontab /tmp/crontab.tmp 2>/dev/null && log "Cron job installed" || warn "Could not set up cron job"
+        rm -f /tmp/crontab.tmp
+    else
+        warn "crontab not available - auto-update cron job not installed"
+        log "You can manually run: /opt/frynet-config/auto_update.sh"
+    fi
     
     # Create update log
-    touch /opt/frynet-config/logs/update.log
-    chmod 666 /opt/frynet-config/logs/update.log
+    touch /opt/frynet-config/logs/update.log 2>/dev/null || true
+    chmod 666 /opt/frynet-config/logs/update.log 2>/dev/null || true
     
-    log "Auto-update configured (runs daily at 4 AM)"
+    log "Auto-update configured"
 }
 
 # Set hostname
@@ -270,13 +283,107 @@ install_dependencies() {
         apt-get update >/dev/null 2>&1
         apt-get install -y wget curl tar gzip python3 build-essential git \
             automake autoconf libcurl4-openssl-dev libjansson-dev libssl-dev \
-            libgmp-dev make g++ cmake ca-certificates lsof coreutils cron >/dev/null 2>&1 || true
+            libgmp-dev make g++ cmake ca-certificates lsof coreutils cron \
+            msr-tools cpufrequtils >/dev/null 2>&1 || true
     elif command -v yum >/dev/null 2>&1; then
         yum install -y wget curl tar gzip python3 gcc gcc-c++ make git \
             automake autoconf libcurl-devel jansson-devel openssl-devel \
-            gmp-devel cmake ca-certificates lsof coreutils cronie >/dev/null 2>&1 || true
+            gmp-devel cmake ca-certificates lsof coreutils cronie \
+            msr-tools cpufrequtils >/dev/null 2>&1 || true
     fi
     log "Dependencies installed"
+}
+
+# Optimize system for mining (huge pages, MSR, CPU governor)
+optimize_for_mining() {
+    log "Applying mining optimizations..."
+    
+    # 1. Enable huge pages (gives 20-30% boost for RandomX)
+    log "  Configuring huge pages..."
+    
+    # Calculate optimal huge pages (1GB per thread + buffer)
+    THREADS=$(nproc)
+    HUGE_PAGES=$((THREADS * 3 + 8))  # ~3GB per thread for RandomX dataset
+    
+    # Set huge pages
+    sysctl -w vm.nr_hugepages=$HUGE_PAGES >/dev/null 2>&1 || true
+    
+    # Make persistent across reboots
+    if ! grep -q "vm.nr_hugepages" /etc/sysctl.conf 2>/dev/null; then
+        echo "vm.nr_hugepages=$HUGE_PAGES" >> /etc/sysctl.conf 2>/dev/null || true
+    fi
+    
+    # Set huge page permissions
+    echo "* soft memlock 262144" >> /etc/security/limits.conf 2>/dev/null || true
+    echo "* hard memlock 262144" >> /etc/security/limits.conf 2>/dev/null || true
+    
+    # 2. Enable MSR for RandomX boost (10-15% improvement)
+    log "  Enabling MSR access..."
+    modprobe msr 2>/dev/null || true
+    
+    # Try to enable MSR writes for RandomX
+    if [ -f /sys/module/msr/parameters/allow_writes ]; then
+        echo on > /sys/module/msr/parameters/allow_writes 2>/dev/null || true
+    fi
+    
+    # 3. Set CPU governor to performance mode
+    log "  Setting CPU to performance mode..."
+    if command -v cpufreq-set >/dev/null 2>&1; then
+        for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            echo "performance" > "$cpu" 2>/dev/null || true
+        done
+    fi
+    
+    # Alternative method
+    if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]; then
+        for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            echo "performance" > "$cpu" 2>/dev/null || true
+        done
+    fi
+    
+    # 4. Disable CPU frequency scaling limits
+    for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq; do
+        if [ -f "$cpu" ]; then
+            MAX_FREQ=$(cat "${cpu%min_freq}scaling_max_freq" 2>/dev/null)
+            [ -n "$MAX_FREQ" ] && echo "$MAX_FREQ" > "$cpu" 2>/dev/null || true
+        fi
+    done
+    
+    # 5. Create optimization script that runs before mining
+    cat > /opt/frynet-config/optimize.sh <<'OPTSCRIPT'
+#!/bin/sh
+# Mining optimization script - run before starting miner
+
+# Enable huge pages
+THREADS=$(nproc)
+HUGE_PAGES=$((THREADS * 3 + 8))
+sysctl -w vm.nr_hugepages=$HUGE_PAGES >/dev/null 2>&1
+
+# Load MSR module
+modprobe msr 2>/dev/null
+[ -f /sys/module/msr/parameters/allow_writes ] && echo on > /sys/module/msr/parameters/allow_writes 2>/dev/null
+
+# Set performance governor
+for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    [ -f "$gov" ] && echo "performance" > "$gov" 2>/dev/null
+done
+
+# Verify huge pages
+HP_TOTAL=$(cat /proc/meminfo 2>/dev/null | grep HugePages_Total | awk '{print $2}')
+HP_FREE=$(cat /proc/meminfo 2>/dev/null | grep HugePages_Free | awk '{print $2}')
+echo "Huge Pages: $HP_FREE free of $HP_TOTAL total"
+OPTSCRIPT
+    chmod 755 /opt/frynet-config/optimize.sh
+    
+    # Check results
+    HP_TOTAL=$(cat /proc/meminfo 2>/dev/null | grep HugePages_Total | awk '{print $2}')
+    if [ -n "$HP_TOTAL" ] && [ "$HP_TOTAL" -gt 0 ]; then
+        log "  Huge pages enabled: $HP_TOTAL pages"
+    else
+        warn "  Could not enable huge pages (may need reboot)"
+    fi
+    
+    log "Mining optimizations applied"
 }
 
 # Install XMRig - SUPPORTS ALL ARCHITECTURES
@@ -639,6 +746,9 @@ main() {
     # Install miners
     install_xmrig
     install_cpuminer
+    
+    # Apply mining optimizations (huge pages, MSR, CPU governor)
+    optimize_for_mining
     
     # Stop any existing FryMiner processes gracefully
     log "Stopping existing FryMiner processes..."
@@ -1492,6 +1602,12 @@ echo "[\$(date)] ========================================" >> "\$LOG"
 # Remove clean stop marker
 rm -f /opt/frynet-config/stopped 2>/dev/null
 
+# Run optimization script if available (huge pages, MSR, etc)
+if [ -x /opt/frynet-config/optimize.sh ]; then
+    echo "[\$(date)] Running mining optimizations..." >> "\$LOG"
+    /opt/frynet-config/optimize.sh >> "\$LOG" 2>&1
+fi
+
 # Start heartbeat logger in background
 (
     sleep 30
@@ -1519,25 +1635,29 @@ else
 fi
 EOF
 else
-    # xmrig - has donate-level for dev fee (1% default)
-    # Also uses unbuffered output
+    # xmrig - optimized flags for better hashrate
+    # --randomx-1gb-pages: Use 1GB huge pages (major boost)
+    # --cpu-priority 5: Highest priority
+    # --randomx-no-numa: Better for single socket
+    XMRIG_OPTS="--cpu-priority 5 --randomx-1gb-pages --randomx-no-numa"
+    
     if [ "$IS_UNMINEABLE" = "true" ]; then
         # For Unmineable, add referral code to worker name
         cat >> "$SCRIPT_FILE" <<EOF
-# Run xmrig for Unmineable with referral code
+# Run xmrig for Unmineable with referral code and optimizations
 if command -v stdbuf >/dev/null 2>&1; then
-    stdbuf -oL -eL /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER#$UNMINEABLE_REFERRAL -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 2>&1 | tee -a "\$LOG"
+    stdbuf -oL -eL /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER#$UNMINEABLE_REFERRAL -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 $XMRIG_OPTS 2>&1 | tee -a "\$LOG"
 else
-    /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER#$UNMINEABLE_REFERRAL -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 2>&1 | while IFS= read -r line; do echo "[\$(date)] \$line" >> "\$LOG"; echo "\$line"; done
+    /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER#$UNMINEABLE_REFERRAL -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 $XMRIG_OPTS 2>&1 | while IFS= read -r line; do echo "[\$(date)] \$line" >> "\$LOG"; echo "\$line"; done
 fi
 EOF
     else
         cat >> "$SCRIPT_FILE" <<EOF
-# Run xmrig with 1% dev donation
+# Run xmrig with 1% dev donation and optimizations
 if command -v stdbuf >/dev/null 2>&1; then
-    stdbuf -oL -eL /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 2>&1 | tee -a "\$LOG"
+    stdbuf -oL -eL /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 $XMRIG_OPTS 2>&1 | tee -a "\$LOG"
 else
-    /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 2>&1 | while IFS= read -r line; do echo "[\$(date)] \$line" >> "\$LOG"; echo "\$line"; done
+    /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 $XMRIG_OPTS 2>&1 | while IFS= read -r line; do echo "[\$(date)] \$line" >> "\$LOG"; echo "\$line"; done
 fi
 EOF
     fi
@@ -1964,6 +2084,10 @@ SCRIPT
     # Get IP
     IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
     
+    # Setup auto-update
+    setup_auto_update
+    
+    log ""
     log "================================================"
     log "✅ FryMiner Installation Complete!"
     log "================================================"
@@ -1978,18 +2102,14 @@ SCRIPT
     log "  • Unmineable: SHIB, ADA, SOL, XRP, DOT, and many more"
     log ""
     log "Features:"
-    log "  • All 35+ coins restored"
-    log "  • Stratum URL fix (no more doubling)"
-    log "  • Monitor tab with live logs"
+    log "  • Monitor tab with live activity logs"
     log "  • Statistics tab with hashrate"
     log "  • Thermal monitoring"
-    log "  • Auto-update support"
+    log "  • Auto-update (daily at 4 AM)"
+    log "  • 1% dev fee (XMRig coins only)"
     log ""
     log "Your miner is ready to use!"
     log "================================================"
-    
-    # Setup auto-update last
-    setup_auto_update
 }
 
 # Run installation
