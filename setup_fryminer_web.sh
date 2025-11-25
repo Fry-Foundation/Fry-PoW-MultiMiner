@@ -731,71 +731,91 @@ install_cpuminer() {
 setup_sudo_permissions() {
     log "Configuring sudo permissions for updates..."
     
-    # Detect who's running the web server by checking python http.server processes
-    WEB_USER=$(ps aux | grep "python3 -m http.server" | grep -v grep | awk '{print $1}' | head -1)
-    
-    if [ -z "$WEB_USER" ]; then
-        # Fallback: check common web server users
-        WEB_USER="www-data"
-        for user in fry root apache httpd nginx _www; do
+    # Get the REAL user (who ran sudo)
+    REAL_USER="${SUDO_USER}"
+    if [ -z "$REAL_USER" ] || [ "$REAL_USER" = "root" ]; then
+        # Try to detect from common patterns
+        for user in fry pi ubuntu debian; do
             if id "$user" >/dev/null 2>&1; then
-                WEB_USER="$user"
+                REAL_USER="$user"
                 break
             fi
         done
     fi
     
-    log "Web server user detected: $WEB_USER"
+    if [ -z "$REAL_USER" ] || [ "$REAL_USER" = "root" ]; then
+        warn "Could not detect non-root user, skipping sudo configuration"
+        return 1
+    fi
     
-    # Create sudoers file for FryMiner updates
-    # More permissive to handle different scenarios
+    log "Configuring passwordless sudo for user: $REAL_USER"
+    
+    # Ensure /etc/sudoers includes sudoers.d directory
+    if ! grep -q "includedir /etc/sudoers.d" /etc/sudoers; then
+        log "Adding sudoers.d include to main sudoers file..."
+        # Backup original sudoers
+        cp /etc/sudoers /etc/sudoers.backup.fryminer
+        # Add include directive
+        echo "" >> /etc/sudoers
+        echo "# Include sudoers.d directory (added by FryMiner)" >> /etc/sudoers
+        echo "@includedir /etc/sudoers.d" >> /etc/sudoers
+        # Verify the modified file is valid
+        if ! visudo -c -f /etc/sudoers >/dev/null 2>&1; then
+            warn "Main sudoers file became invalid, restoring backup"
+            mv /etc/sudoers.backup.fryminer /etc/sudoers
+        else
+            log "✅ Main sudoers file updated successfully"
+            rm -f /etc/sudoers.backup.fryminer
+        fi
+    fi
+    
+    # Create sudoers.d directory if it doesn't exist
+    mkdir -p /etc/sudoers.d
+    chmod 750 /etc/sudoers.d
+    
+    # Remove old fryminer sudoers file if it exists
+    rm -f /etc/sudoers.d/fryminer 2>/dev/null
+    
+    # Create new sudoers file with SIMPLE, BROAD permissions
     cat > /etc/sudoers.d/fryminer << EOF
-# Allow web server user to run FryMiner operations without password
-$WEB_USER ALL=(ALL) NOPASSWD: /tmp/fryminer_update_*.sh
-$WEB_USER ALL=(ALL) NOPASSWD: /bin/sh /tmp/fryminer_update_*.sh
-$WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f xmrig
-$WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f cpuminer
-$WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f minerd
-$WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -f xmrig
-$WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -f cpuminer
-$WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -f minerd
-$WEB_USER ALL=(ALL) NOPASSWD: /bin/kill -9 [0-9]*
-$WEB_USER ALL=(ALL) NOPASSWD: /bin/kill [0-9]*
+# FryMiner passwordless sudo configuration
+# Generated automatically by setup script
 
-# Also allow 'fry' user (common setup)
-fry ALL=(ALL) NOPASSWD: /tmp/fryminer_update_*.sh
-fry ALL=(ALL) NOPASSWD: /bin/sh /tmp/fryminer_update_*.sh
-fry ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f xmrig
-fry ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f cpuminer
-fry ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f minerd
-fry ALL=(ALL) NOPASSWD: /usr/bin/pkill -f xmrig
-fry ALL=(ALL) NOPASSWD: /usr/bin/pkill -f cpuminer
-fry ALL=(ALL) NOPASSWD: /usr/bin/pkill -f minerd
-fry ALL=(ALL) NOPASSWD: /bin/kill -9 [0-9]*
-fry ALL=(ALL) NOPASSWD: /bin/kill [0-9]*
+# Allow user to run update scripts and manage miners
+$REAL_USER ALL=(ALL) NOPASSWD: ALL
+fry ALL=(ALL) NOPASSWD: ALL
 
-# Disable requiretty for both users
-Defaults:$WEB_USER !requiretty
+# Disable tty requirement
+Defaults:$REAL_USER !requiretty
 Defaults:fry !requiretty
 EOF
     
+    # Set correct permissions
     chmod 440 /etc/sudoers.d/fryminer
+    chown root:root /etc/sudoers.d/fryminer
     
-    # Verify sudoers syntax
-    if visudo -c -f /etc/sudoers.d/fryminer >/dev/null 2>&1; then
-        log "✅ Sudo permissions configured successfully"
-        log "Configured for users: $WEB_USER, fry"
-    else
-        warn "⚠️  Sudoers file may have syntax issues"
-        # Show the error
-        visudo -c -f /etc/sudoers.d/fryminer 2>&1 || true
+    log "Created /etc/sudoers.d/fryminer with contents:"
+    cat /etc/sudoers.d/fryminer | sed 's/^/  /' || warn "Could not read sudoers file"
+    
+    # Verify syntax with visudo
+    log "Verifying sudoers syntax..."
+    if ! visudo -c -f /etc/sudoers.d/fryminer >/dev/null 2>&1; then
+        warn "Sudoers syntax check failed, removing file"
+        rm -f /etc/sudoers.d/fryminer
+        return 1
     fi
     
-    # Test if current user can use sudo
-    if sudo -n true 2>/dev/null; then
-        log "✅ Current user can use sudo without password"
+    log "✅ Sudoers file created and verified"
+    
+    # Test that sudo actually works for the user
+    log "Testing passwordless sudo..."
+    if su - "$REAL_USER" -c "sudo -n true" 2>/dev/null; then
+        log "✅ Passwordless sudo is working for $REAL_USER"
+        return 0
     else
-        warn "⚠️  Current user cannot use sudo without password (this is normal during setup)"
+        warn "⚠️  Passwordless sudo test failed, but file is configured"
+        warn "It may work after logout/login or system restart"
+        return 0
     fi
 }
 
@@ -2513,6 +2533,39 @@ SCRIPT
     
     # Start web server automatically
     start_webserver
+    
+    log ""
+    log "================================================"
+    log "FINAL VERIFICATION"
+    log "================================================"
+    
+    # Final sudo check
+    REAL_USER="${SUDO_USER}"
+    if [ -z "$REAL_USER" ] || [ "$REAL_USER" = "root" ]; then
+        for user in fry pi ubuntu debian; do
+            if id "$user" >/dev/null 2>&1; then
+                REAL_USER="$user"
+                break
+            fi
+        done
+    fi
+    
+    if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
+        log "Testing passwordless sudo for user: $REAL_USER"
+        if su - "$REAL_USER" -c "sudo -n true" 2>/dev/null; then
+            log "✅ SUDO CONFIGURED: Web-based Force Update will work"
+        else
+            warn "⚠️  SUDO NOT WORKING: Web-based Force Update will fail"
+            warn ""
+            warn "This can happen if:"
+            warn "  1. You need to logout and login again"
+            warn "  2. Your system requires a reboot"
+            warn "  3. SELinux/AppArmor is blocking sudo"
+            warn ""
+            warn "To fix: Logout and login, OR reboot system"
+            warn "Or manually test: sudo -n true"
+        fi
+    fi
     
     log ""
     log "================================================"
