@@ -1314,11 +1314,11 @@ function checkForUpdate() {
     fetch('/cgi-bin/update.cgi?check')
         .then(r => r.json())
         .then(data => {
-            document.getElementById('localVersion').textContent = data.local || data.version || 'unknown';
-            document.getElementById('remoteVersion').textContent = data.remote || data.version || 'unknown';
+            document.getElementById('localVersion').textContent = data.local || 'unknown';
+            document.getElementById('remoteVersion').textContent = data.remote || 'unknown';
             
             if (data.status === 'available') {
-                document.getElementById('updateStatus').textContent = '🆕 Update available (will auto-install at 4 AM)';
+                document.getElementById('updateStatus').textContent = '🆕 Update available';
                 document.getElementById('updateStatus').style.color = '#ffff00';
             } else if (data.status === 'current') {
                 document.getElementById('updateStatus').textContent = '✅ Up to date';
@@ -1334,27 +1334,57 @@ function checkForUpdate() {
         });
 }
 
+let updateCheckInterval = null;
+
+function pollUpdateStatus() {
+    fetch('/cgi-bin/update.cgi?status')
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'complete') {
+                clearInterval(updateCheckInterval);
+                document.getElementById('updateResult').innerHTML = '<div class="success">✅ Update complete! Reloading...</div>';
+                setTimeout(() => window.location.reload(), 3000);
+            } else if (data.status === 'failed') {
+                clearInterval(updateCheckInterval);
+                document.getElementById('updateResult').innerHTML = '<div class="error">❌ Update failed. Check logs.</div>';
+            } else if (data.status === 'running') {
+                // Still running, keep polling
+                document.getElementById('updateResult').innerHTML = '<div class="info-box">⏳ Update in progress... Please wait.</div>';
+            }
+        })
+        .catch(() => {
+            // Server might be restarting
+            document.getElementById('updateResult').innerHTML = '<div class="info-box">⏳ Server restarting... Will reload shortly.</div>';
+        });
+}
+
 function forceUpdate() {
-    if (!confirm('Force update now? Mining will be restarted automatically.')) {
+    if (!confirm('Force update now? This will download the latest version and restart mining.')) {
         return;
     }
     
-    document.getElementById('updateResult').innerHTML = '<div class="info-box">⏳ Running update...</div>';
+    document.getElementById('updateResult').innerHTML = '<div class="info-box">⏳ Starting update...</div>';
     
     fetch('/cgi-bin/update.cgi?update')
         .then(r => r.json())
         .then(data => {
-            if (data.status === 'updating' || data.status === 'success') {
-                document.getElementById('updateResult').innerHTML = '<div class="success">✅ Update started! Page will reload in 60 seconds...</div>';
-                setTimeout(() => window.location.reload(), 60000);
-            } else if (data.status === 'current') {
-                document.getElementById('updateResult').innerHTML = '<div class="info-box">ℹ️ Already running latest version</div>';
+            if (data.status === 'started') {
+                document.getElementById('updateResult').innerHTML = '<div class="info-box">⏳ Update running... Please wait (this may take a few minutes).</div>';
+                // Start polling for completion
+                updateCheckInterval = setInterval(pollUpdateStatus, 5000);
+                // Also set a timeout to reload after max 3 minutes
+                setTimeout(() => {
+                    if (updateCheckInterval) {
+                        clearInterval(updateCheckInterval);
+                        window.location.reload();
+                    }
+                }, 180000);
             } else {
-                document.getElementById('updateResult').innerHTML = '<div class="error">❌ ' + (data.message || 'Update failed') + '</div>';
+                document.getElementById('updateResult').innerHTML = '<div class="error">❌ ' + (data.message || 'Failed to start update') + '</div>';
             }
         })
         .catch(err => {
-            document.getElementById('updateResult').innerHTML = '<div class="error">❌ Update error</div>';
+            document.getElementById('updateResult').innerHTML = '<div class="error">❌ Error starting update</div>';
         });
 }
 
@@ -1985,22 +2015,24 @@ REPO_API="https://api.github.com/repos/Fry-Foundation/Fry-PoW-MultiMiner/commits
 DOWNLOAD_URL="https://raw.githubusercontent.com/Fry-Foundation/Fry-PoW-MultiMiner/main/setup_fryminer_web.sh"
 VERSION_FILE="/opt/frynet-config/version.txt"
 CONFIG_FILE="/opt/frynet-config/config.txt"
+CONFIG_BACKUP="/opt/frynet-config/config.txt.backup"
 LOG_FILE="/opt/frynet-config/logs/update.log"
-AUTO_UPDATE_SCRIPT="/opt/frynet-config/auto_update.sh"
+PID_FILE="/opt/frynet-config/miner.pid"
+UPDATE_STATUS_FILE="/opt/frynet-config/update_status.txt"
 
 # Get remote version (short commit SHA)
 get_remote_version() {
     if command -v curl >/dev/null 2>&1; then
-        curl -s "$REPO_API" 2>/dev/null | grep -m1 '"sha"' | cut -d'"' -f4 | head -c 7
+        curl -s --connect-timeout 5 --max-time 10 "$REPO_API" 2>/dev/null | grep -m1 '"sha"' | cut -d'"' -f4 | head -c 7
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO- "$REPO_API" 2>/dev/null | grep -m1 '"sha"' | cut -d'"' -f4 | head -c 7
+        wget -qO- --timeout=10 "$REPO_API" 2>/dev/null | grep -m1 '"sha"' | cut -d'"' -f4 | head -c 7
     fi
 }
 
 # Get local version
 get_local_version() {
     if [ -f "$VERSION_FILE" ]; then
-        cat "$VERSION_FILE" 2>/dev/null | head -c 7
+        cat "$VERSION_FILE" 2>/dev/null | tr -d '\n' | head -c 7
     else
         echo "unknown"
     fi
@@ -2012,30 +2044,120 @@ case "$ACTION" in
         LOCAL=$(get_local_version)
         
         if [ -z "$REMOTE" ]; then
-            printf '{"status":"error","message":"Could not check for updates (network issue)"}'
+            printf '{"status":"error","message":"Network error","local":"%s","remote":"?"}' "$LOCAL"
         elif [ -z "$LOCAL" ] || [ "$LOCAL" = "unknown" ]; then
             printf '{"status":"available","local":"unknown","remote":"%s"}' "$REMOTE"
         elif [ "$REMOTE" != "$LOCAL" ]; then
             printf '{"status":"available","local":"%s","remote":"%s"}' "$LOCAL" "$REMOTE"
         else
-            printf '{"status":"current","version":"%s","local":"%s","remote":"%s"}' "$LOCAL" "$LOCAL" "$REMOTE"
+            printf '{"status":"current","local":"%s","remote":"%s"}' "$LOCAL" "$REMOTE"
+        fi
+        ;;
+    
+    status)
+        # Check update status
+        if [ -f "$UPDATE_STATUS_FILE" ]; then
+            STATUS=$(cat "$UPDATE_STATUS_FILE" 2>/dev/null)
+            printf '{"status":"%s"}' "$STATUS"
+        else
+            printf '{"status":"idle"}'
         fi
         ;;
         
     update)
-        echo "[$(date)] Manual update triggered via web UI" >> "$LOG_FILE"
+        # Run update in background
+        echo "running" > "$UPDATE_STATUS_FILE"
         
-        # Run the auto-update script
-        if [ -x "$AUTO_UPDATE_SCRIPT" ]; then
-            nohup sh "$AUTO_UPDATE_SCRIPT" >> "$LOG_FILE" 2>&1 &
-            printf '{"status":"updating","message":"Update started in background"}'
-        else
-            printf '{"status":"error","message":"Auto-update script not found"}'
-        fi
+        # Background update process
+        (
+            echo "[$(date)] === Force update started ===" >> "$LOG_FILE"
+            
+            # Check if miner is running
+            WAS_MINING=false
+            MINER_COIN=""
+            if [ -f "$PID_FILE" ]; then
+                OLD_PID=$(cat "$PID_FILE" 2>/dev/null)
+                if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+                    WAS_MINING=true
+                fi
+            fi
+            
+            # Get miner coin from config
+            if [ -f "$CONFIG_FILE" ]; then
+                . "$CONFIG_FILE"
+                MINER_COIN="$miner"
+                cp "$CONFIG_FILE" "$CONFIG_BACKUP"
+                echo "[$(date)] Config backed up (mining $MINER_COIN)" >> "$LOG_FILE"
+            fi
+            
+            # Download new version
+            TEMP_SCRIPT="/tmp/fryminer_update_$$.sh"
+            echo "[$(date)] Downloading update..." >> "$LOG_FILE"
+            
+            if command -v curl >/dev/null 2>&1; then
+                curl -sL --connect-timeout 10 --max-time 120 -o "$TEMP_SCRIPT" "$DOWNLOAD_URL" 2>/dev/null
+            else
+                wget -q --timeout=120 -O "$TEMP_SCRIPT" "$DOWNLOAD_URL" 2>/dev/null
+            fi
+            
+            if [ ! -s "$TEMP_SCRIPT" ]; then
+                echo "[$(date)] ERROR: Download failed" >> "$LOG_FILE"
+                echo "failed" > "$UPDATE_STATUS_FILE"
+                exit 1
+            fi
+            
+            # Get new version
+            NEW_VER=$(get_remote_version)
+            echo "[$(date)] Installing version $NEW_VER..." >> "$LOG_FILE"
+            
+            # Run the update script
+            chmod +x "$TEMP_SCRIPT"
+            sh "$TEMP_SCRIPT" >> "$LOG_FILE" 2>&1
+            UPDATE_RESULT=$?
+            
+            rm -f "$TEMP_SCRIPT" 2>/dev/null
+            
+            if [ $UPDATE_RESULT -eq 0 ]; then
+                # Restore config
+                if [ -f "$CONFIG_BACKUP" ]; then
+                    cp "$CONFIG_BACKUP" "$CONFIG_FILE"
+                    echo "[$(date)] Config restored" >> "$LOG_FILE"
+                fi
+                
+                # Update version file
+                if [ -n "$NEW_VER" ]; then
+                    echo "$NEW_VER" > "$VERSION_FILE"
+                    echo "[$(date)] Version set to: $NEW_VER" >> "$LOG_FILE"
+                fi
+                
+                # Restart mining if it was running
+                if [ "$WAS_MINING" = "true" ] && [ -n "$MINER_COIN" ]; then
+                    SCRIPT_FILE="/opt/frynet-config/output/$MINER_COIN/start.sh"
+                    if [ -f "$SCRIPT_FILE" ]; then
+                        echo "[$(date)] Restarting $MINER_COIN mining..." >> "$LOG_FILE"
+                        pkill -9 -f "xmrig" 2>/dev/null || true
+                        pkill -9 -f "cpuminer" 2>/dev/null || true
+                        sleep 2
+                        nohup sh "$SCRIPT_FILE" >/dev/null 2>&1 &
+                        NEW_PID=$!
+                        echo "$NEW_PID" > "$PID_FILE"
+                        echo "[$(date)] Mining restarted PID $NEW_PID" >> "$LOG_FILE"
+                    fi
+                fi
+                
+                echo "[$(date)] === Update completed ===" >> "$LOG_FILE"
+                echo "complete" > "$UPDATE_STATUS_FILE"
+            else
+                echo "[$(date)] ERROR: Update failed" >> "$LOG_FILE"
+                echo "failed" > "$UPDATE_STATUS_FILE"
+            fi
+        ) &
+        
+        printf '{"status":"started","message":"Update running in background"}'
         ;;
         
     *)
-        printf '{"status":"error","message":"Unknown action: %s"}' "$ACTION"
+        printf '{"status":"error","message":"Unknown action"}'
         ;;
 esac
 SCRIPT
