@@ -1412,9 +1412,27 @@ function pollUpdateStatus() {
             } else if (data.status === 'failed') {
                 clearInterval(updateCheckInterval);
                 let errorMsg = data.error || 'Unknown error';
-                document.getElementById('updateResult').innerHTML = 
-                    '<div class="error">❌ Update failed: ' + errorMsg + 
-                    '<br><br>Check the <strong>Monitor</strong> tab for detailed logs.</div>';
+                
+                // Check if this is a first-time setup issue
+                if (errorMsg.includes('First-time setup required') || errorMsg.includes('SSH in')) {
+                    document.getElementById('updateResult').innerHTML = 
+                        '<div class="error">' +
+                        '<h3 style="margin-top:0">⚠️ First-Time Setup Required</h3>' +
+                        '<p><strong>' + errorMsg + '</strong></p>' +
+                        '<p>Web-based updates require initial configuration:</p>' +
+                        '<ol style="text-align: left; margin-left: 20px;">' +
+                        '<li>SSH into your system</li>' +
+                        '<li>Run: <code style="background:#333;padding:2px 6px;border-radius:3px;">sudo ./setup_fryminer_web.sh</code></li>' +
+                        '<li>This configures passwordless sudo for web updates</li>' +
+                        '<li>After that, web updates will work!</li>' +
+                        '</ol>' +
+                        '<p style="font-size:0.9em;color:#888;">Check <strong>Monitor</strong> tab for details.</p>' +
+                        '</div>';
+                } else {
+                    document.getElementById('updateResult').innerHTML = 
+                        '<div class="error">❌ Update failed: ' + errorMsg + 
+                        '<br><br>Check the <strong>Monitor</strong> tab for detailed logs.</div>';
+                }
             } else if (data.status === 'running') {
                 // Still running, keep polling
                 document.getElementById('updateResult').innerHTML = '<div class="info-box">⏳ Update in progress... Check Monitor tab for progress.</div>';
@@ -2042,21 +2060,39 @@ LOG_FILE="/opt/frynet-config/logs/miner.log"
 touch "$STOP_FILE"
 echo "[$(date)] Mining stopped by user" >> "$LOG_FILE"
 
+# Check if we can use sudo
+CAN_SUDO=false
+if sudo -n true 2>/dev/null; then
+    CAN_SUDO=true
+fi
+
 # Kill by PID file first
 if [ -f "$PID_FILE" ]; then
     PID=$(cat "$PID_FILE" 2>/dev/null)
     if [ -n "$PID" ]; then
-        sudo kill "$PID" 2>/dev/null || true
-        sleep 1
-        sudo kill -9 "$PID" 2>/dev/null || true
+        if [ "$CAN_SUDO" = "true" ]; then
+            sudo kill "$PID" 2>/dev/null || true
+            sleep 1
+            sudo kill -9 "$PID" 2>/dev/null || true
+        else
+            kill "$PID" 2>/dev/null || true
+            sleep 1
+            kill -9 "$PID" 2>/dev/null || true
+        fi
     fi
     rm -f "$PID_FILE"
 fi
 
 # Also kill any stray miners
-sudo pkill -9 -f xmrig 2>/dev/null || true
-sudo pkill -9 -f cpuminer 2>/dev/null || true
-sudo pkill -9 -f minerd 2>/dev/null || true
+if [ "$CAN_SUDO" = "true" ]; then
+    sudo pkill -9 -f xmrig 2>/dev/null || true
+    sudo pkill -9 -f cpuminer 2>/dev/null || true
+    sudo pkill -9 -f minerd 2>/dev/null || true
+else
+    pkill -9 -f xmrig 2>/dev/null || true
+    pkill -9 -f cpuminer 2>/dev/null || true
+    pkill -9 -f minerd 2>/dev/null || true
+fi
 
 echo "<div class='success'>✅ Mining stopped</div>"
 SCRIPT
@@ -2208,14 +2244,36 @@ case "$ACTION" in
             # Capture output to temp file for better error reporting
             INSTALL_OUTPUT="/tmp/install_output_$$.log"
             
-            # Run installation with sudo and capture output
-            if sudo sh "$TEMP_SCRIPT" > "$INSTALL_OUTPUT" 2>&1; then
+            # Check if we can use sudo without password
+            CAN_SUDO=false
+            if sudo -n true 2>/dev/null; then
+                CAN_SUDO=true
+                echo "[$(date)] ✅ Sudo access confirmed" >> "$MINER_LOG"
+            else
+                echo "[$(date)] ⚠️  No passwordless sudo - attempting direct install" >> "$MINER_LOG"
+            fi
+            
+            # Run installation with sudo if available, otherwise try without
+            INSTALL_SUCCESS=false
+            if [ "$CAN_SUDO" = "true" ]; then
+                echo "[$(date)] Running with sudo..." >> "$UPDATE_LOG"
+                if sudo sh "$TEMP_SCRIPT" > "$INSTALL_OUTPUT" 2>&1; then
+                    INSTALL_SUCCESS=true
+                fi
+            else
+                echo "[$(date)] Running without sudo (may fail on first update)..." >> "$UPDATE_LOG"
+                if sh "$TEMP_SCRIPT" > "$INSTALL_OUTPUT" 2>&1; then
+                    INSTALL_SUCCESS=true
+                fi
+            fi
+            
+            if [ "$INSTALL_SUCCESS" = "true" ]; then
                 # Success - append output to update log
                 cat "$INSTALL_OUTPUT" >> "$UPDATE_LOG"
                 rm -f "$INSTALL_OUTPUT"
             else
                 # Failure - get last few lines of error
-                LAST_ERRORS=$(tail -20 "$INSTALL_OUTPUT" 2>/dev/null | grep -E "ERROR|error|failed|Failed|permission|Permission" | tail -5)
+                LAST_ERRORS=$(tail -20 "$INSTALL_OUTPUT" 2>/dev/null | grep -E "ERROR|error|failed|Failed|permission|Permission|sudo" | tail -5)
                 if [ -z "$LAST_ERRORS" ]; then
                     LAST_ERRORS=$(tail -10 "$INSTALL_OUTPUT" 2>/dev/null)
                 fi
@@ -2228,17 +2286,19 @@ case "$ACTION" in
                 echo "[$(date)] === Last 20 lines of installation output ===" >> "$UPDATE_LOG"
                 tail -20 "$INSTALL_OUTPUT" >> "$UPDATE_LOG" 2>/dev/null
                 
-                # Store short error for UI
+                # Store short error for UI based on error type
                 if echo "$LAST_ERRORS" | grep -q "Run as root"; then
-                    echo "Installation requires root/sudo privileges" > "$UPDATE_ERROR_FILE"
+                    echo "Requires root - SSH in and run: sudo ./setup_fryminer_web.sh" > "$UPDATE_ERROR_FILE"
+                    echo "[$(date)] 💡 Solution: SSH in and run 'sudo ./setup_fryminer_web.sh'" >> "$MINER_LOG"
+                elif echo "$LAST_ERRORS" | grep -qi "password is required\|terminal is required"; then
+                    echo "First-time setup required - SSH in and run: sudo ./setup_fryminer_web.sh" > "$UPDATE_ERROR_FILE"
+                    echo "[$(date)] 💡 This is your first update. SSH in and run 'sudo ./setup_fryminer_web.sh' to configure sudo access." >> "$MINER_LOG"
                 elif echo "$LAST_ERRORS" | grep -qi "permission denied"; then
-                    echo "Permission denied - check file permissions" > "$UPDATE_ERROR_FILE"
+                    echo "Permission denied - SSH in and run: sudo ./setup_fryminer_web.sh" > "$UPDATE_ERROR_FILE"
                 elif echo "$LAST_ERRORS" | grep -qi "command not found"; then
                     echo "Missing required command - check dependencies" > "$UPDATE_ERROR_FILE"
-                elif echo "$LAST_ERRORS" | grep -qi "sudo"; then
-                    echo "Sudo not configured - run: sudo ./setup_fryminer_web.sh" > "$UPDATE_ERROR_FILE"
                 else
-                    echo "Installation script failed - check update logs" > "$UPDATE_ERROR_FILE"
+                    echo "Installation failed - SSH in and run: sudo ./setup_fryminer_web.sh" > "$UPDATE_ERROR_FILE"
                 fi
                 
                 echo "failed" > "$UPDATE_STATUS_FILE"
@@ -2268,8 +2328,16 @@ case "$ACTION" in
                 if [ -f "$SCRIPT_FILE" ]; then
                     echo "[$(date)] 🔄 Restarting $MINER_COIN mining..." >> "$MINER_LOG"
                     echo "[$(date)] Restarting $MINER_COIN mining..." >> "$UPDATE_LOG"
-                    sudo pkill -9 -f "xmrig" 2>/dev/null || true
-                    sudo pkill -9 -f "cpuminer" 2>/dev/null || true
+                    
+                    # Use sudo if available
+                    if [ "$CAN_SUDO" = "true" ]; then
+                        sudo pkill -9 -f "xmrig" 2>/dev/null || true
+                        sudo pkill -9 -f "cpuminer" 2>/dev/null || true
+                    else
+                        pkill -9 -f "xmrig" 2>/dev/null || true
+                        pkill -9 -f "cpuminer" 2>/dev/null || true
+                    fi
+                    
                     sleep 2
                     nohup sh "$SCRIPT_FILE" >/dev/null 2>&1 &
                     NEW_PID=$!
