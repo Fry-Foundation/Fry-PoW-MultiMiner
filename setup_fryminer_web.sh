@@ -404,21 +404,75 @@ install_xmrig() {
     case "$ARCH_TYPE" in
         x86_64)
             log "Downloading pre-built XMRig for x86_64..."
+            DOWNLOAD_SUCCESS=false
+            
             if command -v curl >/dev/null 2>&1; then
-                curl -sL -o xmrig.tar.gz "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-linux-x64.tar.gz"
+                if curl -sL -o xmrig.tar.gz "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-linux-x64.tar.gz" 2>/dev/null; then
+                    DOWNLOAD_SUCCESS=true
+                fi
             elif command -v wget >/dev/null 2>&1; then
-                wget -q -O xmrig.tar.gz "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-linux-x64.tar.gz"
-            else
-                warn "Neither curl nor wget available"
-                return 1
+                if wget -q -O xmrig.tar.gz "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-linux-x64.tar.gz" 2>/dev/null; then
+                    DOWNLOAD_SUCCESS=true
+                fi
             fi
             
-            if [ -f xmrig.tar.gz ]; then
+            # Try to extract if download succeeded
+            if [ "$DOWNLOAD_SUCCESS" = "true" ] && [ -f xmrig.tar.gz ]; then
                 log "Extracting..."
-                tar -xzf xmrig.tar.gz 2>/dev/null
-                find . -name "xmrig" -type f -executable -exec cp {} /usr/local/bin/xmrig \; 2>/dev/null
-                chmod +x /usr/local/bin/xmrig 2>/dev/null
-                rm -rf xmrig* 2>/dev/null
+                if tar -xzf xmrig.tar.gz 2>/dev/null; then
+                    find . -name "xmrig" -type f -executable -exec cp {} /usr/local/bin/xmrig \; 2>/dev/null
+                    chmod +x /usr/local/bin/xmrig 2>/dev/null
+                    rm -rf xmrig* 2>/dev/null
+                    
+                    # Verify it actually works
+                    if ! /usr/local/bin/xmrig --version >/dev/null 2>&1; then
+                        warn "Downloaded XMRig doesn't work, will build from source..."
+                        rm -f /usr/local/bin/xmrig
+                        DOWNLOAD_SUCCESS=false
+                    fi
+                else
+                    warn "Failed to extract prebuilt XMRig, will build from source..."
+                    DOWNLOAD_SUCCESS=false
+                fi
+            fi
+            
+            # Fallback: Build from source if prebuilt failed
+            if [ "$DOWNLOAD_SUCCESS" != "true" ]; then
+                log "Building XMRig from source for x86_64..."
+                rm -rf xmrig xmrig.tar.gz 2>/dev/null
+                
+                if ! command -v git >/dev/null 2>&1; then
+                    warn "git not installed, cannot build from source"
+                    return 1
+                fi
+                
+                if ! command -v cmake >/dev/null 2>&1; then
+                    warn "cmake not installed, cannot build from source"
+                    return 1
+                fi
+                
+                git clone --depth 1 --progress https://github.com/xmrig/xmrig.git 2>&1 || { warn "git clone failed"; return 1; }
+                cd xmrig || return 1
+                mkdir -p build && cd build || return 1
+                
+                log "Running cmake..."
+                cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_HWLOC=OFF >/dev/null 2>&1 || { warn "cmake failed"; cd "$MINERS_DIR"; return 1; }
+                
+                log "Building (this takes a few minutes)..."
+                make -j"$(nproc)" 2>&1 | grep -E "error|Error|ERROR" || true
+                
+                if [ -f xmrig ]; then
+                    cp xmrig /usr/local/bin/xmrig 2>/dev/null
+                    chmod +x /usr/local/bin/xmrig
+                    log "✅ Built from source successfully"
+                else
+                    warn "Build failed - xmrig binary not found"
+                    cd "$MINERS_DIR"
+                    return 1
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf xmrig
             fi
             ;;
             
