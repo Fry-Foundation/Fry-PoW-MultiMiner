@@ -1000,16 +1000,25 @@ start_webserver() {
 # Main installation
 main() {
     log "================================================"
-    log "FryMiner Complete Setup Starting..."
+    if [ "$UPDATE_MODE" = "true" ]; then
+        log "FryMiner Update Mode - Installing Latest Version..."
+    else
+        log "FryMiner Complete Setup Starting..."
+    fi
     log "================================================"
     
     detect_architecture
     set_hostname
     install_dependencies
     
-    # Install miners
-    install_xmrig
-    install_cpuminer
+    # Install miners - CRITICAL: Exit if these fail
+    if ! install_xmrig; then
+        die "CRITICAL: XMRig installation failed - cannot continue"
+    fi
+    
+    if ! install_cpuminer; then
+        die "CRITICAL: cpuminer installation failed - cannot continue"
+    fi
     
     # Apply mining optimizations (huge pages, MSR, CPU governor)
     optimize_for_mining
@@ -2468,9 +2477,6 @@ case "$ACTION" in
             # Run the update script
             chmod +x "$TEMP_SCRIPT"
             
-            # Capture output to temp file for better error reporting
-            INSTALL_OUTPUT="/tmp/install_output_$$.log"
-            
             # Check if we can use sudo without password
             CURRENT_USER=$(whoami)
             echo "[$(date)] 🔍 Running as user: $CURRENT_USER" >> "$MINER_LOG"
@@ -2487,62 +2493,78 @@ case "$ACTION" in
                 # Check if sudoers file exists
                 if [ -f /etc/sudoers.d/fryminer ]; then
                     echo "[$(date)] ℹ️  Sudoers file exists, checking contents..." >> "$MINER_LOG"
-                    cat /etc/sudoers.d/fryminer >> "$MINER_LOG" 2>&1
+                    sudo cat /etc/sudoers.d/fryminer >> "$MINER_LOG" 2>&1 || echo "[$(date)] Cannot read sudoers file" >> "$MINER_LOG"
                 else
                     echo "[$(date)] ⚠️  Sudoers file missing: /etc/sudoers.d/fryminer" >> "$MINER_LOG"
                 fi
             fi
             
-            # Run installation with sudo if available, otherwise try without
+            # Run installation with output streaming to logs
+            echo "[$(date)] === Beginning installation ===" >> "$UPDATE_LOG"
+            echo "[$(date)] 📦 Running setup script..." >> "$MINER_LOG"
+            
             INSTALL_SUCCESS=false
+            INSTALL_EXIT=1
+            
             if [ "$CAN_SUDO" = "true" ]; then
                 echo "[$(date)] Running with sudo..." >> "$UPDATE_LOG"
-                if sudo sh "$TEMP_SCRIPT" > "$INSTALL_OUTPUT" 2>&1; then
+                # Stream output to both logs
+                if UPDATE_MODE=true sudo -E sh "$TEMP_SCRIPT" >> "$UPDATE_LOG" 2>&1; then
+                    INSTALL_EXIT=0
                     INSTALL_SUCCESS=true
+                else
+                    INSTALL_EXIT=$?
                 fi
             else
-                echo "[$(date)] Running without sudo (may fail on first update)..." >> "$UPDATE_LOG"
-                if sh "$TEMP_SCRIPT" > "$INSTALL_OUTPUT" 2>&1; then
+                echo "[$(date)] Running without sudo (may fail)..." >> "$UPDATE_LOG"
+                # Stream output to both logs
+                if UPDATE_MODE=true sh "$TEMP_SCRIPT" >> "$UPDATE_LOG" 2>&1; then
+                    INSTALL_EXIT=0
                     INSTALL_SUCCESS=true
+                else
+                    INSTALL_EXIT=$?
                 fi
             fi
             
+            echo "[$(date)] Installation script exit code: $INSTALL_EXIT" >> "$UPDATE_LOG"
+            
             if [ "$INSTALL_SUCCESS" = "true" ]; then
-                # Success - append output to update log
-                cat "$INSTALL_OUTPUT" >> "$UPDATE_LOG"
-                rm -f "$INSTALL_OUTPUT"
+                echo "[$(date)] ✅ Installation completed successfully" >> "$MINER_LOG"
+                echo "[$(date)] Installation completed successfully" >> "$UPDATE_LOG"
             else
-                # Failure - get last few lines of error
-                LAST_ERRORS=$(tail -20 "$INSTALL_OUTPUT" 2>/dev/null | grep -E "ERROR|error|failed|Failed|permission|Permission|sudo" | tail -5)
+                # Failure - get last errors from update log
+                LAST_ERRORS=$(tail -30 "$UPDATE_LOG" 2>/dev/null | grep -E "ERROR|error|failed|Failed|CRITICAL|die" | tail -10)
                 if [ -z "$LAST_ERRORS" ]; then
-                    LAST_ERRORS=$(tail -10 "$INSTALL_OUTPUT" 2>/dev/null)
+                    LAST_ERRORS=$(tail -20 "$UPDATE_LOG" 2>/dev/null)
                 fi
                 
                 # Create detailed error message
-                ERROR_MSG="Installation failed. Last errors: $LAST_ERRORS"
+                ERROR_MSG="Installation script failed (exit $INSTALL_EXIT)"
                 
                 echo "[$(date)] ❌ ERROR: $ERROR_MSG" >> "$MINER_LOG"
-                echo "[$(date)] ERROR: Installation script failed" >> "$UPDATE_LOG"
-                echo "[$(date)] === Last 20 lines of installation output ===" >> "$UPDATE_LOG"
-                tail -20 "$INSTALL_OUTPUT" >> "$UPDATE_LOG" 2>/dev/null
+                echo "[$(date)] ERROR: $ERROR_MSG" >> "$UPDATE_LOG"
+                echo "[$(date)] === Last errors from installation ===" >> "$MINER_LOG"
+                echo "$LAST_ERRORS" >> "$MINER_LOG"
                 
                 # Store short error for UI based on error type
-                if echo "$LAST_ERRORS" | grep -q "Run as root"; then
+                if echo "$LAST_ERRORS" | grep -qi "XMRig installation failed"; then
+                    echo "XMRig installation failed - check update logs for details" > "$UPDATE_ERROR_FILE"
+                elif echo "$LAST_ERRORS" | grep -qi "cpuminer installation failed"; then
+                    echo "cpuminer installation failed - check update logs for details" > "$UPDATE_ERROR_FILE"
+                elif echo "$LAST_ERRORS" | grep -qi "Run as root"; then
                     echo "Requires root - SSH in and run: sudo ./setup_fryminer_web.sh" > "$UPDATE_ERROR_FILE"
-                    echo "[$(date)] 💡 Solution: SSH in and run 'sudo ./setup_fryminer_web.sh'" >> "$MINER_LOG"
                 elif echo "$LAST_ERRORS" | grep -qi "password is required\|terminal is required"; then
                     echo "First-time setup required - SSH in and run: sudo ./setup_fryminer_web.sh" > "$UPDATE_ERROR_FILE"
-                    echo "[$(date)] 💡 This is your first update. SSH in and run 'sudo ./setup_fryminer_web.sh' to configure sudo access." >> "$MINER_LOG"
                 elif echo "$LAST_ERRORS" | grep -qi "permission denied"; then
                     echo "Permission denied - SSH in and run: sudo ./setup_fryminer_web.sh" > "$UPDATE_ERROR_FILE"
-                elif echo "$LAST_ERRORS" | grep -qi "command not found"; then
-                    echo "Missing required command - check dependencies" > "$UPDATE_ERROR_FILE"
+                elif echo "$LAST_ERRORS" | grep -qi "cmake.*failed"; then
+                    echo "Build tools missing - SSH in and run: sudo ./setup_fryminer_web.sh" > "$UPDATE_ERROR_FILE"
                 else
-                    echo "Installation failed - SSH in and run: sudo ./setup_fryminer_web.sh" > "$UPDATE_ERROR_FILE"
+                    echo "Installation failed - check update logs for details" > "$UPDATE_ERROR_FILE"
                 fi
                 
                 echo "failed" > "$UPDATE_STATUS_FILE"
-                rm -f "$TEMP_SCRIPT" "$INSTALL_OUTPUT"
+                rm -f "$TEMP_SCRIPT"
                 exit 1
             fi
             
@@ -2655,8 +2677,12 @@ SCRIPT
     log "Your miner is ready to use!"
     log "================================================"
     
-    # Start web server automatically
-    start_webserver
+    # Start web server automatically (skip if running as update)
+    if [ "$UPDATE_MODE" != "true" ]; then
+        start_webserver
+    else
+        log "Skipping web server restart (UPDATE_MODE)"
+    fi
     
     log ""
     log "================================================"
