@@ -727,6 +727,49 @@ install_cpuminer() {
     return 1
 }
 
+# Configure sudo permissions for web server to run updates
+setup_sudo_permissions() {
+    log "Configuring sudo permissions for updates..."
+    
+    # Detect web server user
+    WEB_USER="www-data"
+    if ! id "$WEB_USER" >/dev/null 2>&1; then
+        # Try other common web server users
+        for user in apache httpd nginx _www; do
+            if id "$user" >/dev/null 2>&1; then
+                WEB_USER="$user"
+                break
+            fi
+        done
+    fi
+    
+    log "Web server user: $WEB_USER"
+    
+    # Create sudoers file for FryMiner updates
+    cat > /etc/sudoers.d/fryminer << EOF
+# Allow web server to run FryMiner operations without password
+$WEB_USER ALL=(ALL) NOPASSWD: /tmp/fryminer_update_*.sh
+$WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f xmrig
+$WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f cpuminer
+$WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -9 -f minerd
+$WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -f xmrig
+$WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -f cpuminer
+$WEB_USER ALL=(ALL) NOPASSWD: /usr/bin/pkill -f minerd
+$WEB_USER ALL=(ALL) NOPASSWD: /bin/kill -9 [0-9]*
+$WEB_USER ALL=(ALL) NOPASSWD: /bin/kill [0-9]*
+Defaults:$WEB_USER !requiretty
+EOF
+    
+    chmod 440 /etc/sudoers.d/fryminer
+    
+    # Verify sudoers syntax
+    if visudo -c -f /etc/sudoers.d/fryminer >/dev/null 2>&1; then
+        log "✅ Sudo permissions configured successfully"
+    else
+        warn "⚠️  Sudoers file may have syntax issues, but continuing..."
+    fi
+}
+
 # Main installation
 main() {
     log "================================================"
@@ -743,6 +786,9 @@ main() {
     
     # Apply mining optimizations (huge pages, MSR, CPU governor)
     optimize_for_mining
+    
+    # Configure sudo permissions for web server updates
+    setup_sudo_permissions
     
     # Stop any existing FryMiner processes gracefully
     log "Stopping existing FryMiner processes..."
@@ -2000,17 +2046,17 @@ echo "[$(date)] Mining stopped by user" >> "$LOG_FILE"
 if [ -f "$PID_FILE" ]; then
     PID=$(cat "$PID_FILE" 2>/dev/null)
     if [ -n "$PID" ]; then
-        kill "$PID" 2>/dev/null || true
+        sudo kill "$PID" 2>/dev/null || true
         sleep 1
-        kill -9 "$PID" 2>/dev/null || true
+        sudo kill -9 "$PID" 2>/dev/null || true
     fi
     rm -f "$PID_FILE"
 fi
 
-# Also kill any stray miners and heartbeat processes
-pkill -f xmrig 2>/dev/null || true
-pkill -f cpuminer 2>/dev/null || true
-pkill -f minerd 2>/dev/null || true
+# Also kill any stray miners
+sudo pkill -9 -f xmrig 2>/dev/null || true
+sudo pkill -9 -f cpuminer 2>/dev/null || true
+sudo pkill -9 -f minerd 2>/dev/null || true
 
 echo "<div class='success'>✅ Mining stopped</div>"
 SCRIPT
@@ -2158,13 +2204,45 @@ case "$ACTION" in
             
             # Run the update script
             chmod +x "$TEMP_SCRIPT"
-            if ! sh "$TEMP_SCRIPT" >> "$UPDATE_LOG" 2>&1; then
-                ERROR_MSG="Installation script failed"
+            
+            # Capture output to temp file for better error reporting
+            INSTALL_OUTPUT="/tmp/install_output_$$.log"
+            
+            # Run installation with sudo and capture output
+            if sudo sh "$TEMP_SCRIPT" > "$INSTALL_OUTPUT" 2>&1; then
+                # Success - append output to update log
+                cat "$INSTALL_OUTPUT" >> "$UPDATE_LOG"
+                rm -f "$INSTALL_OUTPUT"
+            else
+                # Failure - get last few lines of error
+                LAST_ERRORS=$(tail -20 "$INSTALL_OUTPUT" 2>/dev/null | grep -E "ERROR|error|failed|Failed|permission|Permission" | tail -5)
+                if [ -z "$LAST_ERRORS" ]; then
+                    LAST_ERRORS=$(tail -10 "$INSTALL_OUTPUT" 2>/dev/null)
+                fi
+                
+                # Create detailed error message
+                ERROR_MSG="Installation failed. Last errors: $LAST_ERRORS"
+                
                 echo "[$(date)] ❌ ERROR: $ERROR_MSG" >> "$MINER_LOG"
-                echo "[$(date)] ERROR: $ERROR_MSG" >> "$UPDATE_LOG"
-                echo "$ERROR_MSG" > "$UPDATE_ERROR_FILE"
+                echo "[$(date)] ERROR: Installation script failed" >> "$UPDATE_LOG"
+                echo "[$(date)] === Last 20 lines of installation output ===" >> "$UPDATE_LOG"
+                tail -20 "$INSTALL_OUTPUT" >> "$UPDATE_LOG" 2>/dev/null
+                
+                # Store short error for UI
+                if echo "$LAST_ERRORS" | grep -q "Run as root"; then
+                    echo "Installation requires root/sudo privileges" > "$UPDATE_ERROR_FILE"
+                elif echo "$LAST_ERRORS" | grep -qi "permission denied"; then
+                    echo "Permission denied - check file permissions" > "$UPDATE_ERROR_FILE"
+                elif echo "$LAST_ERRORS" | grep -qi "command not found"; then
+                    echo "Missing required command - check dependencies" > "$UPDATE_ERROR_FILE"
+                elif echo "$LAST_ERRORS" | grep -qi "sudo"; then
+                    echo "Sudo not configured - run: sudo ./setup_fryminer_web.sh" > "$UPDATE_ERROR_FILE"
+                else
+                    echo "Installation script failed - check update logs" > "$UPDATE_ERROR_FILE"
+                fi
+                
                 echo "failed" > "$UPDATE_STATUS_FILE"
-                rm -f "$TEMP_SCRIPT"
+                rm -f "$TEMP_SCRIPT" "$INSTALL_OUTPUT"
                 exit 1
             fi
             
@@ -2190,8 +2268,8 @@ case "$ACTION" in
                 if [ -f "$SCRIPT_FILE" ]; then
                     echo "[$(date)] 🔄 Restarting $MINER_COIN mining..." >> "$MINER_LOG"
                     echo "[$(date)] Restarting $MINER_COIN mining..." >> "$UPDATE_LOG"
-                    pkill -9 -f "xmrig" 2>/dev/null || true
-                    pkill -9 -f "cpuminer" 2>/dev/null || true
+                    sudo pkill -9 -f "xmrig" 2>/dev/null || true
+                    sudo pkill -9 -f "cpuminer" 2>/dev/null || true
                     sleep 2
                     nohup sh "$SCRIPT_FILE" >/dev/null 2>&1 &
                     NEW_PID=$!
