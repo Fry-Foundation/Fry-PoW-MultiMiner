@@ -1163,12 +1163,19 @@ document.getElementById('miner').addEventListener('change', function() {
         poolGroup.style.display = 'none';
     } else {
         poolGroup.style.display = 'block';
-        // Only set default pool if:
-        // 1. Field is empty, AND
-        // 2. Not loading saved config
-        if (defaultPools[coin] && !poolInput.value && !isLoadingConfig) {
-            poolInput.value = defaultPools[coin];
+        
+        // Set pool value intelligently
+        if (defaultPools[coin] && !isLoadingConfig) {
+            // Fixed pools (Unmineable, lottery) ALWAYS update
+            if (fixedPools.includes(coin)) {
+                poolInput.value = defaultPools[coin];
+            }
+            // Non-fixed pools only update if field is empty (preserve custom values)
+            else if (!poolInput.value) {
+                poolInput.value = defaultPools[coin];
+            }
         }
+        
         poolInput.disabled = fixedPools.includes(coin);
     }
     
