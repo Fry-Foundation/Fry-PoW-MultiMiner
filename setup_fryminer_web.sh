@@ -1365,10 +1365,13 @@ function pollUpdateStatus() {
                 setTimeout(() => window.location.reload(), 3000);
             } else if (data.status === 'failed') {
                 clearInterval(updateCheckInterval);
-                document.getElementById('updateResult').innerHTML = '<div class="error">❌ Update failed. Check logs.</div>';
+                let errorMsg = data.error || 'Unknown error';
+                document.getElementById('updateResult').innerHTML = 
+                    '<div class="error">❌ Update failed: ' + errorMsg + 
+                    '<br><br>Check the <strong>Monitor</strong> tab for detailed logs.</div>';
             } else if (data.status === 'running') {
                 // Still running, keep polling
-                document.getElementById('updateResult').innerHTML = '<div class="info-box">⏳ Update in progress... Please wait.</div>';
+                document.getElementById('updateResult').innerHTML = '<div class="info-box">⏳ Update in progress... Check Monitor tab for progress.</div>';
             }
         })
         .catch(() => {
@@ -2025,9 +2028,11 @@ DOWNLOAD_URL="https://raw.githubusercontent.com/Fry-Foundation/Fry-PoW-MultiMine
 VERSION_FILE="/opt/frynet-config/version.txt"
 CONFIG_FILE="/opt/frynet-config/config.txt"
 CONFIG_BACKUP="/opt/frynet-config/config.txt.backup"
-LOG_FILE="/opt/frynet-config/logs/update.log"
+MINER_LOG="/opt/frynet-config/logs/miner.log"
+UPDATE_LOG="/opt/frynet-config/logs/update.log"
 PID_FILE="/opt/frynet-config/miner.pid"
 UPDATE_STATUS_FILE="/opt/frynet-config/update_status.txt"
+UPDATE_ERROR_FILE="/opt/frynet-config/update_error.txt"
 
 # Get remote version (short commit SHA)
 get_remote_version() {
@@ -2064,22 +2069,33 @@ case "$ACTION" in
         ;;
     
     status)
-        # Check update status
+        # Check update status and return error if failed
         if [ -f "$UPDATE_STATUS_FILE" ]; then
             STATUS=$(cat "$UPDATE_STATUS_FILE" 2>/dev/null)
-            printf '{"status":"%s"}' "$STATUS"
+            if [ "$STATUS" = "failed" ] && [ -f "$UPDATE_ERROR_FILE" ]; then
+                ERROR_MSG=$(cat "$UPDATE_ERROR_FILE" 2>/dev/null)
+                printf '{"status":"failed","error":"%s"}' "$ERROR_MSG"
+            else
+                printf '{"status":"%s"}' "$STATUS"
+            fi
         else
             printf '{"status":"idle"}'
         fi
         ;;
         
     update)
-        # Run update in background
+        # Clear old error
+        rm -f "$UPDATE_ERROR_FILE" 2>/dev/null
         echo "running" > "$UPDATE_STATUS_FILE"
         
         # Background update process
         (
-            echo "[$(date)] === Force update started ===" >> "$LOG_FILE"
+            # Log to BOTH update log AND miner log (Activity tab)
+            echo "" >> "$MINER_LOG"
+            echo "========================================" >> "$MINER_LOG"
+            echo "[$(date)] 🔄 SOFTWARE UPDATE STARTED" >> "$MINER_LOG"
+            echo "========================================" >> "$MINER_LOG"
+            echo "[$(date)] === Force update started ===" >> "$UPDATE_LOG"
             
             # Check if miner is running
             WAS_MINING=false
@@ -2088,6 +2104,7 @@ case "$ACTION" in
                 OLD_PID=$(cat "$PID_FILE" 2>/dev/null)
                 if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
                     WAS_MINING=true
+                    echo "[$(date)] ⚠️  Stopping active miner..." >> "$MINER_LOG"
                 fi
             fi
             
@@ -2096,70 +2113,98 @@ case "$ACTION" in
                 . "$CONFIG_FILE"
                 MINER_COIN="$miner"
                 cp "$CONFIG_FILE" "$CONFIG_BACKUP"
-                echo "[$(date)] Config backed up (mining $MINER_COIN)" >> "$LOG_FILE"
+                echo "[$(date)] ✅ Config backed up (mining $MINER_COIN)" >> "$MINER_LOG"
+                echo "[$(date)] Config backed up (mining $MINER_COIN)" >> "$UPDATE_LOG"
             fi
             
             # Download new version
             TEMP_SCRIPT="/tmp/fryminer_update_$$.sh"
-            echo "[$(date)] Downloading update..." >> "$LOG_FILE"
+            echo "[$(date)] ⬇️  Downloading from GitHub..." >> "$MINER_LOG"
+            echo "[$(date)] Downloading update..." >> "$UPDATE_LOG"
             
+            DOWNLOAD_ERROR=""
             if command -v curl >/dev/null 2>&1; then
-                curl -sL --connect-timeout 10 --max-time 120 -o "$TEMP_SCRIPT" "$DOWNLOAD_URL" 2>/dev/null
+                if ! curl -sL --connect-timeout 10 --max-time 120 -o "$TEMP_SCRIPT" "$DOWNLOAD_URL" 2>&1; then
+                    DOWNLOAD_ERROR="curl failed"
+                fi
             else
-                wget -q --timeout=120 -O "$TEMP_SCRIPT" "$DOWNLOAD_URL" 2>/dev/null
+                if ! wget -q --timeout=120 -O "$TEMP_SCRIPT" "$DOWNLOAD_URL" 2>&1; then
+                    DOWNLOAD_ERROR="wget failed"
+                fi
             fi
             
             if [ ! -s "$TEMP_SCRIPT" ]; then
-                echo "[$(date)] ERROR: Download failed" >> "$LOG_FILE"
+                ERROR_MSG="Download failed - check network connection"
+                echo "[$(date)] ❌ ERROR: $ERROR_MSG" >> "$MINER_LOG"
+                echo "[$(date)] ERROR: $ERROR_MSG" >> "$UPDATE_LOG"
+                echo "$ERROR_MSG" > "$UPDATE_ERROR_FILE"
                 echo "failed" > "$UPDATE_STATUS_FILE"
                 exit 1
             fi
             
             # Get new version
             NEW_VER=$(get_remote_version)
-            echo "[$(date)] Installing version $NEW_VER..." >> "$LOG_FILE"
+            if [ -z "$NEW_VER" ]; then
+                ERROR_MSG="Cannot fetch version from GitHub"
+                echo "[$(date)] ❌ ERROR: $ERROR_MSG" >> "$MINER_LOG"
+                echo "$ERROR_MSG" > "$UPDATE_ERROR_FILE"
+                echo "failed" > "$UPDATE_STATUS_FILE"
+                rm -f "$TEMP_SCRIPT"
+                exit 1
+            fi
+            
+            echo "[$(date)] 📦 Installing version $NEW_VER..." >> "$MINER_LOG"
+            echo "[$(date)] Installing version $NEW_VER..." >> "$UPDATE_LOG"
             
             # Run the update script
             chmod +x "$TEMP_SCRIPT"
-            sh "$TEMP_SCRIPT" >> "$LOG_FILE" 2>&1
-            UPDATE_RESULT=$?
+            if ! sh "$TEMP_SCRIPT" >> "$UPDATE_LOG" 2>&1; then
+                ERROR_MSG="Installation script failed"
+                echo "[$(date)] ❌ ERROR: $ERROR_MSG" >> "$MINER_LOG"
+                echo "[$(date)] ERROR: $ERROR_MSG" >> "$UPDATE_LOG"
+                echo "$ERROR_MSG" > "$UPDATE_ERROR_FILE"
+                echo "failed" > "$UPDATE_STATUS_FILE"
+                rm -f "$TEMP_SCRIPT"
+                exit 1
+            fi
             
             rm -f "$TEMP_SCRIPT" 2>/dev/null
             
-            if [ $UPDATE_RESULT -eq 0 ]; then
-                # Restore config
-                if [ -f "$CONFIG_BACKUP" ]; then
-                    cp "$CONFIG_BACKUP" "$CONFIG_FILE"
-                    echo "[$(date)] Config restored" >> "$LOG_FILE"
-                fi
-                
-                # Update version file
-                if [ -n "$NEW_VER" ]; then
-                    echo "$NEW_VER" > "$VERSION_FILE"
-                    echo "[$(date)] Version set to: $NEW_VER" >> "$LOG_FILE"
-                fi
-                
-                # Restart mining if it was running
-                if [ "$WAS_MINING" = "true" ] && [ -n "$MINER_COIN" ]; then
-                    SCRIPT_FILE="/opt/frynet-config/output/$MINER_COIN/start.sh"
-                    if [ -f "$SCRIPT_FILE" ]; then
-                        echo "[$(date)] Restarting $MINER_COIN mining..." >> "$LOG_FILE"
-                        pkill -9 -f "xmrig" 2>/dev/null || true
-                        pkill -9 -f "cpuminer" 2>/dev/null || true
-                        sleep 2
-                        nohup sh "$SCRIPT_FILE" >/dev/null 2>&1 &
-                        NEW_PID=$!
-                        echo "$NEW_PID" > "$PID_FILE"
-                        echo "[$(date)] Mining restarted PID $NEW_PID" >> "$LOG_FILE"
-                    fi
-                fi
-                
-                echo "[$(date)] === Update completed ===" >> "$LOG_FILE"
-                echo "complete" > "$UPDATE_STATUS_FILE"
-            else
-                echo "[$(date)] ERROR: Update failed" >> "$LOG_FILE"
-                echo "failed" > "$UPDATE_STATUS_FILE"
+            # Restore config
+            if [ -f "$CONFIG_BACKUP" ]; then
+                cp "$CONFIG_BACKUP" "$CONFIG_FILE"
+                echo "[$(date)] ✅ Config restored" >> "$MINER_LOG"
+                echo "[$(date)] Config restored" >> "$UPDATE_LOG"
             fi
+            
+            # Update version file
+            if [ -n "$NEW_VER" ]; then
+                echo "$NEW_VER" > "$VERSION_FILE"
+                echo "[$(date)] ✅ Version updated to: $NEW_VER" >> "$MINER_LOG"
+                echo "[$(date)] Version set to: $NEW_VER" >> "$UPDATE_LOG"
+            fi
+            
+            # Restart mining if it was running
+            if [ "$WAS_MINING" = "true" ] && [ -n "$MINER_COIN" ]; then
+                SCRIPT_FILE="/opt/frynet-config/output/$MINER_COIN/start.sh"
+                if [ -f "$SCRIPT_FILE" ]; then
+                    echo "[$(date)] 🔄 Restarting $MINER_COIN mining..." >> "$MINER_LOG"
+                    echo "[$(date)] Restarting $MINER_COIN mining..." >> "$UPDATE_LOG"
+                    pkill -9 -f "xmrig" 2>/dev/null || true
+                    pkill -9 -f "cpuminer" 2>/dev/null || true
+                    sleep 2
+                    nohup sh "$SCRIPT_FILE" >/dev/null 2>&1 &
+                    NEW_PID=$!
+                    echo "$NEW_PID" > "$PID_FILE"
+                    echo "[$(date)] ✅ Mining restarted PID $NEW_PID" >> "$MINER_LOG"
+                    echo "[$(date)] Mining restarted PID $NEW_PID" >> "$UPDATE_LOG"
+                fi
+            fi
+            
+            echo "[$(date)] ✅ UPDATE COMPLETE!" >> "$MINER_LOG"
+            echo "========================================" >> "$MINER_LOG"
+            echo "[$(date)] === Update completed ===" >> "$UPDATE_LOG"
+            echo "complete" > "$UPDATE_STATUS_FILE"
         ) &
         
         printf '{"status":"started","message":"Update running in background"}'
