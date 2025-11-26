@@ -1363,7 +1363,7 @@ optgroup { background: #1a1a1a; color: #dc143c; }
 // Default pools for each coin
 const defaultPools = {
     'btc': 'pool.btc.com:3333',
-    'ltc': 'litecoin.nerdpool.xyz:5320',
+    'ltc': 'stratum.aikapool.com:7900',
     'doge': 'prohashing.com:3332',
     'xmr': 'pool.supportxmr.com:3333',
     'scala': 'scala.herominers.com:10131',
@@ -1850,7 +1850,7 @@ POOL=$(echo "$POOL" | sed 's|^stratum+tcp://||' | sed 's|^stratum+ssl://||' | se
 # Set default pools if not provided
 case "$MINER" in
     btc) [ -z "$POOL" ] && POOL="pool.btc.com:3333" ;;
-    ltc) [ -z "$POOL" ] && POOL="litecoin.nerdpool.xyz:5320" ;;
+    ltc) [ -z "$POOL" ] && POOL="stratum.aikapool.com:7900" ;;
     doge) [ -z "$POOL" ] && POOL="prohashing.com:3332" ;;
     xmr) [ -z "$POOL" ] && POOL="pool.supportxmr.com:3333" ;;
     scala) [ -z "$POOL" ] && POOL="scala.herominers.com:10131" ;;
@@ -2019,10 +2019,14 @@ EOF
 
 # Add miner command with proper output handling
 if [ "$USE_CPUMINER" = "true" ]; then
-    # cpuminer - use stdbuf for unbuffered output
+    # cpuminer - with retry options for connection stability
+    # --retry 10: Retry 10 times before giving up
+    # --retry-pause 30: Wait 30 seconds between retries  
+    # --timeout 300: 5 minute timeout for stratum
+    # --no-redirect: Don't follow pool redirects (can cause issues)
     cat >> "$SCRIPT_FILE" <<EOF
-# Run cpuminer with unbuffered output
-exec /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u $WALLET.$WORKER -p x --threads=$THREADS 2>&1 | tee -a "\$LOG"
+# Run cpuminer with retry options for stability
+exec /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u $WALLET.$WORKER -p x --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG"
 EOF
 else
     # xmrig - optimized flags for better hashrate
