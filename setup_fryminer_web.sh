@@ -1277,12 +1277,13 @@ optgroup { background: #1a1a1a; color: #dc143c; }
             </div>
             
             <div class="status-card">
-                <h3>Activity Log</h3>
+                <h3>Activity Log <span id="logRefreshIndicator" style="font-size: 0.7em; color: #888;">(auto-refresh: 3s)</span></h3>
                 <div class="log-viewer" id="logViewer">Loading...</div>
             </div>
             
-            <button onclick="refreshLogs()">🔄 Refresh Logs</button>
+            <button onclick="manualRefreshLogs()" id="refreshBtn">🔄 Refresh Logs</button>
             <button onclick="clearLogs()">🗑️ Clear Logs</button>
+            <span id="lastRefresh" style="margin-left: 15px; color: #888; font-size: 0.9em;"></span>
         </div>
         
         <div id="statistics" class="tab-content">
@@ -1554,16 +1555,52 @@ function checkStatus() {
 }
 
 function refreshLogs() {
-    fetch('/logs/miner.log')
+    // Add timestamp to prevent browser caching
+    const cacheBust = Date.now();
+    fetch('/cgi-bin/logs.cgi?t=' + cacheBust, {
+        cache: 'no-store',
+        headers: {
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+        }
+    })
         .then(r => r.text())
         .then(logs => {
             const viewer = document.getElementById('logViewer');
-            viewer.textContent = logs.split('\n').slice(-100).join('\n');
-            viewer.scrollTop = viewer.scrollHeight;
+            if (logs && logs.trim()) {
+                viewer.textContent = logs;
+                viewer.scrollTop = viewer.scrollHeight;
+            }
+            // Update last refresh time
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString();
+            const lastRefreshEl = document.getElementById('lastRefresh');
+            if (lastRefreshEl) lastRefreshEl.textContent = 'Updated: ' + timeStr;
         })
         .catch(() => {
-            document.getElementById('logViewer').textContent = 'No logs available';
+            // Fallback to direct file access
+            fetch('/logs/miner.log?t=' + cacheBust, { cache: 'no-store' })
+                .then(r => r.text())
+                .then(logs => {
+                    const viewer = document.getElementById('logViewer');
+                    viewer.textContent = logs.split('\n').slice(-100).join('\n');
+                    viewer.scrollTop = viewer.scrollHeight;
+                })
+                .catch(() => {
+                    document.getElementById('logViewer').textContent = 'No logs available';
+                });
         });
+}
+
+function manualRefreshLogs() {
+    const btn = document.getElementById('refreshBtn');
+    btn.textContent = '⏳ Refreshing...';
+    btn.disabled = true;
+    refreshLogs();
+    setTimeout(() => {
+        btn.textContent = '🔄 Refresh Logs';
+        btn.disabled = false;
+    }, 500);
 }
 
 function clearLogs() {
@@ -1715,8 +1752,9 @@ loadConfig();
 checkStatus();
 fetchCpuCores();
 checkForUpdate();
+refreshLogs();
 setInterval(checkStatus, 5000);
-setInterval(refreshLogs, 10000);
+setInterval(refreshLogs, 3000);
 
 // Fetch CPU cores and set max threads
 function fetchCpuCores() {
@@ -2205,6 +2243,25 @@ echo ""
 echo "Logs cleared"
 SCRIPT
     chmod 755 "$BASE/cgi-bin/clearlogs.cgi"
+    
+    # Logs CGI - Returns last 100 lines with no-cache headers
+    cat > "$BASE/cgi-bin/logs.cgi" <<'SCRIPT'
+#!/bin/sh
+echo "Content-type: text/plain"
+echo "Cache-Control: no-cache, no-store, must-revalidate"
+echo "Pragma: no-cache"
+echo "Expires: 0"
+echo ""
+
+LOG_FILE="/opt/frynet-config/logs/miner.log"
+
+if [ -f "$LOG_FILE" ]; then
+    tail -100 "$LOG_FILE" 2>/dev/null || echo "Unable to read logs"
+else
+    echo "No logs available yet"
+fi
+SCRIPT
+    chmod 755 "$BASE/cgi-bin/logs.cgi"
     
     # Start CGI - Uses nohup and multiple detection methods
     cat > "$BASE/cgi-bin/start.cgi" <<'SCRIPT'
