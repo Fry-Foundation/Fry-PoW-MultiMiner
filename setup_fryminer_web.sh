@@ -2,6 +2,7 @@
 # FryMiner Setup - COMPLETE RESTORED VERSION
 # Fixed stratum URL doubling, all 35+ coins restored
 # Monitor and Statistics tabs included
+# Fixed cpuminer-multi build for ARM64 S905X CPUs (uses tpruvot fork instead of cpuminer-opt)
 
 # DO NOT USE set -e - it causes silent failures
 # set -e
@@ -234,7 +235,7 @@ AUTOUPDATE
     
     # Setup daily cron job (skip if cron not available)
     if command -v crontab >/dev/null 2>&1; then
-        log "Setting up daily auto-update cron job..."
+        log "Setting up cron jobs (auto-update + web server on boot)..."
         
         # Ensure cron service is running
         if command -v systemctl >/dev/null 2>&1; then
@@ -244,22 +245,50 @@ AUTOUPDATE
             service cron start 2>/dev/null || service crond start 2>/dev/null || true
         fi
         
-        # Remove any existing fryminer cron entries
-        (crontab -l 2>/dev/null || echo "") | grep -v "fryminer\|auto_update" > /tmp/crontab.tmp 2>/dev/null || true
+        # Create web server startup script
+        cat > /opt/frynet-config/start_webserver.sh <<'WEBSTART'
+#!/bin/sh
+# FryMiner Web Server Startup Script
+# Called by @reboot cron job
+
+BASE="/opt/frynet-config"
+PORT=8080
+LOG="$BASE/logs/webserver.log"
+
+# Wait for network to be ready
+sleep 10
+
+# Kill any existing instances
+pkill -f "python3 -m http.server $PORT" 2>/dev/null || true
+sleep 1
+
+# Start web server
+cd "$BASE"
+nohup python3 -m http.server $PORT --cgi >> "$LOG" 2>&1 &
+
+echo "[$(date)] Web server started on port $PORT (PID: $!)" >> "$LOG"
+WEBSTART
+        chmod 755 /opt/frynet-config/start_webserver.sh
         
-        # Add new cron job - runs at 4 AM daily
+        # Remove any existing fryminer cron entries
+        (crontab -l 2>/dev/null || echo "") | grep -v "fryminer\|auto_update\|start_webserver\|frynet-config" > /tmp/crontab.tmp 2>/dev/null || true
+        
+        # Add cron jobs
+        echo "@reboot /opt/frynet-config/start_webserver.sh >/dev/null 2>&1" >> /tmp/crontab.tmp
         echo "0 4 * * * /opt/frynet-config/auto_update.sh >/dev/null 2>&1" >> /tmp/crontab.tmp
         
-        crontab /tmp/crontab.tmp 2>/dev/null && log "Cron job installed" || warn "Could not set up cron job"
+        crontab /tmp/crontab.tmp 2>/dev/null && log "Cron jobs installed (web server @reboot + auto-update 4AM)" || warn "Could not set up cron jobs"
         rm -f /tmp/crontab.tmp
     else
-        warn "crontab not available - auto-update cron job not installed"
-        log "You can manually run: /opt/frynet-config/auto_update.sh"
+        warn "crontab not available - auto-start on boot not configured"
+        log "You can manually run: cd /opt/frynet-config && python3 -m http.server 8080 --cgi &"
     fi
     
     # Create update log
     touch /opt/frynet-config/logs/update.log 2>/dev/null || true
     chmod 666 /opt/frynet-config/logs/update.log 2>/dev/null || true
+    touch /opt/frynet-config/logs/webserver.log 2>/dev/null || true
+    chmod 666 /opt/frynet-config/logs/webserver.log 2>/dev/null || true
     
     log "Auto-update configured"
 }
@@ -344,10 +373,38 @@ optimize_for_mining() {
     # 1. Enable huge pages (gives 20-30% boost for RandomX)
     log "  Configuring huge pages..."
     
-    # RandomX needs ~2336 MB for dataset + scratchpads
-    # 2MB huge pages: need at least 1200 pages
-    # Plus some buffer for the system
-    HUGE_PAGES=1280
+    # Detect RAM and set appropriate huge pages
+    # Each huge page = 2MB, RandomX ideally needs ~1200 pages (2.4GB)
+    # But we must leave RAM for the OS to boot and run
+    RAM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)
+    
+    if [ -z "$RAM_MB" ] || [ "$RAM_MB" -eq 0 ]; then
+        RAM_MB=1024  # Assume 1GB if detection fails
+        warn "  Could not detect RAM, assuming 1GB"
+    fi
+    
+    # Tiered huge pages based on available RAM
+    if [ "$RAM_MB" -lt 1500 ]; then
+        # 1GB or less - disable huge pages (not enough RAM)
+        HUGE_PAGES=0
+        log "  RAM: ${RAM_MB}MB - Disabling huge pages (insufficient RAM)"
+    elif [ "$RAM_MB" -lt 2500 ]; then
+        # 2GB - very limited huge pages (leave 1GB for OS)
+        HUGE_PAGES=256
+        log "  RAM: ${RAM_MB}MB - Setting 256 huge pages (512MB)"
+    elif [ "$RAM_MB" -lt 4500 ]; then
+        # 4GB - moderate huge pages (leave 1.5GB for OS)
+        HUGE_PAGES=640
+        log "  RAM: ${RAM_MB}MB - Setting 640 huge pages (1.25GB)"
+    elif [ "$RAM_MB" -lt 8500 ]; then
+        # 8GB - good amount of huge pages
+        HUGE_PAGES=1024
+        log "  RAM: ${RAM_MB}MB - Setting 1024 huge pages (2GB)"
+    else
+        # 16GB+ - full RandomX optimization
+        HUGE_PAGES=1280
+        log "  RAM: ${RAM_MB}MB - Setting 1280 huge pages (2.5GB)"
+    fi
     
     # Set huge pages
     sysctl -w vm.nr_hugepages=$HUGE_PAGES >/dev/null 2>&1 || true
@@ -388,13 +445,28 @@ optimize_for_mining() {
         fi
     done
     
-    # 5. Create optimization script that runs before mining
+    # 5. Create optimization script that runs before mining (uses same RAM detection)
     cat > /opt/frynet-config/optimize.sh <<'OPTSCRIPT'
 #!/bin/sh
 # Mining optimization script - run before starting miner
 
-# Enable huge pages (need ~1200 for RandomX dataset)
-sysctl -w vm.nr_hugepages=1280 >/dev/null 2>&1
+# Detect RAM and set appropriate huge pages
+RAM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)
+[ -z "$RAM_MB" ] && RAM_MB=1024
+
+if [ "$RAM_MB" -lt 1500 ]; then
+    HUGE_PAGES=0
+elif [ "$RAM_MB" -lt 2500 ]; then
+    HUGE_PAGES=256
+elif [ "$RAM_MB" -lt 4500 ]; then
+    HUGE_PAGES=640
+elif [ "$RAM_MB" -lt 8500 ]; then
+    HUGE_PAGES=1024
+else
+    HUGE_PAGES=1280
+fi
+
+sysctl -w vm.nr_hugepages=$HUGE_PAGES >/dev/null 2>&1
 
 # Load MSR module
 modprobe msr 2>/dev/null
@@ -408,7 +480,7 @@ done
 # Verify huge pages
 HP_TOTAL=$(grep HugePages_Total /proc/meminfo 2>/dev/null | awk '{print $2}')
 HP_FREE=$(grep HugePages_Free /proc/meminfo 2>/dev/null | awk '{print $2}')
-echo "Huge Pages: $HP_FREE free of $HP_TOTAL total (need ~1200 for RandomX)"
+echo "Huge Pages: $HP_FREE free of $HP_TOTAL total (RAM: ${RAM_MB}MB)"
 OPTSCRIPT
     chmod 755 /opt/frynet-config/optimize.sh
     
@@ -416,6 +488,8 @@ OPTSCRIPT
     HP_TOTAL=$(grep HugePages_Total /proc/meminfo 2>/dev/null | awk '{print $2}')
     if [ -n "$HP_TOTAL" ] && [ "$HP_TOTAL" -gt 0 ]; then
         log "  Huge pages enabled: $HP_TOTAL pages (2MB each)"
+    elif [ "$HUGE_PAGES" -eq 0 ]; then
+        log "  Huge pages disabled (low RAM device)"
     else
         warn "  Could not enable huge pages (may need reboot)"
     fi
@@ -755,54 +829,170 @@ install_cpuminer() {
             ;;
             
         arm64)
-            log "=== Building cpuminer-opt for ARM64 ==="
-            log "Cloning cpuminer-opt..."
-            git clone --depth 1 --progress https://github.com/JayDDee/cpuminer-opt.git 2>&1 || {
-                warn "Failed to clone"
-                return 1
-            }
-            cd cpuminer-opt || return 1
+            log "=== Building cpuminer-multi for ARM64 (S905X/Cortex-A53 compatible) ==="
             
-            log "Running autogen..."
-            ./autogen.sh >/dev/null 2>&1
-            
-            log "Configuring..."
-            CFLAGS="-O2" ./configure --disable-assembly >/dev/null 2>&1
-            
-            log "Compiling (10-15 minutes on ARM)..."
-            if make -j"$(nproc)" >/dev/null 2>&1; then
-                cp cpuminer /usr/local/bin/cpuminer
-                chmod +x /usr/local/bin/cpuminer
-                ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+            # First try cpuminer-multi (most compatible with basic ARM64 like S905X)
+            log "Cloning cpuminer-multi (tpruvot fork - best compatibility)..."
+            if git clone --depth 1 --progress https://github.com/tpruvot/cpuminer-multi.git 2>&1; then
+                cd cpuminer-multi || { warn "Failed to cd"; cd "$MINERS_DIR"; }
+                
+                log "Running autogen.sh..."
+                if ./autogen.sh 2>&1; then
+                    log "autogen complete"
+                else
+                    warn "autogen.sh failed, checking if configure exists..."
+                fi
+                
+                # Check for configure script
+                if [ ! -f configure ]; then
+                    warn "No configure script found, trying autoreconf..."
+                    autoreconf -i 2>&1 || true
+                fi
+                
+                if [ -f configure ]; then
+                    log "Running configure for ARM64..."
+                    # Use generic ARM64 flags - no specific optimizations for S905X compatibility
+                    if CFLAGS="-O2 -march=armv8-a" CXXFLAGS="-O2 -march=armv8-a" \
+                       ./configure --with-curl --with-crypto 2>&1; then
+                        log "Configure successful"
+                        
+                        log "Compiling (10-20 minutes on ARM64)..."
+                        CORES=$(nproc 2>/dev/null || echo 2)
+                        # Use fewer cores to avoid memory issues on limited RAM devices
+                        [ "$CORES" -gt 2 ] && CORES=2
+                        
+                        if make -j"$CORES" 2>&1; then
+                            if [ -f cpuminer ]; then
+                                cp cpuminer /usr/local/bin/cpuminer
+                                chmod +x /usr/local/bin/cpuminer
+                                ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                                cd "$MINERS_DIR"
+                                rm -rf cpuminer-multi
+                                log "✅ cpuminer-multi installed for ARM64"
+                                /usr/local/bin/cpuminer --version 2>&1 | head -1 || true
+                                return 0
+                            else
+                                warn "Build completed but cpuminer binary not found"
+                            fi
+                        else
+                            warn "make failed for cpuminer-multi"
+                        fi
+                    else
+                        warn "configure failed for cpuminer-multi"
+                    fi
+                fi
+                
                 cd "$MINERS_DIR"
-                rm -rf cpuminer-opt
-                log "cpuminer-opt installed for ARM64"
-                /usr/local/bin/cpuminer --version 2>&1 | head -1 || true
-                return 0
+                rm -rf cpuminer-multi
+            else
+                warn "Failed to clone cpuminer-multi"
             fi
+            
+            # Fallback: Try pooler cpuminer (most basic, highest compatibility)
+            log "=== Trying pooler cpuminer (fallback for ARM64) ==="
+            if git clone --depth 1 --progress https://github.com/pooler/cpuminer.git pooler-cpuminer 2>&1; then
+                cd pooler-cpuminer || { warn "Failed to cd"; cd "$MINERS_DIR"; }
+                
+                log "Running autogen..."
+                ./autogen.sh 2>&1 || autoreconf -i 2>&1 || true
+                
+                if [ -f configure ]; then
+                    log "Configuring pooler cpuminer..."
+                    CFLAGS="-O2" ./configure 2>&1
+                    
+                    log "Compiling..."
+                    CORES=$(nproc 2>/dev/null || echo 2)
+                    [ "$CORES" -gt 2 ] && CORES=2
+                    
+                    if make -j"$CORES" 2>&1; then
+                        if [ -f minerd ]; then
+                            cp minerd /usr/local/bin/cpuminer
+                            chmod +x /usr/local/bin/cpuminer
+                            ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                            cd "$MINERS_DIR"
+                            rm -rf pooler-cpuminer
+                            log "✅ pooler cpuminer installed for ARM64"
+                            /usr/local/bin/cpuminer --version 2>&1 | head -1 || true
+                            return 0
+                        fi
+                    fi
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf pooler-cpuminer
+            fi
+            
+            warn "All cpuminer builds failed for ARM64"
             ;;
             
         armv7)
-            log "=== Building cpuminer-opt for ARMv7 ==="
-            git clone --depth 1 --progress https://github.com/JayDDee/cpuminer-opt.git 2>&1 || return 1
-            cd cpuminer-opt || return 1
-            ./autogen.sh >/dev/null 2>&1
+            log "=== Building cpuminer-multi for ARMv7 ==="
             
-            log "Configuring with NEON..."
-            CFLAGS="-O2 -mfpu=neon-vfpv4 -mfloat-abi=hard" ./configure --disable-assembly >/dev/null 2>&1 || {
-                log "NEON failed, trying without..."
-                CFLAGS="-O2" ./configure --disable-assembly >/dev/null 2>&1
-            }
-            
-            log "Compiling (15-20 minutes)..."
-            if make -j"$(nproc)" >/dev/null 2>&1; then
-                cp cpuminer /usr/local/bin/cpuminer
-                chmod +x /usr/local/bin/cpuminer
-                ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+            # Try cpuminer-multi first (more compatible)
+            if git clone --depth 1 --progress https://github.com/tpruvot/cpuminer-multi.git 2>&1; then
+                cd cpuminer-multi || { warn "Failed to cd"; cd "$MINERS_DIR"; }
+                
+                log "Running autogen..."
+                ./autogen.sh 2>&1 || autoreconf -i 2>&1 || true
+                
+                if [ -f configure ]; then
+                    log "Configuring with NEON support..."
+                    if CFLAGS="-O2 -mfpu=neon-vfpv4 -mfloat-abi=hard" \
+                       ./configure --with-curl --with-crypto 2>&1; then
+                        log "NEON configure successful"
+                    else
+                        log "NEON failed, trying generic ARMv7..."
+                        CFLAGS="-O2 -march=armv7-a" ./configure --with-curl --with-crypto 2>&1 || true
+                    fi
+                    
+                    log "Compiling (15-20 minutes)..."
+                    CORES=$(nproc 2>/dev/null || echo 2)
+                    [ "$CORES" -gt 2 ] && CORES=2
+                    
+                    if make -j"$CORES" 2>&1; then
+                        if [ -f cpuminer ]; then
+                            cp cpuminer /usr/local/bin/cpuminer
+                            chmod +x /usr/local/bin/cpuminer
+                            ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                            cd "$MINERS_DIR"
+                            rm -rf cpuminer-multi
+                            log "✅ cpuminer-multi installed for ARMv7"
+                            /usr/local/bin/cpuminer --version 2>&1 | head -1 || true
+                            return 0
+                        fi
+                    fi
+                fi
+                
                 cd "$MINERS_DIR"
-                rm -rf cpuminer-opt
-                log "cpuminer-opt installed for ARMv7"
-                return 0
+                rm -rf cpuminer-multi
+            fi
+            
+            # Fallback to pooler cpuminer
+            log "=== Trying pooler cpuminer (fallback) ==="
+            if git clone --depth 1 --progress https://github.com/pooler/cpuminer.git pooler-cpuminer 2>&1; then
+                cd pooler-cpuminer || { warn "Failed to cd"; cd "$MINERS_DIR"; }
+                ./autogen.sh 2>&1 || autoreconf -i 2>&1 || true
+                
+                if [ -f configure ]; then
+                    CFLAGS="-O2" ./configure 2>&1
+                    CORES=$(nproc 2>/dev/null || echo 2)
+                    [ "$CORES" -gt 2 ] && CORES=2
+                    
+                    if make -j"$CORES" 2>&1; then
+                        if [ -f minerd ]; then
+                            cp minerd /usr/local/bin/cpuminer
+                            chmod +x /usr/local/bin/cpuminer
+                            ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                            cd "$MINERS_DIR"
+                            rm -rf pooler-cpuminer
+                            log "✅ pooler cpuminer installed for ARMv7"
+                            return 0
+                        fi
+                    fi
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf pooler-cpuminer
             fi
             ;;
             
