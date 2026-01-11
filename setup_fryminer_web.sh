@@ -12,7 +12,72 @@ log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
 
-[ "$(id -u)" -eq 0 ] || die "Run as root (sudo)."
+# Root check - smarter handling for UPDATE_MODE
+check_root_or_permissions() {
+    # If we're root, all good
+    if [ "$(id -u)" -eq 0 ]; then
+        return 0
+    fi
+    
+    # If running as UPDATE_MODE from web interface, check if we have necessary permissions
+    if [ "$UPDATE_MODE" = "true" ]; then
+        # First, try to get sudo
+        if sudo -n true 2>/dev/null; then
+            # Re-exec with sudo
+            log "Re-executing with sudo..."
+            exec sudo -E UPDATE_MODE=true sh "$0" "$@"
+        fi
+        
+        # Check if we can write to key directories (or create them)
+        CAN_WRITE=true
+        
+        # Check /opt/frynet-config
+        if [ -d /opt/frynet-config ]; then
+            [ -w /opt/frynet-config ] || CAN_WRITE=false
+        elif [ -w /opt ]; then
+            mkdir -p /opt/frynet-config 2>/dev/null || CAN_WRITE=false
+        else
+            CAN_WRITE=false
+        fi
+        
+        # Check /usr/local/bin
+        if [ -d /usr/local/bin ]; then
+            [ -w /usr/local/bin ] || CAN_WRITE=false
+        elif [ -w /usr/local ]; then
+            mkdir -p /usr/local/bin 2>/dev/null || CAN_WRITE=false
+        else
+            CAN_WRITE=false
+        fi
+        
+        # Check /opt/miners
+        if [ -d /opt/miners ]; then
+            [ -w /opt/miners ] || CAN_WRITE=false
+        elif [ -w /opt ]; then
+            mkdir -p /opt/miners 2>/dev/null || CAN_WRITE=false
+        else
+            CAN_WRITE=false
+        fi
+        
+        if [ "$CAN_WRITE" = "true" ]; then
+            log "Running in UPDATE_MODE with sufficient permissions"
+            return 0
+        fi
+        
+        warn "UPDATE_MODE: Insufficient permissions and no sudo access"
+        warn "Web update requires one of:"
+        warn "  - Running as root"
+        warn "  - Passwordless sudo configured"
+        warn "  - Write access to /opt/frynet-config, /usr/local/bin, /opt/miners"
+        return 1
+    fi
+    
+    # Normal mode - require root
+    return 1
+}
+
+if ! check_root_or_permissions; then
+    die "Run as root (sudo)."
+fi
 
 PORT=8080
 BASE=/opt/frynet-config
@@ -1240,17 +1305,30 @@ setup_sudo_permissions() {
     rm -f /etc/sudoers.d/fryminer 2>/dev/null
     
     # Create new sudoers file with SIMPLE, BROAD permissions
+    # Include common web server users and the detected user
     cat > /etc/sudoers.d/fryminer << EOF
 # FryMiner passwordless sudo configuration
 # Generated automatically by setup script
 
-# Allow user to run update scripts and manage miners
+# Primary user (who ran the setup)
 $REAL_USER ALL=(ALL) NOPASSWD: ALL
-fry ALL=(ALL) NOPASSWD: ALL
 
-# Disable tty requirement
+# Common system users that might run the web server
+fry ALL=(ALL) NOPASSWD: ALL
+pi ALL=(ALL) NOPASSWD: ALL
+ubuntu ALL=(ALL) NOPASSWD: ALL
+debian ALL=(ALL) NOPASSWD: ALL
+www-data ALL=(ALL) NOPASSWD: ALL
+nobody ALL=(ALL) NOPASSWD: ALL
+
+# Disable tty requirement for all these users
 Defaults:$REAL_USER !requiretty
 Defaults:fry !requiretty
+Defaults:pi !requiretty
+Defaults:ubuntu !requiretty
+Defaults:debian !requiretty
+Defaults:www-data !requiretty
+Defaults:nobody !requiretty
 EOF
     
     # Set correct permissions
@@ -2921,12 +2999,20 @@ case "$ACTION" in
             # Run the update script
             chmod +x "$TEMP_SCRIPT"
             
-            # Check if we can use sudo without password
+            # Check if we can use sudo without password OR if we're already root
             CURRENT_USER=$(whoami)
-            echo "[$(date)] 🔍 Running as user: $CURRENT_USER" >> "$MINER_LOG"
+            CURRENT_UID=$(id -u)
+            echo "[$(date)] 🔍 Running as user: $CURRENT_USER (UID: $CURRENT_UID)" >> "$MINER_LOG"
             
             CAN_SUDO=false
-            if sudo -n true 2>/dev/null; then
+            IS_ROOT=false
+            
+            # Check if already root
+            if [ "$CURRENT_UID" = "0" ] || [ "$CURRENT_USER" = "root" ]; then
+                IS_ROOT=true
+                CAN_SUDO=true
+                echo "[$(date)] ✅ Running as root - no sudo needed" >> "$MINER_LOG"
+            elif sudo -n true 2>/dev/null; then
                 CAN_SUDO=true
                 echo "[$(date)] ✅ Sudo access confirmed for $CURRENT_USER" >> "$MINER_LOG"
             else
@@ -2936,10 +3022,15 @@ case "$ACTION" in
                 
                 # Check if sudoers file exists
                 if [ -f /etc/sudoers.d/fryminer ]; then
-                    echo "[$(date)] ℹ️  Sudoers file exists, checking contents..." >> "$MINER_LOG"
-                    sudo cat /etc/sudoers.d/fryminer >> "$MINER_LOG" 2>&1 || echo "[$(date)] Cannot read sudoers file" >> "$MINER_LOG"
+                    echo "[$(date)] ℹ️  Sudoers file exists at /etc/sudoers.d/fryminer" >> "$MINER_LOG"
                 else
                     echo "[$(date)] ⚠️  Sudoers file missing: /etc/sudoers.d/fryminer" >> "$MINER_LOG"
+                fi
+                
+                # Try to detect if we can still run - check file permissions
+                if [ -w /opt/frynet-config ] && [ -w /usr/local/bin ]; then
+                    echo "[$(date)] ℹ️  Have write access to key directories, proceeding without sudo" >> "$MINER_LOG"
+                    CAN_SUDO=true  # Pretend we have sudo since we have write access
                 fi
             fi
             
@@ -2950,7 +3041,16 @@ case "$ACTION" in
             INSTALL_SUCCESS=false
             INSTALL_EXIT=1
             
-            if [ "$CAN_SUDO" = "true" ]; then
+            if [ "$IS_ROOT" = "true" ]; then
+                echo "[$(date)] Running directly as root..." >> "$UPDATE_LOG"
+                # Run directly without sudo since we're already root
+                if UPDATE_MODE=true sh "$TEMP_SCRIPT" >> "$UPDATE_LOG" 2>&1; then
+                    INSTALL_EXIT=0
+                    INSTALL_SUCCESS=true
+                else
+                    INSTALL_EXIT=$?
+                fi
+            elif [ "$CAN_SUDO" = "true" ]; then
                 echo "[$(date)] Running with sudo..." >> "$UPDATE_LOG"
                 # Stream output to both logs
                 if UPDATE_MODE=true sudo -E sh "$TEMP_SCRIPT" >> "$UPDATE_LOG" 2>&1; then
