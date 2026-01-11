@@ -1020,64 +1020,112 @@ install_packetcrypt() {
         return 1
     }
     
-    # Helper function to install Rust if needed
-    install_rust_if_needed() {
-        if command -v cargo >/dev/null 2>&1; then
-            log "Rust/Cargo already available"
-            return 0
-        fi
-        
-        log "Installing Rust toolchain (required for PacketCrypt)..."
-        
-        # Check available RAM - Rust compilation needs ~1GB
-        AVAILABLE_RAM=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}' || echo "0")
-        if [ "$AVAILABLE_RAM" -lt 512 ]; then
-            warn "Low RAM detected ($AVAILABLE_RAM MB free)"
-            log "Creating swap file for Rust compilation..."
-            
-            # Create temporary swap if needed
-            if [ ! -f /swapfile_pkt ]; then
-                dd if=/dev/zero of=/swapfile_pkt bs=1M count=1024 2>/dev/null
-                chmod 600 /swapfile_pkt
-                mkswap /swapfile_pkt >/dev/null 2>&1
-                swapon /swapfile_pkt 2>/dev/null
-            fi
-        fi
-        
-        if command -v curl >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal 2>&1
-        elif command -v wget >/dev/null 2>&1; then
-            wget -qO- https://sh.rustup.rs | sh -s -- -y --profile minimal 2>&1
-        else
-            warn "Neither curl nor wget available for Rust installation"
-            return 1
-        fi
-        
-        # Source cargo environment
-        for env_file in "$HOME/.cargo/env" "/root/.cargo/env" "/home/*/.cargo/env"; do
+    # Helper function to ensure compatible Rust version for PacketCrypt
+    ensure_compatible_rust() {
+        # Source cargo environment first (in case it exists but isn't in PATH)
+        for env_file in "$HOME/.cargo/env" "/root/.cargo/env"; do
             if [ -f "$env_file" ]; then
                 . "$env_file" 2>/dev/null || true
             fi
         done
-        
-        # Add to PATH for this session
         export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
         
-        if command -v cargo >/dev/null 2>&1; then
-            log "✅ Rust installed successfully"
-            return 0
-        else
-            warn "Rust installation failed"
-            return 1
+        # Check if Rust is installed
+        if ! command -v rustc >/dev/null 2>&1; then
+            log "Rust not found, installing..."
+            
+            # Check available RAM - Rust compilation needs ~1GB
+            AVAILABLE_RAM=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}' || echo "0")
+            if [ "$AVAILABLE_RAM" -lt 512 ]; then
+                warn "Low RAM detected ($AVAILABLE_RAM MB free)"
+                log "Creating swap file for Rust compilation..."
+                
+                if [ ! -f /swapfile_pkt ]; then
+                    dd if=/dev/zero of=/swapfile_pkt bs=1M count=1024 2>/dev/null
+                    chmod 600 /swapfile_pkt
+                    mkswap /swapfile_pkt >/dev/null 2>&1
+                    swapon /swapfile_pkt 2>/dev/null
+                fi
+            fi
+            
+            # Install rustup
+            if command -v curl >/dev/null 2>&1; then
+                curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal 2>&1
+            elif command -v wget >/dev/null 2>&1; then
+                wget -qO- https://sh.rustup.rs | sh -s -- -y --profile minimal 2>&1
+            else
+                warn "Neither curl nor wget available for Rust installation"
+                return 1
+            fi
+            
+            # Source environment again after install
+            for env_file in "$HOME/.cargo/env" "/root/.cargo/env"; do
+                if [ -f "$env_file" ]; then
+                    . "$env_file" 2>/dev/null || true
+                fi
+            done
+            export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
+            
+            if ! command -v rustc >/dev/null 2>&1; then
+                warn "Rust installation failed"
+                return 1
+            fi
+            
+            log "✅ Rust installed"
         fi
+        
+        # Now check version and switch if needed
+        RUST_VER=$(rustc --version 2>/dev/null)
+        log "Detected: $RUST_VER"
+        
+        # Extract minor version number (e.g., "1.83.0" -> "83")
+        RUST_MINOR=$(echo "$RUST_VER" | grep -o '1\.[0-9]*' | head -1 | cut -d. -f2)
+        
+        if [ -z "$RUST_MINOR" ]; then
+            warn "Could not determine Rust version"
+            RUST_MINOR=0
+        fi
+        
+        # Rust 1.83+ has strict 'dangerous_implicit_autorefs' lint that breaks PacketCrypt
+        if [ "$RUST_MINOR" -ge 83 ] 2>/dev/null; then
+            log "⚠️  Rust 1.83+ detected - incompatible with PacketCrypt"
+            log "PacketCrypt requires Rust ≤1.82 due to strict autoref checks in newer versions"
+            
+            if command -v rustup >/dev/null 2>&1; then
+                log "Automatically switching to Rust 1.82.0..."
+                
+                # Install 1.82.0 if not already installed
+                if ! rustup show 2>/dev/null | grep -q "1.82.0"; then
+                    log "Installing Rust 1.82.0..."
+                    rustup install 1.82.0 2>&1
+                fi
+                
+                # Switch to 1.82.0
+                rustup default 1.82.0 2>&1
+                
+                # Verify switch
+                NEW_VER=$(rustc --version 2>/dev/null)
+                log "✅ Switched to: $NEW_VER"
+            else
+                warn "rustup not available - cannot switch Rust version"
+                warn "Please manually install Rust 1.82.0:"
+                warn "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+                warn "  rustup install 1.82.0 && rustup default 1.82.0"
+                return 1
+            fi
+        else
+            log "✅ Rust version compatible with PacketCrypt"
+        fi
+        
+        return 0
     }
     
     # Build from source function
     build_packetcrypt_from_source() {
         log "Building PacketCrypt from source..."
         
-        if ! install_rust_if_needed; then
-            warn "Cannot build without Rust"
+        if ! ensure_compatible_rust; then
+            warn "Cannot build without compatible Rust version"
             return 1
         fi
         
@@ -1104,8 +1152,11 @@ install_packetcrypt() {
         
         log "Building PacketCrypt with $CORES core(s)..."
         log "This may take 15-45 minutes depending on your CPU..."
+        log "Using Rust: $(rustc --version 2>/dev/null || echo 'unknown')"
         
-        # Build with release optimizations
+        # Suppress warnings for cleaner output
+        export RUSTFLAGS="-A warnings"
+        
         if CARGO_BUILD_JOBS=$CORES cargo build --release 2>&1; then
             if [ -f target/release/packetcrypt ]; then
                 cp target/release/packetcrypt /usr/local/bin/packetcrypt
