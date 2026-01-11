@@ -2,7 +2,8 @@
 # FryMiner Setup - COMPLETE RESTORED VERSION
 # Fixed stratum URL doubling, all 35+ coins restored
 # Monitor and Statistics tabs included
-# Fixed cpuminer-multi build for ARM64 S905X CPUs (uses tpruvot fork instead of cpuminer-opt)
+# Fixed cpuminer-multi build for ARM64 S905X CPUs
+# Added Zephyr (ZEPH), Salvium (SAL), and PacketCrypt (PKT) support
 
 # DO NOT USE set -e - it causes silent failures
 # set -e
@@ -193,6 +194,7 @@ if [ $UPDATE_STATUS -eq 0 ]; then
             # Kill any existing miners
             pkill -9 -f "xmrig" 2>/dev/null || true
             pkill -9 -f "cpuminer" 2>/dev/null || true
+            pkill -9 -f "packetcrypt" 2>/dev/null || true
             sleep 2
             
             # Start miner - script handles its own logging
@@ -235,7 +237,7 @@ AUTOUPDATE
     
     # Setup daily cron job (skip if cron not available)
     if command -v crontab >/dev/null 2>&1; then
-        log "Setting up cron jobs (auto-update + web server on boot)..."
+        log "Setting up daily auto-update cron job..."
         
         # Ensure cron service is running
         if command -v systemctl >/dev/null 2>&1; then
@@ -245,50 +247,22 @@ AUTOUPDATE
             service cron start 2>/dev/null || service crond start 2>/dev/null || true
         fi
         
-        # Create web server startup script
-        cat > /opt/frynet-config/start_webserver.sh <<'WEBSTART'
-#!/bin/sh
-# FryMiner Web Server Startup Script
-# Called by @reboot cron job
-
-BASE="/opt/frynet-config"
-PORT=8080
-LOG="$BASE/logs/webserver.log"
-
-# Wait for network to be ready
-sleep 10
-
-# Kill any existing instances
-pkill -f "python3 -m http.server $PORT" 2>/dev/null || true
-sleep 1
-
-# Start web server
-cd "$BASE"
-nohup python3 -m http.server $PORT --cgi >> "$LOG" 2>&1 &
-
-echo "[$(date)] Web server started on port $PORT (PID: $!)" >> "$LOG"
-WEBSTART
-        chmod 755 /opt/frynet-config/start_webserver.sh
-        
         # Remove any existing fryminer cron entries
-        (crontab -l 2>/dev/null || echo "") | grep -v "fryminer\|auto_update\|start_webserver\|frynet-config" > /tmp/crontab.tmp 2>/dev/null || true
+        (crontab -l 2>/dev/null || echo "") | grep -v "fryminer\|auto_update" > /tmp/crontab.tmp 2>/dev/null || true
         
-        # Add cron jobs
-        echo "@reboot /opt/frynet-config/start_webserver.sh >/dev/null 2>&1" >> /tmp/crontab.tmp
+        # Add new cron job - runs at 4 AM daily
         echo "0 4 * * * /opt/frynet-config/auto_update.sh >/dev/null 2>&1" >> /tmp/crontab.tmp
         
-        crontab /tmp/crontab.tmp 2>/dev/null && log "Cron jobs installed (web server @reboot + auto-update 4AM)" || warn "Could not set up cron jobs"
+        crontab /tmp/crontab.tmp 2>/dev/null && log "Cron job installed" || warn "Could not set up cron job"
         rm -f /tmp/crontab.tmp
     else
-        warn "crontab not available - auto-start on boot not configured"
-        log "You can manually run: cd /opt/frynet-config && python3 -m http.server 8080 --cgi &"
+        warn "crontab not available - auto-update cron job not installed"
+        log "You can manually run: /opt/frynet-config/auto_update.sh"
     fi
     
     # Create update log
     touch /opt/frynet-config/logs/update.log 2>/dev/null || true
     chmod 666 /opt/frynet-config/logs/update.log 2>/dev/null || true
-    touch /opt/frynet-config/logs/webserver.log 2>/dev/null || true
-    chmod 666 /opt/frynet-config/logs/webserver.log 2>/dev/null || true
     
     log "Auto-update configured"
 }
@@ -373,38 +347,10 @@ optimize_for_mining() {
     # 1. Enable huge pages (gives 20-30% boost for RandomX)
     log "  Configuring huge pages..."
     
-    # Detect RAM and set appropriate huge pages
-    # Each huge page = 2MB, RandomX ideally needs ~1200 pages (2.4GB)
-    # But we must leave RAM for the OS to boot and run
-    RAM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)
-    
-    if [ -z "$RAM_MB" ] || [ "$RAM_MB" -eq 0 ]; then
-        RAM_MB=1024  # Assume 1GB if detection fails
-        warn "  Could not detect RAM, assuming 1GB"
-    fi
-    
-    # Tiered huge pages based on available RAM
-    if [ "$RAM_MB" -lt 1500 ]; then
-        # 1GB or less - disable huge pages (not enough RAM)
-        HUGE_PAGES=0
-        log "  RAM: ${RAM_MB}MB - Disabling huge pages (insufficient RAM)"
-    elif [ "$RAM_MB" -lt 2500 ]; then
-        # 2GB - very limited huge pages (leave 1GB for OS)
-        HUGE_PAGES=256
-        log "  RAM: ${RAM_MB}MB - Setting 256 huge pages (512MB)"
-    elif [ "$RAM_MB" -lt 4500 ]; then
-        # 4GB - moderate huge pages (leave 1.5GB for OS)
-        HUGE_PAGES=640
-        log "  RAM: ${RAM_MB}MB - Setting 640 huge pages (1.25GB)"
-    elif [ "$RAM_MB" -lt 8500 ]; then
-        # 8GB - good amount of huge pages
-        HUGE_PAGES=1024
-        log "  RAM: ${RAM_MB}MB - Setting 1024 huge pages (2GB)"
-    else
-        # 16GB+ - full RandomX optimization
-        HUGE_PAGES=1280
-        log "  RAM: ${RAM_MB}MB - Setting 1280 huge pages (2.5GB)"
-    fi
+    # RandomX needs ~2336 MB for dataset + scratchpads
+    # 2MB huge pages: need at least 1200 pages
+    # Plus some buffer for the system
+    HUGE_PAGES=1280
     
     # Set huge pages
     sysctl -w vm.nr_hugepages=$HUGE_PAGES >/dev/null 2>&1 || true
@@ -445,28 +391,13 @@ optimize_for_mining() {
         fi
     done
     
-    # 5. Create optimization script that runs before mining (uses same RAM detection)
+    # 5. Create optimization script that runs before mining
     cat > /opt/frynet-config/optimize.sh <<'OPTSCRIPT'
 #!/bin/sh
 # Mining optimization script - run before starting miner
 
-# Detect RAM and set appropriate huge pages
-RAM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null)
-[ -z "$RAM_MB" ] && RAM_MB=1024
-
-if [ "$RAM_MB" -lt 1500 ]; then
-    HUGE_PAGES=0
-elif [ "$RAM_MB" -lt 2500 ]; then
-    HUGE_PAGES=256
-elif [ "$RAM_MB" -lt 4500 ]; then
-    HUGE_PAGES=640
-elif [ "$RAM_MB" -lt 8500 ]; then
-    HUGE_PAGES=1024
-else
-    HUGE_PAGES=1280
-fi
-
-sysctl -w vm.nr_hugepages=$HUGE_PAGES >/dev/null 2>&1
+# Enable huge pages (need ~1200 for RandomX dataset)
+sysctl -w vm.nr_hugepages=1280 >/dev/null 2>&1
 
 # Load MSR module
 modprobe msr 2>/dev/null
@@ -480,7 +411,7 @@ done
 # Verify huge pages
 HP_TOTAL=$(grep HugePages_Total /proc/meminfo 2>/dev/null | awk '{print $2}')
 HP_FREE=$(grep HugePages_Free /proc/meminfo 2>/dev/null | awk '{print $2}')
-echo "Huge Pages: $HP_FREE free of $HP_TOTAL total (RAM: ${RAM_MB}MB)"
+echo "Huge Pages: $HP_FREE free of $HP_TOTAL total (need ~1200 for RandomX)"
 OPTSCRIPT
     chmod 755 /opt/frynet-config/optimize.sh
     
@@ -488,8 +419,6 @@ OPTSCRIPT
     HP_TOTAL=$(grep HugePages_Total /proc/meminfo 2>/dev/null | awk '{print $2}')
     if [ -n "$HP_TOTAL" ] && [ "$HP_TOTAL" -gt 0 ]; then
         log "  Huge pages enabled: $HP_TOTAL pages (2MB each)"
-    elif [ "$HUGE_PAGES" -eq 0 ]; then
-        log "  Huge pages disabled (low RAM device)"
     else
         warn "  Could not enable huge pages (may need reboot)"
     fi
@@ -926,73 +855,26 @@ install_cpuminer() {
             ;;
             
         armv7)
-            log "=== Building cpuminer-multi for ARMv7 ==="
+            log "=== Building cpuminer-opt for ARMv7 ==="
+            git clone --depth 1 --progress https://github.com/JayDDee/cpuminer-opt.git 2>&1 || return 1
+            cd cpuminer-opt || return 1
+            ./autogen.sh >/dev/null 2>&1
             
-            # Try cpuminer-multi first (more compatible)
-            if git clone --depth 1 --progress https://github.com/tpruvot/cpuminer-multi.git 2>&1; then
-                cd cpuminer-multi || { warn "Failed to cd"; cd "$MINERS_DIR"; }
-                
-                log "Running autogen..."
-                ./autogen.sh 2>&1 || autoreconf -i 2>&1 || true
-                
-                if [ -f configure ]; then
-                    log "Configuring with NEON support..."
-                    if CFLAGS="-O2 -mfpu=neon-vfpv4 -mfloat-abi=hard" \
-                       ./configure --with-curl --with-crypto 2>&1; then
-                        log "NEON configure successful"
-                    else
-                        log "NEON failed, trying generic ARMv7..."
-                        CFLAGS="-O2 -march=armv7-a" ./configure --with-curl --with-crypto 2>&1 || true
-                    fi
-                    
-                    log "Compiling (15-20 minutes)..."
-                    CORES=$(nproc 2>/dev/null || echo 2)
-                    [ "$CORES" -gt 2 ] && CORES=2
-                    
-                    if make -j"$CORES" 2>&1; then
-                        if [ -f cpuminer ]; then
-                            cp cpuminer /usr/local/bin/cpuminer
-                            chmod +x /usr/local/bin/cpuminer
-                            ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
-                            cd "$MINERS_DIR"
-                            rm -rf cpuminer-multi
-                            log "✅ cpuminer-multi installed for ARMv7"
-                            /usr/local/bin/cpuminer --version 2>&1 | head -1 || true
-                            return 0
-                        fi
-                    fi
-                fi
-                
-                cd "$MINERS_DIR"
-                rm -rf cpuminer-multi
-            fi
+            log "Configuring with NEON..."
+            CFLAGS="-O2 -mfpu=neon-vfpv4 -mfloat-abi=hard" ./configure --disable-assembly >/dev/null 2>&1 || {
+                log "NEON failed, trying without..."
+                CFLAGS="-O2" ./configure --disable-assembly >/dev/null 2>&1
+            }
             
-            # Fallback to pooler cpuminer
-            log "=== Trying pooler cpuminer (fallback) ==="
-            if git clone --depth 1 --progress https://github.com/pooler/cpuminer.git pooler-cpuminer 2>&1; then
-                cd pooler-cpuminer || { warn "Failed to cd"; cd "$MINERS_DIR"; }
-                ./autogen.sh 2>&1 || autoreconf -i 2>&1 || true
-                
-                if [ -f configure ]; then
-                    CFLAGS="-O2" ./configure 2>&1
-                    CORES=$(nproc 2>/dev/null || echo 2)
-                    [ "$CORES" -gt 2 ] && CORES=2
-                    
-                    if make -j"$CORES" 2>&1; then
-                        if [ -f minerd ]; then
-                            cp minerd /usr/local/bin/cpuminer
-                            chmod +x /usr/local/bin/cpuminer
-                            ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
-                            cd "$MINERS_DIR"
-                            rm -rf pooler-cpuminer
-                            log "✅ pooler cpuminer installed for ARMv7"
-                            return 0
-                        fi
-                    fi
-                fi
-                
+            log "Compiling (15-20 minutes)..."
+            if make -j"$(nproc)" >/dev/null 2>&1; then
+                cp cpuminer /usr/local/bin/cpuminer
+                chmod +x /usr/local/bin/cpuminer
+                ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
                 cd "$MINERS_DIR"
-                rm -rf pooler-cpuminer
+                rm -rf cpuminer-opt
+                log "cpuminer-opt installed for ARMv7"
+                return 0
             fi
             ;;
             
@@ -1038,6 +920,273 @@ install_cpuminer() {
     cd "$MINERS_DIR" 2>/dev/null
     rm -rf cpuminer-opt cpuminer-multi pooler-cpuminer 2>/dev/null
     warn "cpuminer installation failed"
+    return 1
+}
+
+# Install PacketCrypt miner for PKT
+install_packetcrypt() {
+    log "=== Starting PacketCrypt installation ==="
+    
+    # Check if packetcrypt already exists and works
+    if command -v packetcrypt >/dev/null 2>&1; then
+        log "Testing existing packetcrypt..."
+        if packetcrypt --help >/dev/null 2>&1; then
+            log "PacketCrypt already installed and working"
+            return 0
+        else
+            warn "Existing PacketCrypt is broken, reinstalling..."
+            rm -f /usr/local/bin/packetcrypt 2>/dev/null
+        fi
+    fi
+    
+    log "Installing PacketCrypt for $ARCH_TYPE..."
+    mkdir -p "$MINERS_DIR"
+    cd "$MINERS_DIR" || { warn "Failed to cd to $MINERS_DIR"; return 1; }
+    rm -rf packetcrypt* 2>/dev/null
+    
+    # Helper function to test if binary works
+    test_packetcrypt_binary() {
+        if [ -f "$1" ] && [ -s "$1" ]; then
+            chmod +x "$1"
+            if "$1" --help >/dev/null 2>&1; then
+                return 0
+            fi
+        fi
+        return 1
+    }
+    
+    # Helper function to install Rust if needed
+    install_rust_if_needed() {
+        if command -v cargo >/dev/null 2>&1; then
+            log "Rust/Cargo already available"
+            return 0
+        fi
+        
+        log "Installing Rust toolchain (required for PacketCrypt)..."
+        
+        # Check available RAM - Rust compilation needs ~1GB
+        AVAILABLE_RAM=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}' || echo "0")
+        if [ "$AVAILABLE_RAM" -lt 512 ]; then
+            warn "Low RAM detected ($AVAILABLE_RAM MB free)"
+            log "Creating swap file for Rust compilation..."
+            
+            # Create temporary swap if needed
+            if [ ! -f /swapfile_pkt ]; then
+                dd if=/dev/zero of=/swapfile_pkt bs=1M count=1024 2>/dev/null
+                chmod 600 /swapfile_pkt
+                mkswap /swapfile_pkt >/dev/null 2>&1
+                swapon /swapfile_pkt 2>/dev/null
+            fi
+        fi
+        
+        if command -v curl >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal 2>&1
+        elif command -v wget >/dev/null 2>&1; then
+            wget -qO- https://sh.rustup.rs | sh -s -- -y --profile minimal 2>&1
+        else
+            warn "Neither curl nor wget available for Rust installation"
+            return 1
+        fi
+        
+        # Source cargo environment
+        for env_file in "$HOME/.cargo/env" "/root/.cargo/env" "/home/*/.cargo/env"; do
+            if [ -f "$env_file" ]; then
+                . "$env_file" 2>/dev/null || true
+            fi
+        done
+        
+        # Add to PATH for this session
+        export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
+        
+        if command -v cargo >/dev/null 2>&1; then
+            log "✅ Rust installed successfully"
+            return 0
+        else
+            warn "Rust installation failed"
+            return 1
+        fi
+    }
+    
+    # Build from source function
+    build_packetcrypt_from_source() {
+        log "Building PacketCrypt from source..."
+        
+        if ! install_rust_if_needed; then
+            warn "Cannot build without Rust"
+            return 1
+        fi
+        
+        cd "$MINERS_DIR" || return 1
+        rm -rf packetcrypt_rs 2>/dev/null
+        
+        log "Cloning PacketCrypt repository..."
+        if ! git clone --depth 1 https://github.com/cjdelisle/packetcrypt_rs.git 2>&1; then
+            warn "Failed to clone repository"
+            return 1
+        fi
+        
+        cd packetcrypt_rs || { warn "Failed to cd"; return 1; }
+        
+        # Determine build cores - use fewer on low-RAM devices
+        AVAILABLE_RAM=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}' || echo "2048")
+        CORES=$(nproc 2>/dev/null || echo 2)
+        if [ "$AVAILABLE_RAM" -lt 1024 ]; then
+            CORES=1
+            log "Using single core build (low RAM: ${AVAILABLE_RAM}MB)"
+        elif [ "$CORES" -gt 2 ]; then
+            CORES=2
+        fi
+        
+        log "Building PacketCrypt with $CORES core(s)..."
+        log "This may take 15-45 minutes depending on your CPU..."
+        
+        # Build with release optimizations
+        if CARGO_BUILD_JOBS=$CORES cargo build --release 2>&1; then
+            if [ -f target/release/packetcrypt ]; then
+                cp target/release/packetcrypt /usr/local/bin/packetcrypt
+                chmod +x /usr/local/bin/packetcrypt
+                cd "$MINERS_DIR"
+                rm -rf packetcrypt_rs
+                
+                # Clean up temporary swap if we created it
+                if [ -f /swapfile_pkt ]; then
+                    swapoff /swapfile_pkt 2>/dev/null || true
+                    rm -f /swapfile_pkt
+                fi
+                
+                log "✅ PacketCrypt built and installed from source"
+                return 0
+            else
+                warn "Build completed but binary not found"
+            fi
+        else
+            warn "Cargo build failed"
+        fi
+        
+        cd "$MINERS_DIR"
+        rm -rf packetcrypt_rs
+        return 1
+    }
+    
+    case "$ARCH_TYPE" in
+        x86_64)
+            log "Downloading pre-built PacketCrypt for x86_64..."
+            LATEST_URL="https://github.com/cjdelisle/packetcrypt_rs/releases/latest/download/packetcrypt-linux_amd64"
+            
+            if command -v curl >/dev/null 2>&1; then
+                curl -sL -o packetcrypt "$LATEST_URL" 2>/dev/null
+            elif command -v wget >/dev/null 2>&1; then
+                wget -q -O packetcrypt "$LATEST_URL" 2>/dev/null
+            fi
+            
+            if test_packetcrypt_binary "./packetcrypt"; then
+                cp packetcrypt /usr/local/bin/packetcrypt
+                chmod +x /usr/local/bin/packetcrypt
+                rm -f packetcrypt
+                log "✅ PacketCrypt pre-built binary installed for x86_64"
+                return 0
+            else
+                warn "Pre-built binary failed, building from source..."
+                rm -f packetcrypt 2>/dev/null
+                build_packetcrypt_from_source
+                return $?
+            fi
+            ;;
+            
+        arm64)
+            log "=== Installing PacketCrypt for ARM64 ==="
+            
+            # Try pre-built ARM64 binary first (available in some releases)
+            log "Checking for pre-built ARM64 binary..."
+            
+            # The project sometimes releases ARM64 binaries
+            ARM64_URLS="
+                https://github.com/cjdelisle/packetcrypt_rs/releases/latest/download/packetcrypt-linux_arm64
+                https://github.com/cjdelisle/packetcrypt_rs/releases/latest/download/packetcrypt-linux-arm64
+                https://github.com/cjdelisle/packetcrypt_rs/releases/latest/download/packetcrypt-aarch64
+            "
+            
+            for url in $ARM64_URLS; do
+                log "Trying: $url"
+                rm -f packetcrypt 2>/dev/null
+                
+                if command -v curl >/dev/null 2>&1; then
+                    curl -sL -o packetcrypt "$url" 2>/dev/null
+                elif command -v wget >/dev/null 2>&1; then
+                    wget -q -O packetcrypt "$url" 2>/dev/null
+                fi
+                
+                if test_packetcrypt_binary "./packetcrypt"; then
+                    cp packetcrypt /usr/local/bin/packetcrypt
+                    chmod +x /usr/local/bin/packetcrypt
+                    rm -f packetcrypt
+                    log "✅ PacketCrypt pre-built binary installed for ARM64"
+                    return 0
+                fi
+            done
+            
+            log "No pre-built ARM64 binary available, building from source..."
+            rm -f packetcrypt 2>/dev/null
+            build_packetcrypt_from_source
+            return $?
+            ;;
+            
+        armv7)
+            log "=== Installing PacketCrypt for ARMv7 ==="
+            log "No pre-built binaries for ARMv7, building from source..."
+            log "Note: This requires ~1GB RAM and may take 30-60 minutes"
+            
+            build_packetcrypt_from_source
+            return $?
+            ;;
+            
+        armv6)
+            log "=== Installing PacketCrypt for ARMv6 (Pi Zero/1) ==="
+            warn "ARMv6 is very slow for Rust compilation"
+            warn "Consider using a more powerful device for PKT mining"
+            log "Attempting source build (this may take 1-2 hours)..."
+            
+            build_packetcrypt_from_source
+            return $?
+            ;;
+            
+        x86)
+            log "=== Installing PacketCrypt for x86 32-bit ==="
+            log "Checking for pre-built 32-bit binary..."
+            
+            X86_URL="https://github.com/cjdelisle/packetcrypt_rs/releases/latest/download/packetcrypt-linux_i686"
+            
+            if command -v curl >/dev/null 2>&1; then
+                curl -sL -o packetcrypt "$X86_URL" 2>/dev/null
+            elif command -v wget >/dev/null 2>&1; then
+                wget -q -O packetcrypt "$X86_URL" 2>/dev/null
+            fi
+            
+            if test_packetcrypt_binary "./packetcrypt"; then
+                cp packetcrypt /usr/local/bin/packetcrypt
+                chmod +x /usr/local/bin/packetcrypt
+                rm -f packetcrypt
+                log "✅ PacketCrypt installed for x86"
+                return 0
+            fi
+            
+            log "No pre-built binary, building from source..."
+            rm -f packetcrypt 2>/dev/null
+            build_packetcrypt_from_source
+            return $?
+            ;;
+            
+        *)
+            log "=== Installing PacketCrypt for $ARCH_TYPE ==="
+            log "No pre-built binary available for $ARCH_TYPE"
+            log "Attempting to build from source..."
+            
+            build_packetcrypt_from_source
+            return $?
+            ;;
+    esac
+    
+    warn "PacketCrypt installation failed for $ARCH_TYPE"
     return 1
 }
 
@@ -1210,6 +1359,11 @@ main() {
         die "CRITICAL: cpuminer installation failed - cannot continue"
     fi
     
+    # Install PacketCrypt (optional - for PKT mining)
+    if ! install_packetcrypt; then
+        warn "PacketCrypt installation failed - PKT mining will not be available"
+    fi
+    
     # Apply mining optimizations (huge pages, MSR, CPU governor)
     optimize_for_mining
     
@@ -1229,6 +1383,7 @@ main() {
     pkill -f xmrig 2>/dev/null || true
     pkill -f cpuminer 2>/dev/null || true
     pkill -f minerd 2>/dev/null || true
+    pkill -f packetcrypt 2>/dev/null || true
     
     # Stop old daemons
     pkill -f fryminer_pidmon 2>/dev/null || true
@@ -1380,8 +1535,13 @@ optgroup { background: #1a1a1a; color: #dc143c; }
                             <option value="verus">Verus (VRSC) - VerusHash</option>
                             <option value="aeon">Aeon (AEON) - K12</option>
                             <option value="dero">Dero (DERO) - AstroBWT</option>
+                            <option value="zephyr">Zephyr (ZEPH) - RandomX</option>
+                            <option value="salvium">Salvium (SAL) - RandomX</option>
                             <option value="yadacoin">Yadacoin (YDA) - RandomX</option>
                             <option value="arionum">Arionum (ARO) - Argon2</option>
+                        </optgroup>
+                        <optgroup label="Bandwidth Mining">
+                            <option value="pkt">PKT (PacketCrypt)</option>
                         </optgroup>
                         <optgroup label="Other Minable">
                             <option value="dash">Dash (DASH) - X11</option>
@@ -1560,6 +1720,9 @@ const defaultPools = {
     'verus': 'pool.verus.io:9999',
     'aeon': 'aeon.herominers.com:10650',
     'dero': 'dero-node-sk.mysrv.cloud:10300',
+    'zephyr': 'de.zephyr.herominers.com:1123',
+    'salvium': 'de.salvium.herominers.com:1228',
+    'pkt': 'http://pool.pktpool.io',
     'yadacoin': 'pool.yadacoin.io:3333',
     'arionum': 'aropool.com:80',
     'dash': 'dash.suprnova.cc:9989',
@@ -1598,6 +1761,9 @@ const fixedPools = ['btc-lotto', 'bch-lotto', 'ltc-lotto', 'doge-lotto', 'xmr-lo
 const coinInfo = {
     'tera': '⚠️ TERA requires running a full node. Visit teraexplorer.org for setup instructions.',
     'minima': '⚠️ Minima is mobile-only. Download the Minima app from your app store.',
+    'pkt': '📡 PKT uses PacketCrypt (bandwidth mining). Multiple pools supported: pool.pktpool.io, pool.pkteer.com, pool.pkt.world',
+    'zephyr': '🔒 Zephyr is a privacy-focused stablecoin protocol using RandomX.',
+    'salvium': '🔒 Salvium is a privacy blockchain with staking. Uses RandomX algorithm.',
     'bch-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!',
     'ltc-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!',
     'doge-lotto': '🎰 Solo lottery mining - merged with LTC, very low odds!',
@@ -2047,6 +2213,9 @@ case "$MINER" in
     verus) [ -z "$POOL" ] && POOL="pool.verus.io:9999" ;;
     aeon) [ -z "$POOL" ] && POOL="aeon.herominers.com:10650" ;;
     dero) [ -z "$POOL" ] && POOL="dero-node-sk.mysrv.cloud:10300" ;;
+    zephyr) [ -z "$POOL" ] && POOL="de.zephyr.herominers.com:1123" ;;
+    salvium) [ -z "$POOL" ] && POOL="de.salvium.herominers.com:1228" ;;
+    pkt) [ -z "$POOL" ] && POOL="http://pool.pktpool.io" ;;
     yadacoin) [ -z "$POOL" ] && POOL="pool.yadacoin.io:3333" ;;
     arionum) [ -z "$POOL" ] && POOL="aropool.com:80" ;;
     dash) [ -z "$POOL" ] && POOL="dash.suprnova.cc:9989" ;;
@@ -2134,6 +2303,19 @@ case "$MINER" in
         ALGO="astrobwt"
         USE_CPUMINER=false
         ;;
+    zephyr)
+        ALGO="rx/0"
+        USE_CPUMINER=false
+        ;;
+    salvium)
+        ALGO="rx/0"
+        USE_CPUMINER=false
+        ;;
+    pkt)
+        ALGO="packetcrypt"
+        USE_CPUMINER=false
+        USE_PACKETCRYPT=true
+        ;;
     yadacoin)
         ALGO="rx/yada"
         USE_CPUMINER=false
@@ -2196,7 +2378,7 @@ fi
 (
     sleep 30
     while true; do
-        if pgrep -f "cpuminer\|xmrig" >/dev/null 2>&1; then
+        if pgrep -f "cpuminer\|xmrig\|packetcrypt" >/dev/null 2>&1; then
             echo "[\$(date)] ♥ Mining active" >> "\$LOG"
         else
             break
@@ -2208,7 +2390,15 @@ fi
 EOF
 
 # Add miner command with proper output handling
-if [ "$USE_CPUMINER" = "true" ]; then
+if [ "$USE_PACKETCRYPT" = "true" ]; then
+    # PacketCrypt - bandwidth mining for PKT
+    # Supports multiple pools for redundancy
+    cat >> "$SCRIPT_FILE" <<EOF
+# Run PacketCrypt announcement miner
+# Multiple pools can be specified for redundancy
+exec /usr/local/bin/packetcrypt ann -p $WALLET $POOL http://pool.pkteer.com http://pool.pkt.world 2>&1 | tee -a "\$LOG"
+EOF
+elif [ "$USE_CPUMINER" = "true" ]; then
     # cpuminer - with retry options for connection stability
     # --retry 10: Retry 10 times before giving up
     # --retry-pause 30: Wait 30 seconds between retries  
@@ -2282,10 +2472,10 @@ fi
 
 # Method 2: Check for miner processes directly using ps
 if [ "$RUNNING" = "false" ]; then
-    if ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[m]inerd" | grep -v grep >/dev/null 2>&1; then
+    if ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[m]inerd|[p]acketcrypt" | grep -v grep >/dev/null 2>&1; then
         RUNNING="true"
         # Update PID file with found process
-        ACTUAL_PID=$(ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig" | grep -v grep | awk '{print $2}' | head -1)
+        ACTUAL_PID=$(ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[p]acketcrypt" | grep -v grep | awk '{print $2}' | head -1)
         if [ -n "$ACTUAL_PID" ]; then
             echo "$ACTUAL_PID" > "$PID_FILE" 2>/dev/null
         fi
@@ -2477,6 +2667,7 @@ fi
 pkill -9 -f "xmrig" 2>/dev/null || true
 pkill -9 -f "cpuminer" 2>/dev/null || true
 pkill -9 -f "minerd" 2>/dev/null || true
+pkill -9 -f "packetcrypt" 2>/dev/null || true
 rm -f "$PID_FILE" 2>/dev/null
 sleep 2
 
@@ -2575,10 +2766,12 @@ if [ "$CAN_SUDO" = "true" ]; then
     sudo pkill -9 -f xmrig 2>/dev/null || true
     sudo pkill -9 -f cpuminer 2>/dev/null || true
     sudo pkill -9 -f minerd 2>/dev/null || true
+    sudo pkill -9 -f packetcrypt 2>/dev/null || true
 else
     pkill -9 -f xmrig 2>/dev/null || true
     pkill -9 -f cpuminer 2>/dev/null || true
     pkill -9 -f minerd 2>/dev/null || true
+    pkill -9 -f packetcrypt 2>/dev/null || true
 fi
 
 echo "<div class='success'>✅ Mining stopped</div>"
@@ -2846,9 +3039,11 @@ case "$ACTION" in
                     if [ "$CAN_SUDO" = "true" ]; then
                         sudo pkill -9 -f "xmrig" 2>/dev/null || true
                         sudo pkill -9 -f "cpuminer" 2>/dev/null || true
+                        sudo pkill -9 -f "packetcrypt" 2>/dev/null || true
                     else
                         pkill -9 -f "xmrig" 2>/dev/null || true
                         pkill -9 -f "cpuminer" 2>/dev/null || true
+                        pkill -9 -f "packetcrypt" 2>/dev/null || true
                     fi
                     
                     sleep 2
@@ -2911,9 +3106,10 @@ SCRIPT
     log ""
     log "Web Interface: http://$IP:$PORT"
     log ""
-    log "Supported Cryptocurrencies (35+):"
+    log "Supported Cryptocurrencies (40+):"
     log "  • Popular: BTC, LTC, DOGE, XMR"
-    log "  • CPU Mineable: Scala, Verus, Aeon, Dero, Yadacoin, Arionum"
+    log "  • CPU Mineable: Scala, Verus, Aeon, Dero, Zephyr, Salvium, Yadacoin, Arionum"
+    log "  • Bandwidth Mining: PKT (PacketCrypt)"
     log "  • Other: DASH, DCR, ZEN"
     log "  • Solo Lottery: BCH, LTC, DOGE, XMR"
     log "  • Unmineable: SHIB, ADA, SOL, XRP, DOT, and many more"
