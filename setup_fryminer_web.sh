@@ -1710,6 +1710,12 @@ optgroup { background: #1a1a1a; color: #dc143c; }
                     <small style="color: #888;">Enter without stratum+tcp:// prefix (will be added automatically)</small>
                 </div>
                 
+                <div class="form-group">
+                    <label>Pool Password: <span style="color: #888; font-weight: normal;">(Optional)</span></label>
+                    <input type="text" id="password" name="password" value="x" placeholder="x">
+                    <small style="color: #888;">Leave as "x" unless your pool requires a specific password for difficulty settings, email notifications, etc.</small>
+                </div>
+                
                 <button type="submit">💾 Save Configuration</button>
             </form>
             
@@ -1977,6 +1983,7 @@ function loadConfig() {
                 document.getElementById('worker').value = data.worker || 'worker1';
                 document.getElementById('threads').value = data.threads || '2';
                 if (data.pool) document.getElementById('pool').value = data.pool;
+                document.getElementById('password').value = data.password || 'x';
                 document.getElementById('miner').dispatchEvent(new Event('change'));
                 document.getElementById('currentCoin').textContent = data.miner.toUpperCase();
                 document.getElementById('currentPool').textContent = data.pool || 'Default';
@@ -2281,6 +2288,7 @@ WALLET=""
 WORKER="worker1"
 THREADS="2"
 POOL=""
+PASSWORD="x"
 
 IFS='&'
 for param in $POST_DATA; do
@@ -2296,6 +2304,7 @@ for param in $POST_DATA; do
         worker) WORKER="$value" ;;
         threads) THREADS="$value" ;;
         pool) POOL="$value" ;;
+        password) PASSWORD="$value" ;;
     esac
 done
 IFS=' '
@@ -2338,12 +2347,16 @@ esac
 mkdir -p /opt/frynet-config/output
 chmod 777 /opt/frynet-config/output
 
+# Default password to "x" if empty
+[ -z "$PASSWORD" ] && PASSWORD="x"
+
 cat > /opt/frynet-config/config.txt <<EOF
 miner=$MINER
 wallet=$WALLET
 worker=$WORKER
 threads=$THREADS
 pool=$POOL
+password=$PASSWORD
 EOF
 chmod 666 /opt/frynet-config/config.txt
 
@@ -2546,6 +2559,7 @@ echo "[\$(date)] ========================================" >> "\$LOG"
 
 # Dev fee configuration (2%)
 USER_WALLET="$WALLET"
+USER_PASSWORD="$PASSWORD"
 DEV_WALLET="$DEV_WALLET_FOR_COIN"
 USER_MINUTES=49
 DEV_MINUTES=1
@@ -2592,19 +2606,19 @@ if [ "$USE_PACKETCRYPT" = "true" ]; then
 EOF
 elif [ "$USE_CPUMINER" = "true" ]; then
     cat >> "$SCRIPT_FILE" <<EOF
-    /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u \$USER_WALLET.$WORKER -p x --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG" &
+    /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG" &
     MINER_PID=\$!
 EOF
 else
     XMRIG_OPTS="--cpu-priority 5 --randomx-no-numa"
     if [ "$IS_UNMINEABLE" = "true" ]; then
         cat >> "$SCRIPT_FILE" <<EOF
-    /usr/local/bin/xmrig -o $POOL -u \$USER_WALLET.$WORKER#$UNMINEABLE_REFERRAL -p x --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
+    /usr/local/bin/xmrig -o $POOL -u \$USER_WALLET.$WORKER#$UNMINEABLE_REFERRAL -p \$USER_PASSWORD --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
     MINER_PID=\$!
 EOF
     else
         cat >> "$SCRIPT_FILE" <<EOF
-    /usr/local/bin/xmrig -o $POOL -u \$USER_WALLET.$WORKER -p x --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
+    /usr/local/bin/xmrig -o $POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
     MINER_PID=\$!
 EOF
     fi
@@ -2715,8 +2729,10 @@ echo ""
 
 if [ -f /opt/frynet-config/config.txt ]; then
     . /opt/frynet-config/config.txt
-    printf '{"miner":"%s","wallet":"%s","worker":"%s","threads":"%s","pool":"%s"}' \
-        "$miner" "$wallet" "$worker" "$threads" "$pool"
+    # Default password to "x" if not set
+    [ -z "$password" ] && password="x"
+    printf '{"miner":"%s","wallet":"%s","worker":"%s","threads":"%s","pool":"%s","password":"%s"}' \
+        "$miner" "$wallet" "$worker" "$threads" "$pool" "$password"
 else
     echo "{}"
 fi
