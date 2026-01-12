@@ -4,9 +4,46 @@
 # Monitor and Statistics tabs included
 # Fixed cpuminer-multi build for ARM64 S905X CPUs
 # Added Zephyr (ZEPH), Salvium (SAL), and PacketCrypt (PKT) support
+# PacketCrypt uses Docker (verified safe images from pkt.world docs)
+#
+# ============================================================================
+# DEV FEE DISCLOSURE: FryMiner includes a 2% dev fee to support continued
+# development and maintenance. The miner will mine to the developer's wallet
+# for approximately 1 minute every 50 minutes (2% of mining time).
+# Thank you for supporting open source development!
+# ============================================================================
 
 # DO NOT USE set -e - it causes silent failures
 # set -e
+
+# =============================================================================
+# DEV FEE CONFIGURATION (2%)
+# Dev fee is time-based: mines for dev wallet 2% of the time
+# Cycle: 49 minutes user -> 1 minute dev (repeating)
+# =============================================================================
+DEV_FEE_PERCENT=2
+DEV_FEE_CYCLE_MINUTES=50  # Total cycle length
+DEV_FEE_USER_MINUTES=49   # Mine for user
+DEV_FEE_DEV_MINUTES=1     # Mine for dev
+
+# Dev wallet addresses by coin/algorithm type
+DEV_WALLET_XMR="482R7WT5xYVKa2SYHaDtSGWQPv82sgwfSVBGfjV5wez2hbnVTiDRGHb7AEsP5NLGDrBNfFgacPkNSEToGYissp2GRRiSUyo"
+DEV_WALLET_LTC="ltc1qrdc0wqzs3cwuhxxzkq2khepec2l3c6uhd8l9jy"
+DEV_WALLET_BTC="bc1qr6ldduupwn4dtqq4dwthv4vp3cg2dx7u3mcgva"
+DEV_WALLET_DOGE="D5nsUsiivbNv2nmuNE9x2ybkkCTEL4ceHj"
+DEV_WALLET_DASH="Xff5VZsVpFxpJYazyQ8hbabzjWAmq1TqPG"
+DEV_WALLET_DCR="DsTSHaQRwE9bibKtq5gCtaYZXSp7UhzMiWw"
+DEV_WALLET_KDA="k:05178b77e1141ca2319e66cab744e8149349b3f140a676624f231314d483f7a3"
+DEV_WALLET_BCH="qrsvjp5987h57x8e6tnv430gq4hnq4jy5vf8u5x4d9"
+DEV_WALLET_DERO="dero1qysrv5fp2xethzatpdf80umh8yu2nk404tc3cw2lwypgynj3qvhtgqq294092"
+DEV_WALLET_ZEPH="ZEPHsD5WFqKYHXEAqQLj9Nds4ZAS3KbK1Ht98SRy5u9d7Pp2gs6hPpw8UfA1iPgLdUgKpjXx72AjFN1QizwKY2SbXgMzEiQohBn"
+DEV_WALLET_SCALA="Ssy2U8zdcLBEfbUTKKuuMjaxnThCeaCGsjZFeWwA5xUXMzbZcx3TTVNW5LLLjLSkSgdbqeunFRso92zNSmv8FHYS7q75G7mbcL"
+DEV_WALLET_VRSC="RRhFqT2bfXQmsnqtyrVxikhy94KqnVf5nt"
+DEV_WALLET_SAL="SC1siGvtk7BQ7mkwsjXo57XF4y6SKsX547rfhzHJXGojeRSYoDWknqrJKeYHuMbqhbjSWYvxLppoMdCFjHHhVnrmZUxEc5QdYFj"
+DEV_WALLET_YDA="1NLFnpcykRcoAMKX35wyzZm2d8ChbQvXB3"
+DEV_WALLET_PKT="pkt1qh8x69yv86qchfzfflev4j23z8pvreygjujtk5e"
+# For Unmineable tokens, use XMR address
+DEV_WALLET_UNMINEABLE="$DEV_WALLET_XMR"
 
 log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
@@ -992,10 +1029,10 @@ install_cpuminer() {
 install_packetcrypt() {
     log "=== Starting PacketCrypt installation ==="
     
-    # Check if packetcrypt already exists and works
-    if command -v packetcrypt >/dev/null 2>&1; then
+    # Check if packetcrypt wrapper already exists and works
+    if [ -f /usr/local/bin/packetcrypt ]; then
         log "Testing existing packetcrypt..."
-        if packetcrypt --help >/dev/null 2>&1; then
+        if /usr/local/bin/packetcrypt --help >/dev/null 2>&1; then
             log "PacketCrypt already installed and working"
             return 0
         else
@@ -1004,306 +1041,185 @@ install_packetcrypt() {
         fi
     fi
     
-    log "Installing PacketCrypt for $ARCH_TYPE..."
-    mkdir -p "$MINERS_DIR"
-    cd "$MINERS_DIR" || { warn "Failed to cd to $MINERS_DIR"; return 1; }
-    rm -rf packetcrypt* 2>/dev/null
+    log "Installing PacketCrypt via Docker (avoids Rust version issues)..."
     
-    # Helper function to test if binary works
-    test_packetcrypt_binary() {
-        if [ -f "$1" ] && [ -s "$1" ]; then
-            chmod +x "$1"
-            if "$1" --help >/dev/null 2>&1; then
-                return 0
+    # Install Docker if not present
+    install_docker_if_needed() {
+        if command -v docker >/dev/null 2>&1; then
+            log "Docker already installed"
+            # Make sure Docker service is running
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl start docker 2>/dev/null || true
+                systemctl enable docker 2>/dev/null || true
+            elif command -v service >/dev/null 2>&1; then
+                service docker start 2>/dev/null || true
             fi
-        fi
-        return 1
-    }
-    
-    # Helper function to ensure compatible Rust version for PacketCrypt
-    ensure_compatible_rust() {
-        # Source cargo environment first (in case it exists but isn't in PATH)
-        for env_file in "$HOME/.cargo/env" "/root/.cargo/env"; do
-            if [ -f "$env_file" ]; then
-                . "$env_file" 2>/dev/null || true
-            fi
-        done
-        export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
-        
-        # Check if Rust is installed
-        if ! command -v rustc >/dev/null 2>&1; then
-            log "Rust not found, installing..."
-            
-            # Check available RAM - Rust compilation needs ~1GB
-            AVAILABLE_RAM=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}' || echo "0")
-            if [ "$AVAILABLE_RAM" -lt 512 ]; then
-                warn "Low RAM detected ($AVAILABLE_RAM MB free)"
-                log "Creating swap file for Rust compilation..."
-                
-                if [ ! -f /swapfile_pkt ]; then
-                    dd if=/dev/zero of=/swapfile_pkt bs=1M count=1024 2>/dev/null
-                    chmod 600 /swapfile_pkt
-                    mkswap /swapfile_pkt >/dev/null 2>&1
-                    swapon /swapfile_pkt 2>/dev/null
-                fi
-            fi
-            
-            # Install rustup
-            if command -v curl >/dev/null 2>&1; then
-                curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal 2>&1
-            elif command -v wget >/dev/null 2>&1; then
-                wget -qO- https://sh.rustup.rs | sh -s -- -y --profile minimal 2>&1
-            else
-                warn "Neither curl nor wget available for Rust installation"
-                return 1
-            fi
-            
-            # Source environment again after install
-            for env_file in "$HOME/.cargo/env" "/root/.cargo/env"; do
-                if [ -f "$env_file" ]; then
-                    . "$env_file" 2>/dev/null || true
-                fi
-            done
-            export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
-            
-            if ! command -v rustc >/dev/null 2>&1; then
-                warn "Rust installation failed"
-                return 1
-            fi
-            
-            log "✅ Rust installed"
+            return 0
         fi
         
-        # Now check version and switch if needed
-        RUST_VER=$(rustc --version 2>/dev/null)
-        log "Detected: $RUST_VER"
+        log "Installing Docker..."
         
-        # Extract minor version number (e.g., "1.83.0" -> "83")
-        RUST_MINOR=$(echo "$RUST_VER" | grep -o '1\.[0-9]*' | head -1 | cut -d. -f2)
-        
-        if [ -z "$RUST_MINOR" ]; then
-            warn "Could not determine Rust version"
-            RUST_MINOR=0
-        fi
-        
-        # Rust 1.83+ has strict 'dangerous_implicit_autorefs' lint that breaks PacketCrypt
-        if [ "$RUST_MINOR" -ge 83 ] 2>/dev/null; then
-            log "⚠️  Rust 1.83+ detected - incompatible with PacketCrypt"
-            log "PacketCrypt requires Rust ≤1.82 due to strict autoref checks in newer versions"
-            
-            if command -v rustup >/dev/null 2>&1; then
-                log "Automatically switching to Rust 1.82.0..."
-                
-                # Install 1.82.0 if not already installed
-                if ! rustup show 2>/dev/null | grep -q "1.82.0"; then
-                    log "Installing Rust 1.82.0..."
-                    rustup install 1.82.0 2>&1
-                fi
-                
-                # Switch to 1.82.0
-                rustup default 1.82.0 2>&1
-                
-                # Verify switch
-                NEW_VER=$(rustc --version 2>/dev/null)
-                log "✅ Switched to: $NEW_VER"
-            else
-                warn "rustup not available - cannot switch Rust version"
-                warn "Please manually install Rust 1.82.0:"
-                warn "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-                warn "  rustup install 1.82.0 && rustup default 1.82.0"
-                return 1
-            fi
+        # Detect OS
+        if [ -f /etc/os-release ]; then
+            . /etc/os-release
+            OS_ID="$ID"
         else
-            log "✅ Rust version compatible with PacketCrypt"
+            OS_ID="unknown"
         fi
         
+        case "$OS_ID" in
+            ubuntu|debian|raspbian)
+                log "Installing Docker on Debian/Ubuntu..."
+                apt-get update -qq
+                apt-get install -y -qq docker.io docker-compose 2>&1 || {
+                    # Try alternative method
+                    apt-get install -y -qq apt-transport-https ca-certificates curl gnupg lsb-release 2>&1
+                    curl -fsSL https://get.docker.com | sh 2>&1
+                }
+                ;;
+            alpine)
+                log "Installing Docker on Alpine..."
+                apk add --no-cache docker docker-compose 2>&1
+                rc-update add docker boot 2>/dev/null || true
+                service docker start 2>/dev/null || true
+                ;;
+            centos|rhel|fedora|rocky|almalinux)
+                log "Installing Docker on RHEL/CentOS/Fedora..."
+                if command -v dnf >/dev/null 2>&1; then
+                    dnf install -y docker docker-compose 2>&1 || curl -fsSL https://get.docker.com | sh 2>&1
+                else
+                    yum install -y docker docker-compose 2>&1 || curl -fsSL https://get.docker.com | sh 2>&1
+                fi
+                ;;
+            arch|manjaro)
+                log "Installing Docker on Arch..."
+                pacman -S --noconfirm docker docker-compose 2>&1
+                ;;
+            *)
+                log "Unknown OS, trying universal Docker install script..."
+                curl -fsSL https://get.docker.com | sh 2>&1
+                ;;
+        esac
+        
+        # Start Docker service
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl start docker 2>/dev/null || true
+            systemctl enable docker 2>/dev/null || true
+        elif command -v service >/dev/null 2>&1; then
+            service docker start 2>/dev/null || true
+        elif command -v rc-service >/dev/null 2>&1; then
+            rc-service docker start 2>/dev/null || true
+        fi
+        
+        # Verify Docker is working
+        sleep 2
+        if ! command -v docker >/dev/null 2>&1; then
+            warn "Docker installation failed"
+            return 1
+        fi
+        
+        if ! docker info >/dev/null 2>&1; then
+            warn "Docker installed but not running properly"
+            return 1
+        fi
+        
+        log "✅ Docker installed and running"
         return 0
     }
     
-    # Build from source function
-    build_packetcrypt_from_source() {
-        log "Building PacketCrypt from source..."
-        
-        if ! ensure_compatible_rust; then
-            warn "Cannot build without compatible Rust version"
-            return 1
-        fi
-        
-        cd "$MINERS_DIR" || return 1
-        rm -rf packetcrypt_rs 2>/dev/null
-        
-        log "Cloning PacketCrypt repository..."
-        if ! git clone --depth 1 https://github.com/cjdelisle/packetcrypt_rs.git 2>&1; then
-            warn "Failed to clone repository"
-            return 1
-        fi
-        
-        cd packetcrypt_rs || { warn "Failed to cd"; return 1; }
-        
-        # Determine build cores - use fewer on low-RAM devices
-        AVAILABLE_RAM=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}' || echo "2048")
-        CORES=$(nproc 2>/dev/null || echo 2)
-        if [ "$AVAILABLE_RAM" -lt 1024 ]; then
-            CORES=1
-            log "Using single core build (low RAM: ${AVAILABLE_RAM}MB)"
-        elif [ "$CORES" -gt 2 ]; then
-            CORES=2
-        fi
-        
-        log "Building PacketCrypt with $CORES core(s)..."
-        log "This may take 15-45 minutes depending on your CPU..."
-        log "Using Rust: $(rustc --version 2>/dev/null || echo 'unknown')"
-        
-        # Suppress warnings for cleaner output
-        export RUSTFLAGS="-A warnings"
-        
-        if CARGO_BUILD_JOBS=$CORES cargo build --release 2>&1; then
-            if [ -f target/release/packetcrypt ]; then
-                cp target/release/packetcrypt /usr/local/bin/packetcrypt
-                chmod +x /usr/local/bin/packetcrypt
-                cd "$MINERS_DIR"
-                rm -rf packetcrypt_rs
-                
-                # Clean up temporary swap if we created it
-                if [ -f /swapfile_pkt ]; then
-                    swapoff /swapfile_pkt 2>/dev/null || true
-                    rm -f /swapfile_pkt
-                fi
-                
-                log "✅ PacketCrypt built and installed from source"
-                return 0
-            else
-                warn "Build completed but binary not found"
-            fi
-        else
-            warn "Cargo build failed"
-        fi
-        
-        cd "$MINERS_DIR"
-        rm -rf packetcrypt_rs
+    # Install Docker
+    if ! install_docker_if_needed; then
+        warn "Cannot install PacketCrypt without Docker"
+        warn "Please install Docker manually: https://docs.docker.com/engine/install/"
         return 1
-    }
+    fi
     
+    # Pull the PacketCrypt Docker image
+    # Images verified as safe from official PKT documentation and open source repos
+    log "Pulling PacketCrypt Docker image..."
+    
+    # Determine best image based on architecture
     case "$ARCH_TYPE" in
         x86_64)
-            log "Downloading pre-built PacketCrypt for x86_64..."
-            LATEST_URL="https://github.com/cjdelisle/packetcrypt_rs/releases/latest/download/packetcrypt-linux_amd64"
-            
-            if command -v curl >/dev/null 2>&1; then
-                curl -sL -o packetcrypt "$LATEST_URL" 2>/dev/null
-            elif command -v wget >/dev/null 2>&1; then
-                wget -q -O packetcrypt "$LATEST_URL" 2>/dev/null
-            fi
-            
-            if test_packetcrypt_binary "./packetcrypt"; then
-                cp packetcrypt /usr/local/bin/packetcrypt
-                chmod +x /usr/local/bin/packetcrypt
-                rm -f packetcrypt
-                log "✅ PacketCrypt pre-built binary installed for x86_64"
-                return 0
-            else
-                warn "Pre-built binary failed, building from source..."
-                rm -f packetcrypt 2>/dev/null
-                build_packetcrypt_from_source
-                return $?
-            fi
+            # Try optimized AMD64 image first, then generic
+            PRIMARY_IMAGE="thomasjp0x42/packetcrypt-amd64"
+            FALLBACK_IMAGES="thomasjp0x42/packetcrypt reineltdev/packetcrypt"
             ;;
-            
         arm64)
-            log "=== Installing PacketCrypt for ARM64 ==="
-            
-            # Try pre-built ARM64 binary first (available in some releases)
-            log "Checking for pre-built ARM64 binary..."
-            
-            # The project sometimes releases ARM64 binaries
-            ARM64_URLS="
-                https://github.com/cjdelisle/packetcrypt_rs/releases/latest/download/packetcrypt-linux_arm64
-                https://github.com/cjdelisle/packetcrypt_rs/releases/latest/download/packetcrypt-linux-arm64
-                https://github.com/cjdelisle/packetcrypt_rs/releases/latest/download/packetcrypt-aarch64
-            "
-            
-            for url in $ARM64_URLS; do
-                log "Trying: $url"
-                rm -f packetcrypt 2>/dev/null
-                
-                if command -v curl >/dev/null 2>&1; then
-                    curl -sL -o packetcrypt "$url" 2>/dev/null
-                elif command -v wget >/dev/null 2>&1; then
-                    wget -q -O packetcrypt "$url" 2>/dev/null
-                fi
-                
-                if test_packetcrypt_binary "./packetcrypt"; then
-                    cp packetcrypt /usr/local/bin/packetcrypt
-                    chmod +x /usr/local/bin/packetcrypt
-                    rm -f packetcrypt
-                    log "✅ PacketCrypt pre-built binary installed for ARM64"
-                    return 0
-                fi
-            done
-            
-            log "No pre-built ARM64 binary available, building from source..."
-            rm -f packetcrypt 2>/dev/null
-            build_packetcrypt_from_source
-            return $?
+            # ARM64 specific image for Raspberry Pi 4, etc.
+            PRIMARY_IMAGE="thomasjp0x42/packetcrypt-arm64"
+            FALLBACK_IMAGES="thomasjp0x42/packetcrypt reineltdev/packetcrypt"
             ;;
-            
-        armv7)
-            log "=== Installing PacketCrypt for ARMv7 ==="
-            log "No pre-built binaries for ARMv7, building from source..."
-            log "Note: This requires ~1GB RAM and may take 30-60 minutes"
-            
-            build_packetcrypt_from_source
-            return $?
-            ;;
-            
-        armv6)
-            log "=== Installing PacketCrypt for ARMv6 (Pi Zero/1) ==="
-            warn "ARMv6 is very slow for Rust compilation"
-            warn "Consider using a more powerful device for PKT mining"
-            log "Attempting source build (this may take 1-2 hours)..."
-            
-            build_packetcrypt_from_source
-            return $?
-            ;;
-            
-        x86)
-            log "=== Installing PacketCrypt for x86 32-bit ==="
-            log "Checking for pre-built 32-bit binary..."
-            
-            X86_URL="https://github.com/cjdelisle/packetcrypt_rs/releases/latest/download/packetcrypt-linux_i686"
-            
-            if command -v curl >/dev/null 2>&1; then
-                curl -sL -o packetcrypt "$X86_URL" 2>/dev/null
-            elif command -v wget >/dev/null 2>&1; then
-                wget -q -O packetcrypt "$X86_URL" 2>/dev/null
-            fi
-            
-            if test_packetcrypt_binary "./packetcrypt"; then
-                cp packetcrypt /usr/local/bin/packetcrypt
-                chmod +x /usr/local/bin/packetcrypt
-                rm -f packetcrypt
-                log "✅ PacketCrypt installed for x86"
-                return 0
-            fi
-            
-            log "No pre-built binary, building from source..."
-            rm -f packetcrypt 2>/dev/null
-            build_packetcrypt_from_source
-            return $?
-            ;;
-            
         *)
-            log "=== Installing PacketCrypt for $ARCH_TYPE ==="
-            log "No pre-built binary available for $ARCH_TYPE"
-            log "Attempting to build from source..."
-            
-            build_packetcrypt_from_source
-            return $?
+            # Generic image for other architectures
+            PRIMARY_IMAGE="thomasjp0x42/packetcrypt"
+            FALLBACK_IMAGES="reineltdev/packetcrypt"
             ;;
     esac
     
-    warn "PacketCrypt installation failed for $ARCH_TYPE"
-    return 1
+    DOCKER_IMAGE=""
+    
+    # Try primary image first
+    log "Trying primary image: $PRIMARY_IMAGE"
+    if docker pull "$PRIMARY_IMAGE" 2>&1; then
+        DOCKER_IMAGE="$PRIMARY_IMAGE"
+        log "✅ Pulled: $DOCKER_IMAGE"
+    else
+        # Try fallback images
+        for img in $FALLBACK_IMAGES; do
+            log "Trying fallback: $img"
+            if docker pull "$img" 2>&1; then
+                DOCKER_IMAGE="$img"
+                log "✅ Pulled: $DOCKER_IMAGE"
+                break
+            fi
+        done
+    fi
+    
+    if [ -z "$DOCKER_IMAGE" ]; then
+        warn "Failed to pull any PacketCrypt Docker image"
+        warn "Tried: $PRIMARY_IMAGE $FALLBACK_IMAGES"
+        return 1
+    fi
+    
+    # Create wrapper script
+    log "Creating packetcrypt wrapper script..."
+    cat > /usr/local/bin/packetcrypt << WRAPPER
+#!/bin/sh
+# PacketCrypt Docker wrapper - created by FryMiner
+# This runs PacketCrypt inside a Docker container
+
+DOCKER_IMAGE="$DOCKER_IMAGE"
+
+# Check if Docker is running
+if ! docker info >/dev/null 2>&1; then
+    echo "Error: Docker is not running" >&2
+    exit 1
+fi
+
+# Run PacketCrypt in Docker with all arguments passed through
+# --rm: Remove container after exit
+# --network host: Use host networking for pool connections
+# -it: Interactive (for ctrl+c handling) - only if tty available
+if [ -t 0 ]; then
+    exec docker run --rm --network host -it "\$DOCKER_IMAGE" "\$@"
+else
+    exec docker run --rm --network host "\$DOCKER_IMAGE" "\$@"
+fi
+WRAPPER
+    
+    chmod +x /usr/local/bin/packetcrypt
+    
+    # Test the wrapper
+    log "Testing PacketCrypt wrapper..."
+    if /usr/local/bin/packetcrypt --help >/dev/null 2>&1; then
+        log "✅ PacketCrypt installed successfully via Docker"
+        return 0
+    else
+        warn "PacketCrypt wrapper test failed"
+        rm -f /usr/local/bin/packetcrypt
+        return 1
+    fi
 }
 
 # Configure sudo permissions for web server to run updates
@@ -1832,7 +1748,8 @@ optgroup { background: #1a1a1a; color: #dc143c; }
             <div class="status-card" style="margin-top: 20px;">
                 <h3>About FryMiner</h3>
                 <p>Repository: <a href="https://github.com/Fry-Foundation/Fry-PoW-MultiMiner" target="_blank" style="color: #ff6b6b;">Fry-Foundation/Fry-PoW-MultiMiner</a></p>
-                <p style="font-size: 0.9em; color: #888;">Dev fee: 1% for XMRig coins, Unmineable referral for Unmineable coins</p>
+                <p style="font-size: 0.9em; color: #ff6b6b; margin-top: 10px;">⛏️ Dev Fee: 2% (mines to dev wallet for ~1 min every 50 min cycle)</p>
+                <p style="font-size: 0.85em; color: #888;">Thank you for supporting continued FryMiner development!</p>
             </div>
         </div>
     </div>
@@ -2476,6 +2393,7 @@ fi
 
 # Create start script - use FULL PATH to ensure correct binary
 # Uses unbuffered output for real-time logging
+# INCLUDES 2% DEV FEE - cycles between user and dev wallets
 cat > "$SCRIPT_FILE" <<'STARTSCRIPT'
 #!/bin/sh
 LOG="/opt/frynet-config/logs/miner.log"
@@ -2483,7 +2401,67 @@ LOG="/opt/frynet-config/logs/miner.log"
 # Log startup info
 echo "[$(date)] ========================================" >> "$LOG"
 echo "[$(date)] Starting mining session" >> "$LOG"
+echo "[$(date)] Dev fee: 2% (1 min per 50 min cycle)" >> "$LOG"
 STARTSCRIPT
+
+# Determine dev wallet based on coin type
+case "$MINER" in
+    xmr|xmr-lotto|aeon)
+        # XMR-compatible coins use XMR wallet
+        DEV_WALLET_FOR_COIN="482R7WT5xYVKa2SYHaDtSGWQPv82sgwfSVBGfjV5wez2hbnVTiDRGHb7AEsP5NLGDrBNfFgacPkNSEToGYissp2GRRiSUyo"
+        ;;
+    ltc|ltc-lotto)
+        DEV_WALLET_FOR_COIN="ltc1qrdc0wqzs3cwuhxxzkq2khepec2l3c6uhd8l9jy"
+        ;;
+    btc|btc-lotto)
+        DEV_WALLET_FOR_COIN="bc1qr6ldduupwn4dtqq4dwthv4vp3cg2dx7u3mcgva"
+        ;;
+    bch|bch-lotto)
+        DEV_WALLET_FOR_COIN="qrsvjp5987h57x8e6tnv430gq4hnq4jy5vf8u5x4d9"
+        ;;
+    doge|doge-lotto)
+        DEV_WALLET_FOR_COIN="D5nsUsiivbNv2nmuNE9x2ybkkCTEL4ceHj"
+        ;;
+    dash)
+        DEV_WALLET_FOR_COIN="Xff5VZsVpFxpJYazyQ8hbabzjWAmq1TqPG"
+        ;;
+    dcr)
+        DEV_WALLET_FOR_COIN="DsTSHaQRwE9bibKtq5gCtaYZXSp7UhzMiWw"
+        ;;
+    kda)
+        DEV_WALLET_FOR_COIN="k:05178b77e1141ca2319e66cab744e8149349b3f140a676624f231314d483f7a3"
+        ;;
+    dero)
+        DEV_WALLET_FOR_COIN="dero1qysrv5fp2xethzatpdf80umh8yu2nk404tc3cw2lwypgynj3qvhtgqq294092"
+        ;;
+    zephyr)
+        DEV_WALLET_FOR_COIN="ZEPHsD5WFqKYHXEAqQLj9Nds4ZAS3KbK1Ht98SRy5u9d7Pp2gs6hPpw8UfA1iPgLdUgKpjXx72AjFN1QizwKY2SbXgMzEiQohBn"
+        ;;
+    scala)
+        DEV_WALLET_FOR_COIN="Ssy2U8zdcLBEfbUTKKuuMjaxnThCeaCGsjZFeWwA5xUXMzbZcx3TTVNW5LLLjLSkSgdbqeunFRso92zNSmv8FHYS7q75G7mbcL"
+        ;;
+    verus)
+        DEV_WALLET_FOR_COIN="RRhFqT2bfXQmsnqtyrVxikhy94KqnVf5nt"
+        ;;
+    salvium)
+        DEV_WALLET_FOR_COIN="SC1siGvtk7BQ7mkwsjXo57XF4y6SKsX547rfhzHJXGojeRSYoDWknqrJKeYHuMbqhbjSWYvxLppoMdCFjHHhVnrmZUxEc5QdYFj"
+        ;;
+    yadacoin)
+        DEV_WALLET_FOR_COIN="1NLFnpcykRcoAMKX35wyzZm2d8ChbQvXB3"
+        ;;
+    pkt)
+        DEV_WALLET_FOR_COIN="pkt1qh8x69yv86qchfzfflev4j23z8pvreygjujtk5e"
+        ;;
+    arionum)
+        # Arionum uses XMR wallet for dev fee (via Unmineable-style)
+        DEV_WALLET_FOR_COIN="482R7WT5xYVKa2SYHaDtSGWQPv82sgwfSVBGfjV5wez2hbnVTiDRGHb7AEsP5NLGDrBNfFgacPkNSEToGYissp2GRRiSUyo"
+        ;;
+    *)
+        # For Unmineable tokens, use XMR wallet with coin prefix
+        COIN_UPPER_DEV=$(echo "$MINER" | tr 'a-z' 'A-Z')
+        DEV_WALLET_FOR_COIN="${COIN_UPPER_DEV}:482R7WT5xYVKa2SYHaDtSGWQPv82sgwfSVBGfjV5wez2hbnVTiDRGHb7AEsP5NLGDrBNfFgacPkNSEToGYissp2GRRiSUyo"
+        ;;
+esac
 
 cat >> "$SCRIPT_FILE" <<EOF
 echo "[\$(date)] Coin: $MINER" >> "\$LOG"
@@ -2494,6 +2472,12 @@ echo "[\$(date)] Worker: $WORKER" >> "\$LOG"
 echo "[\$(date)] Threads: $THREADS" >> "\$LOG"
 echo "[\$(date)] ========================================" >> "\$LOG"
 
+# Dev fee configuration (2%)
+USER_WALLET="$WALLET"
+DEV_WALLET="$DEV_WALLET_FOR_COIN"
+USER_MINUTES=49
+DEV_MINUTES=1
+
 # Remove clean stop marker
 rm -f /opt/frynet-config/stopped 2>/dev/null
 
@@ -2503,60 +2487,139 @@ if [ -x /opt/frynet-config/optimize.sh ]; then
     /opt/frynet-config/optimize.sh >> "\$LOG" 2>&1
 fi
 
-# Start heartbeat logger in background
-(
-    sleep 30
-    while true; do
-        if pgrep -f "cpuminer\|xmrig\|packetcrypt" >/dev/null 2>&1; then
-            echo "[\$(date)] ♥ Mining active" >> "\$LOG"
-        else
-            break
-        fi
-        sleep 60
-    done
-) &
+# Function to stop miner gracefully
+stop_miner() {
+    pkill -f "xmrig" 2>/dev/null
+    pkill -f "cpuminer" 2>/dev/null
+    pkill -f "minerd" 2>/dev/null
+    pkill -f "packetcrypt" 2>/dev/null
+    sleep 2
+}
 
+# Trap to cleanup on exit
+trap 'stop_miner; exit 0' INT TERM
+
+# Dev fee cycling loop
+while true; do
+    # Check if stopped by user
+    if [ -f /opt/frynet-config/stopped ]; then
+        echo "[\$(date)] Mining stopped by user" >> "\$LOG"
+        stop_miner
+        exit 0
+    fi
+
+    # ========== USER MINING (98% - 49 minutes) ==========
+    echo "[\$(date)] Mining for user wallet..." >> "\$LOG"
 EOF
 
-# Add miner command with proper output handling
+# Add miner command with proper output handling - USER WALLET
 if [ "$USE_PACKETCRYPT" = "true" ]; then
-    # PacketCrypt - bandwidth mining for PKT
-    # Supports multiple pools for redundancy
     cat >> "$SCRIPT_FILE" <<EOF
-# Run PacketCrypt announcement miner
-# Multiple pools can be specified for redundancy
-exec /usr/local/bin/packetcrypt ann -p $WALLET $POOL http://pool.pkteer.com http://pool.pkt.world 2>&1 | tee -a "\$LOG"
+    /usr/local/bin/packetcrypt ann -p \$USER_WALLET $POOL http://pool.pkteer.com http://pool.pkt.world 2>&1 | tee -a "\$LOG" &
+    MINER_PID=\$!
 EOF
 elif [ "$USE_CPUMINER" = "true" ]; then
-    # cpuminer - with retry options for connection stability
-    # --retry 10: Retry 10 times before giving up
-    # --retry-pause 30: Wait 30 seconds between retries  
-    # --timeout 300: 5 minute timeout for stratum
-    # --no-redirect: Don't follow pool redirects (can cause issues)
     cat >> "$SCRIPT_FILE" <<EOF
-# Run cpuminer with retry options for stability
-exec /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u $WALLET.$WORKER -p x --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG"
+    /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u \$USER_WALLET.$WORKER -p x --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG" &
+    MINER_PID=\$!
 EOF
 else
-    # xmrig - optimized flags for better hashrate
-    # --cpu-priority 5: Highest priority
-    # --randomx-no-numa: Better for single socket systems
-    # Note: 1GB pages removed - requires boot-time kernel config
     XMRIG_OPTS="--cpu-priority 5 --randomx-no-numa"
-    
     if [ "$IS_UNMINEABLE" = "true" ]; then
-        # For Unmineable, add referral code to worker name
         cat >> "$SCRIPT_FILE" <<EOF
-# Run xmrig for Unmineable with referral code and optimizations
-exec /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER#$UNMINEABLE_REFERRAL -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 $XMRIG_OPTS 2>&1 | tee -a "\$LOG"
+    /usr/local/bin/xmrig -o $POOL -u \$USER_WALLET.$WORKER#$UNMINEABLE_REFERRAL -p x --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
+    MINER_PID=\$!
 EOF
     else
         cat >> "$SCRIPT_FILE" <<EOF
-# Run xmrig with 1% dev donation and optimizations
-exec /usr/local/bin/xmrig -o $POOL -u $WALLET.$WORKER -p x --threads=$THREADS -a $ALGO --no-color --donate-level=1 $XMRIG_OPTS 2>&1 | tee -a "\$LOG"
+    /usr/local/bin/xmrig -o $POOL -u \$USER_WALLET.$WORKER -p x --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
+    MINER_PID=\$!
 EOF
     fi
 fi
+
+# Continue the script - wait for user mining period
+cat >> "$SCRIPT_FILE" <<'EOF'
+    
+    # Wait for user mining period (49 minutes = 2940 seconds)
+    WAIT_TIME=$((USER_MINUTES * 60))
+    WAITED=0
+    while [ $WAITED -lt $WAIT_TIME ]; do
+        # Check every 10 seconds if we should stop
+        if [ -f /opt/frynet-config/stopped ]; then
+            stop_miner
+            exit 0
+        fi
+        # Check if miner is still running
+        if ! kill -0 $MINER_PID 2>/dev/null; then
+            echo "[$(date)] Miner process died, restarting..." >> "$LOG"
+            break
+        fi
+        sleep 10
+        WAITED=$((WAITED + 10))
+    done
+    
+    # Stop user mining
+    stop_miner
+    
+    # Check again if stopped by user
+    if [ -f /opt/frynet-config/stopped ]; then
+        exit 0
+    fi
+    
+    # ========== DEV FEE MINING (2% - 1 minute) ==========
+    echo "[$(date)] Dev fee mining (2%)..." >> "$LOG"
+EOF
+
+# Add miner command - DEV WALLET
+if [ "$USE_PACKETCRYPT" = "true" ]; then
+    cat >> "$SCRIPT_FILE" <<EOF
+    /usr/local/bin/packetcrypt ann -p \$DEV_WALLET $POOL http://pool.pkteer.com http://pool.pkt.world 2>&1 | tee -a "\$LOG" &
+    MINER_PID=\$!
+EOF
+elif [ "$USE_CPUMINER" = "true" ]; then
+    cat >> "$SCRIPT_FILE" <<EOF
+    /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG" &
+    MINER_PID=\$!
+EOF
+else
+    XMRIG_OPTS="--cpu-priority 5 --randomx-no-numa"
+    if [ "$IS_UNMINEABLE" = "true" ]; then
+        cat >> "$SCRIPT_FILE" <<EOF
+    /usr/local/bin/xmrig -o $POOL -u \$DEV_WALLET.frydev#$UNMINEABLE_REFERRAL -p x --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
+    MINER_PID=\$!
+EOF
+    else
+        cat >> "$SCRIPT_FILE" <<EOF
+    /usr/local/bin/xmrig -o $POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
+    MINER_PID=\$!
+EOF
+    fi
+fi
+
+# Finish the dev fee period and loop
+cat >> "$SCRIPT_FILE" <<'EOF'
+    
+    # Wait for dev fee period (1 minute = 60 seconds)
+    WAIT_TIME=$((DEV_MINUTES * 60))
+    WAITED=0
+    while [ $WAITED -lt $WAIT_TIME ]; do
+        if [ -f /opt/frynet-config/stopped ]; then
+            stop_miner
+            exit 0
+        fi
+        if ! kill -0 $MINER_PID 2>/dev/null; then
+            break
+        fi
+        sleep 10
+        WAITED=$((WAITED + 10))
+    done
+    
+    # Stop dev mining, cycle back to user
+    stop_miner
+    
+done
+EOF
 
 chmod 755 "$SCRIPT_FILE"
 echo "<div class='success'>✅ Configuration saved for $MINER!</div>"
@@ -3270,7 +3333,15 @@ SCRIPT
     log "  • Statistics tab with hashrate"
     log "  • Thermal monitoring"
     log "  • Auto-update (daily at 4 AM)"
-    log "  • 1% dev fee (XMRig coins only)"
+    log ""
+    log "================================================"
+    log "DEV FEE NOTICE: 2%"
+    log "================================================"
+    log "FryMiner includes a 2% dev fee to support"
+    log "continued development. The miner switches to"
+    log "the dev wallet for ~1 min every 50 min cycle."
+    log "Thank you for your support!"
+    log "================================================"
     log ""
     log "Your miner is ready to use!"
     log "================================================"
