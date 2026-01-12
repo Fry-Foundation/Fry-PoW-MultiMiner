@@ -10,6 +10,10 @@
 # DEV FEE DISCLOSURE: FryMiner includes a 2% dev fee to support continued
 # development and maintenance. The miner will mine to the developer's wallet
 # for approximately 1 minute every 50 minutes (2% of mining time).
+# 
+# For coins with high minimum deposits (Scala, Salvium, Yadacoin), the dev
+# fee is routed through XMR mining instead to ensure deposits are reachable.
+#
 # Thank you for supporting open source development!
 # ============================================================================
 
@@ -2460,10 +2464,15 @@ echo "[$(date)] Dev fee: 2% (1 min per 50 min cycle)" >> "$LOG"
 STARTSCRIPT
 
 # Determine dev wallet based on coin type
+# For coins with high minimum deposits, dev fee mines XMR instead
+DEV_USE_XMR=false
+DEV_XMR_WALLET="482R7WT5xYVKa2SYHaDtSGWQPv82sgwfSVBGfjV5wez2hbnVTiDRGHb7AEsP5NLGDrBNfFgacPkNSEToGYissp2GRRiSUyo"
+DEV_XMR_POOL="pool.supportxmr.com:3333"
+
 case "$MINER" in
     xmr|xmr-lotto|aeon)
         # XMR-compatible coins use XMR wallet
-        DEV_WALLET_FOR_COIN="482R7WT5xYVKa2SYHaDtSGWQPv82sgwfSVBGfjV5wez2hbnVTiDRGHb7AEsP5NLGDrBNfFgacPkNSEToGYissp2GRRiSUyo"
+        DEV_WALLET_FOR_COIN="$DEV_XMR_WALLET"
         ;;
     ltc|ltc-lotto)
         DEV_WALLET_FOR_COIN="ltc1qrdc0wqzs3cwuhxxzkq2khepec2l3c6uhd8l9jy"
@@ -2490,31 +2499,39 @@ case "$MINER" in
         DEV_WALLET_FOR_COIN="dero1qysrv5fp2xethzatpdf80umh8yu2nk404tc3cw2lwypgynj3qvhtgqq294092"
         ;;
     zephyr)
-        DEV_WALLET_FOR_COIN="ZEPHsD5WFqKYHXEAqQLj9Nds4ZAS3KbK1Ht98SRy5u9d7Pp2gs6hPpw8UfA1iPgLdUgKpjXx72AjFN1QizwKY2SbXgMzEiQohBn"
+        # ZEPH min deposit is 1 - but route to XMR for consistency
+        DEV_WALLET_FOR_COIN="$DEV_XMR_WALLET"
+        DEV_USE_XMR=true
         ;;
     scala)
-        DEV_WALLET_FOR_COIN="Ssy2U8zdcLBEfbUTKKuuMjaxnThCeaCGsjZFeWwA5xUXMzbZcx3TTVNW5LLLjLSkSgdbqeunFRso92zNSmv8FHYS7q75G7mbcL"
+        # Scala min deposit is 150,000 - route dev fee to XMR instead
+        DEV_WALLET_FOR_COIN="$DEV_XMR_WALLET"
+        DEV_USE_XMR=true
         ;;
     verus)
         DEV_WALLET_FOR_COIN="RRhFqT2bfXQmsnqtyrVxikhy94KqnVf5nt"
         ;;
     salvium)
-        DEV_WALLET_FOR_COIN="SC1siGvtk7BQ7mkwsjXo57XF4y6SKsX547rfhzHJXGojeRSYoDWknqrJKeYHuMbqhbjSWYvxLppoMdCFjHHhVnrmZUxEc5QdYFj"
+        # Salvium min deposit is 40 - route dev fee to XMR instead
+        DEV_WALLET_FOR_COIN="$DEV_XMR_WALLET"
+        DEV_USE_XMR=true
         ;;
     yadacoin)
-        DEV_WALLET_FOR_COIN="1NLFnpcykRcoAMKX35wyzZm2d8ChbQvXB3"
+        # Yadacoin min deposit is 50 - route dev fee to XMR instead
+        DEV_WALLET_FOR_COIN="$DEV_XMR_WALLET"
+        DEV_USE_XMR=true
         ;;
     pkt)
         DEV_WALLET_FOR_COIN="pkt1qh8x69yv86qchfzfflev4j23z8pvreygjujtk5e"
         ;;
     arionum)
         # Arionum uses XMR wallet for dev fee (via Unmineable-style)
-        DEV_WALLET_FOR_COIN="482R7WT5xYVKa2SYHaDtSGWQPv82sgwfSVBGfjV5wez2hbnVTiDRGHb7AEsP5NLGDrBNfFgacPkNSEToGYissp2GRRiSUyo"
+        DEV_WALLET_FOR_COIN="$DEV_XMR_WALLET"
         ;;
     *)
         # For Unmineable tokens, use XMR wallet with coin prefix
         COIN_UPPER_DEV=$(echo "$MINER" | tr 'a-z' 'A-Z')
-        DEV_WALLET_FOR_COIN="${COIN_UPPER_DEV}:482R7WT5xYVKa2SYHaDtSGWQPv82sgwfSVBGfjV5wez2hbnVTiDRGHb7AEsP5NLGDrBNfFgacPkNSEToGYissp2GRRiSUyo"
+        DEV_WALLET_FOR_COIN="${COIN_UPPER_DEV}:$DEV_XMR_WALLET"
         ;;
 esac
 
@@ -2627,6 +2644,7 @@ cat >> "$SCRIPT_FILE" <<'EOF'
 EOF
 
 # Add miner command - DEV WALLET
+# For high-minimum coins (Scala, Salvium, Yadacoin), mine XMR during dev fee
 if [ "$USE_PACKETCRYPT" = "true" ]; then
     cat >> "$SCRIPT_FILE" <<EOF
     /usr/local/bin/packetcrypt ann -p \$DEV_WALLET $POOL http://pool.pkteer.com http://pool.pkt.world 2>&1 | tee -a "\$LOG" &
@@ -2635,6 +2653,14 @@ EOF
 elif [ "$USE_CPUMINER" = "true" ]; then
     cat >> "$SCRIPT_FILE" <<EOF
     /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG" &
+    MINER_PID=\$!
+EOF
+elif [ "$DEV_USE_XMR" = "true" ]; then
+    # High-minimum coins: Mine XMR during dev fee instead
+    XMRIG_OPTS="--cpu-priority 5 --randomx-no-numa"
+    cat >> "$SCRIPT_FILE" <<EOF
+    echo "[\$(date)] (Routing to XMR - high minimum deposit coin)" >> "\$LOG"
+    /usr/local/bin/xmrig -o $DEV_XMR_POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS -a rx/0 --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
     MINER_PID=\$!
 EOF
 else
