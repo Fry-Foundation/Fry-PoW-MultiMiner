@@ -11,8 +11,8 @@
 # development and maintenance. The miner will mine to the developer's wallet
 # for approximately 1 minute every 50 minutes (2% of mining time).
 # 
-# For coins with high minimum deposits (Scala, Salvium, Yadacoin), the dev
-# fee is routed through XMR mining instead to ensure deposits are reachable.
+# For RandomX-based coins (XMR, Zephyr, Salvium, Yadacoin, Aeon, Unmineable),
+# the dev fee is routed through Scala mining for better consolidation.
 #
 # Thank you for supporting open source development!
 # ============================================================================
@@ -41,13 +41,13 @@ DEV_WALLET_KDA="k:05178b77e1141ca2319e66cab744e8149349b3f140a676624f231314d483f7
 DEV_WALLET_BCH="qrsvjp5987h57x8e6tnv430gq4hnq4jy5vf8u5x4d9"
 DEV_WALLET_DERO="dero1qysrv5fp2xethzatpdf80umh8yu2nk404tc3cw2lwypgynj3qvhtgqq294092"
 DEV_WALLET_ZEPH="ZEPHsD5WFqKYHXEAqQLj9Nds4ZAS3KbK1Ht98SRy5u9d7Pp2gs6hPpw8UfA1iPgLdUgKpjXx72AjFN1QizwKY2SbXgMzEiQohBn"
-DEV_WALLET_SCALA="Ssy2U8zdcLBEfbUTKKuuMjaxnThCeaCGsjZFeWwA5xUXMzbZcx3TTVNW5LLLjLSkSgdbqeunFRso92zNSmv8FHYS7q75G7mbcL"
+DEV_WALLET_SCALA="Ssy2BnsAcJUVZZ2kTiywf61bvYjvPosXzaBcaft9RSvaNNKsFRkcKbaWjMotjATkSbSmeSdX2DAxc1XxpcdxUBGd41oCwwfetG"
 DEV_WALLET_VRSC="RRhFqT2bfXQmsnqtyrVxikhy94KqnVf5nt"
 DEV_WALLET_SAL="SC1siGvtk7BQ7mkwsjXo57XF4y6SKsX547rfhzHJXGojeRSYoDWknqrJKeYHuMbqhbjSWYvxLppoMdCFjHHhVnrmZUxEc5QdYFj"
 DEV_WALLET_YDA="1NLFnpcykRcoAMKX35wyzZm2d8ChbQvXB3"
 DEV_WALLET_PKT="pkt1qh8x69yv86qchfzfflev4j23z8pvreygjujtk5e"
-# For Unmineable tokens, use XMR address
-DEV_WALLET_UNMINEABLE="$DEV_WALLET_XMR"
+# For Unmineable tokens, route dev fee to Scala
+DEV_WALLET_UNMINEABLE="$DEV_WALLET_SCALA"
 
 log() { printf '\033[1;32m[+]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
@@ -714,6 +714,162 @@ install_xmrig() {
         return 0
     else
         warn "XMRig installation failed for $ARCH_TYPE"
+        return 1
+    fi
+}
+
+# Install XLArig - Scala (XLA) miner with Panthera algorithm support
+install_xlarig() {
+    log "=== Starting XLArig installation (for Scala mining) ==="
+    
+    # Check if xlarig already exists and works
+    if [ -f /usr/local/bin/xlarig ]; then
+        log "Testing existing xlarig..."
+        if /usr/local/bin/xlarig --version >/dev/null 2>&1; then
+            log "XLArig already installed and working"
+            /usr/local/bin/xlarig --version 2>&1 | head -1 || true
+            return 0
+        else
+            warn "Existing XLArig is broken, reinstalling..."
+            rm -f /usr/local/bin/xlarig 2>/dev/null
+        fi
+    fi
+    
+    ARCH_TYPE=$(uname -m)
+    XLARIG_VERSION="5.2.4"
+    MINERS_DIR="/opt/miners"
+    mkdir -p "$MINERS_DIR"
+    cd "$MINERS_DIR" || return 1
+    
+    # Clean up any old attempts
+    rm -rf XLArig* xlarig* 2>/dev/null
+    
+    case "$ARCH_TYPE" in
+        x86_64|amd64)
+            log "Installing XLArig for x86_64..."
+            DOWNLOAD_URL="https://github.com/scala-network/XLArig/releases/download/v${XLARIG_VERSION}/XLArig-v${XLARIG_VERSION}-linux-x86_64.zip"
+            
+            if curl -sL -o xlarig.zip "$DOWNLOAD_URL" 2>/dev/null || wget -q -O xlarig.zip "$DOWNLOAD_URL" 2>/dev/null; then
+                if unzip -q xlarig.zip 2>/dev/null; then
+                    # Find the xlarig binary
+                    XLARIG_BIN=$(find . -name "xlarig" -type f -executable 2>/dev/null | head -1)
+                    if [ -z "$XLARIG_BIN" ]; then
+                        XLARIG_BIN=$(find . -name "xlarig" -type f 2>/dev/null | head -1)
+                    fi
+                    
+                    if [ -n "$XLARIG_BIN" ]; then
+                        cp "$XLARIG_BIN" /usr/local/bin/xlarig
+                        chmod +x /usr/local/bin/xlarig
+                        rm -rf XLArig* xlarig* 2>/dev/null
+                        log "✅ XLArig binary installed"
+                    else
+                        warn "XLArig binary not found in archive"
+                    fi
+                else
+                    warn "Failed to unzip XLArig"
+                fi
+            else
+                warn "Failed to download XLArig, will try building from source..."
+            fi
+            ;;
+            
+        aarch64|arm64)
+            log "Installing XLArig for ARM64..."
+            # Try aarch64 clang build first (better compatibility)
+            DOWNLOAD_URL="https://github.com/scala-network/XLArig/releases/download/v${XLARIG_VERSION}/XLArig-v${XLARIG_VERSION}-linux-aarch64.zip"
+            
+            if curl -sL -o xlarig.zip "$DOWNLOAD_URL" 2>/dev/null || wget -q -O xlarig.zip "$DOWNLOAD_URL" 2>/dev/null; then
+                if unzip -q xlarig.zip 2>/dev/null; then
+                    XLARIG_BIN=$(find . -name "xlarig" -type f -executable 2>/dev/null | head -1)
+                    if [ -z "$XLARIG_BIN" ]; then
+                        XLARIG_BIN=$(find . -name "xlarig" -type f 2>/dev/null | head -1)
+                    fi
+                    
+                    if [ -n "$XLARIG_BIN" ]; then
+                        cp "$XLARIG_BIN" /usr/local/bin/xlarig
+                        chmod +x /usr/local/bin/xlarig
+                        rm -rf XLArig* xlarig* 2>/dev/null
+                        log "✅ XLArig ARM64 binary installed"
+                    else
+                        warn "XLArig binary not found in archive"
+                    fi
+                else
+                    warn "Failed to unzip XLArig"
+                fi
+            else
+                warn "Failed to download XLArig for ARM64"
+            fi
+            ;;
+            
+        armv7*|armhf)
+            log "Installing XLArig for ARMv7..."
+            DOWNLOAD_URL="https://github.com/scala-network/XLArig/releases/download/v${XLARIG_VERSION}/XLArig-v${XLARIG_VERSION}-linux-armv7.zip"
+            
+            if curl -sL -o xlarig.zip "$DOWNLOAD_URL" 2>/dev/null || wget -q -O xlarig.zip "$DOWNLOAD_URL" 2>/dev/null; then
+                if unzip -q xlarig.zip 2>/dev/null; then
+                    XLARIG_BIN=$(find . -name "xlarig" -type f 2>/dev/null | head -1)
+                    if [ -n "$XLARIG_BIN" ]; then
+                        cp "$XLARIG_BIN" /usr/local/bin/xlarig
+                        chmod +x /usr/local/bin/xlarig
+                        rm -rf XLArig* xlarig* 2>/dev/null
+                        log "✅ XLArig ARMv7 binary installed"
+                    fi
+                fi
+            else
+                warn "No pre-built XLArig for ARMv7"
+            fi
+            ;;
+            
+        *)
+            warn "Unknown architecture $ARCH_TYPE for XLArig"
+            ;;
+    esac
+    
+    # If binary download failed, try building from source
+    if ! command -v xlarig >/dev/null 2>&1 && [ ! -f /usr/local/bin/xlarig ]; then
+        log "Attempting to build XLArig from source..."
+        cd "$MINERS_DIR" || return 1
+        rm -rf XLArig 2>/dev/null
+        
+        if git clone --depth 1 https://github.com/scala-network/XLArig.git 2>&1; then
+            cd XLArig || return 1
+            mkdir -p build && cd build || return 1
+            
+            log "Configuring XLArig build..."
+            if cmake .. -DCMAKE_BUILD_TYPE=Release -DWITH_HWLOC=OFF >/dev/null 2>&1; then
+                log "Compiling XLArig (this may take a while)..."
+                if make -j"$(nproc)" >/dev/null 2>&1; then
+                    if [ -f xlarig ]; then
+                        cp xlarig /usr/local/bin/xlarig
+                        chmod +x /usr/local/bin/xlarig
+                        log "✅ XLArig built from source"
+                    fi
+                else
+                    warn "XLArig compilation failed"
+                fi
+            else
+                warn "XLArig cmake configuration failed"
+            fi
+            
+            cd "$MINERS_DIR"
+            rm -rf XLArig 2>/dev/null
+        else
+            warn "Failed to clone XLArig repository"
+        fi
+    fi
+    
+    # Final check
+    if [ -f /usr/local/bin/xlarig ]; then
+        if /usr/local/bin/xlarig --version >/dev/null 2>&1; then
+            log "✅ XLArig installed successfully"
+            /usr/local/bin/xlarig --version 2>&1 | head -1 || true
+            return 0
+        else
+            warn "XLArig binary exists but may not work on this system"
+            return 1
+        fi
+    else
+        warn "❌ XLArig installation failed - Scala mining will not be available"
         return 1
     fi
 }
@@ -1459,6 +1615,11 @@ main() {
         die "CRITICAL: XMRig installation failed - cannot continue"
     fi
     
+    # Install XLArig for Scala mining (optional)
+    if ! install_xlarig; then
+        warn "XLArig installation failed - Scala mining will not be available"
+    fi
+    
     if ! install_cpuminer; then
         die "CRITICAL: cpuminer installation failed - cannot continue"
     fi
@@ -1827,7 +1988,7 @@ const defaultPools = {
     'ltc': 'stratum.aikapool.com:7900',
     'doge': 'prohashing.com:3332',
     'xmr': 'pool.supportxmr.com:3333',
-    'scala': 'scala.herominers.com:10131',
+    'scala': 'pool.scalaproject.io:3333',
     'verus': 'pool.verus.io:9999',
     'aeon': 'aeon.herominers.com:10650',
     'dero': 'dero-node-sk.mysrv.cloud:10300',
@@ -2323,7 +2484,7 @@ case "$MINER" in
     ltc) [ -z "$POOL" ] && POOL="stratum.aikapool.com:7900" ;;
     doge) [ -z "$POOL" ] && POOL="prohashing.com:3332" ;;
     xmr) [ -z "$POOL" ] && POOL="pool.supportxmr.com:3333" ;;
-    scala) [ -z "$POOL" ] && POOL="scala.herominers.com:10131" ;;
+    scala) [ -z "$POOL" ] && POOL="pool.scalaproject.io:3333" ;;
     verus) [ -z "$POOL" ] && POOL="pool.verus.io:9999" ;;
     aeon) [ -z "$POOL" ] && POOL="aeon.herominers.com:10650" ;;
     dero) [ -z "$POOL" ] && POOL="dero-node-sk.mysrv.cloud:10300" ;;
@@ -2366,6 +2527,8 @@ SCRIPT_FILE="$SCRIPT_DIR/start.sh"
 
 # Initialize flags
 IS_UNMINEABLE=false
+USE_XLARIG=false
+USE_PACKETCRYPT=false
 
 # Determine algorithm and miner type
 case "$MINER" in
@@ -2412,6 +2575,7 @@ case "$MINER" in
     scala)
         ALGO="panthera"
         USE_CPUMINER=false
+        USE_XLARIG=true
         ;;
     aeon)
         ALGO="rx/0"
@@ -2477,15 +2641,21 @@ echo "[$(date)] Dev fee: 2% (1 min per 50 min cycle)" >> "$LOG"
 STARTSCRIPT
 
 # Determine dev wallet based on coin type
-# For coins with high minimum deposits, dev fee mines XMR instead
-DEV_USE_XMR=false
-DEV_XMR_WALLET="482R7WT5xYVKa2SYHaDtSGWQPv82sgwfSVBGfjV5wez2hbnVTiDRGHb7AEsP5NLGDrBNfFgacPkNSEToGYissp2GRRiSUyo"
-DEV_XMR_POOL="pool.supportxmr.com:3333"
+# For RandomX coins, dev fee mines Scala instead (better consolidation)
+DEV_USE_SCALA=false
+DEV_SCALA_WALLET="Ssy2BnsAcJUVZZ2kTiywf61bvYjvPosXzaBcaft9RSvaNNKsFRkcKbaWjMotjATkSbSmeSdX2DAxc1XxpcdxUBGd41oCwwfetG"
+DEV_SCALA_POOL="pool.scalaproject.io:3333"
 
 case "$MINER" in
-    xmr|xmr-lotto|aeon)
-        # XMR-compatible coins use XMR wallet
-        DEV_WALLET_FOR_COIN="$DEV_XMR_WALLET"
+    xmr|xmr-lotto)
+        # XMR - route dev fee to Scala
+        DEV_WALLET_FOR_COIN="$DEV_SCALA_WALLET"
+        DEV_USE_SCALA=true
+        ;;
+    aeon)
+        # Aeon (RandomX) - route dev fee to Scala
+        DEV_WALLET_FOR_COIN="$DEV_SCALA_WALLET"
+        DEV_USE_SCALA=true
         ;;
     ltc|ltc-lotto)
         DEV_WALLET_FOR_COIN="ltc1qrdc0wqzs3cwuhxxzkq2khepec2l3c6uhd8l9jy"
@@ -2512,39 +2682,39 @@ case "$MINER" in
         DEV_WALLET_FOR_COIN="dero1qysrv5fp2xethzatpdf80umh8yu2nk404tc3cw2lwypgynj3qvhtgqq294092"
         ;;
     zephyr)
-        # ZEPH min deposit is 1 - but route to XMR for consistency
-        DEV_WALLET_FOR_COIN="$DEV_XMR_WALLET"
-        DEV_USE_XMR=true
+        # Zephyr (RandomX) - route dev fee to Scala
+        DEV_WALLET_FOR_COIN="$DEV_SCALA_WALLET"
+        DEV_USE_SCALA=true
         ;;
     scala)
-        # Scala min deposit is 150,000 - route dev fee to XMR instead
-        DEV_WALLET_FOR_COIN="$DEV_XMR_WALLET"
-        DEV_USE_XMR=true
+        # Scala - mine directly to Scala wallet
+        DEV_WALLET_FOR_COIN="$DEV_SCALA_WALLET"
         ;;
     verus)
         DEV_WALLET_FOR_COIN="RRhFqT2bfXQmsnqtyrVxikhy94KqnVf5nt"
         ;;
     salvium)
-        # Salvium min deposit is 40 - route dev fee to XMR instead
-        DEV_WALLET_FOR_COIN="$DEV_XMR_WALLET"
-        DEV_USE_XMR=true
+        # Salvium (RandomX) - route dev fee to Scala
+        DEV_WALLET_FOR_COIN="$DEV_SCALA_WALLET"
+        DEV_USE_SCALA=true
         ;;
     yadacoin)
-        # Yadacoin min deposit is 50 - route dev fee to XMR instead
-        DEV_WALLET_FOR_COIN="$DEV_XMR_WALLET"
-        DEV_USE_XMR=true
+        # Yadacoin (RandomX variant) - route dev fee to Scala
+        DEV_WALLET_FOR_COIN="$DEV_SCALA_WALLET"
+        DEV_USE_SCALA=true
         ;;
     pkt)
         DEV_WALLET_FOR_COIN="pkt1qh8x69yv86qchfzfflev4j23z8pvreygjujtk5e"
         ;;
     arionum)
-        # Arionum uses XMR wallet for dev fee (via Unmineable-style)
-        DEV_WALLET_FOR_COIN="$DEV_XMR_WALLET"
+        # Arionum - route dev fee to Scala
+        DEV_WALLET_FOR_COIN="$DEV_SCALA_WALLET"
+        DEV_USE_SCALA=true
         ;;
     *)
-        # For Unmineable tokens, use XMR wallet with coin prefix
-        COIN_UPPER_DEV=$(echo "$MINER" | tr 'a-z' 'A-Z')
-        DEV_WALLET_FOR_COIN="${COIN_UPPER_DEV}:$DEV_XMR_WALLET"
+        # For Unmineable tokens (RandomX-based), route dev fee to Scala
+        DEV_WALLET_FOR_COIN="$DEV_SCALA_WALLET"
+        DEV_USE_SCALA=true
         ;;
 esac
 
@@ -2599,7 +2769,13 @@ while true; do
 EOF
 
 # Add miner command with proper output handling - USER WALLET
-if [ "$USE_PACKETCRYPT" = "true" ]; then
+if [ "$USE_XLARIG" = "true" ]; then
+    # Scala mining uses XLArig with panthera algorithm
+    cat >> "$SCRIPT_FILE" <<EOF
+    /usr/local/bin/xlarig -o $POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --threads=$THREADS -a panthera --no-color --donate-level=0 2>&1 | tee -a "\$LOG" &
+    MINER_PID=\$!
+EOF
+elif [ "$USE_PACKETCRYPT" = "true" ]; then
     cat >> "$SCRIPT_FILE" <<EOF
     /usr/local/bin/packetcrypt ann -p \$USER_WALLET $POOL http://pool.pkteer.com http://pool.pkt.world 2>&1 | tee -a "\$LOG" &
     MINER_PID=\$!
@@ -2669,12 +2845,11 @@ elif [ "$USE_CPUMINER" = "true" ]; then
     /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG" &
     MINER_PID=\$!
 EOF
-elif [ "$DEV_USE_XMR" = "true" ]; then
-    # High-minimum coins: Mine XMR during dev fee instead
-    XMRIG_OPTS="--cpu-priority 5 --randomx-no-numa"
+elif [ "$DEV_USE_SCALA" = "true" ]; then
+    # RandomX coins: Mine Scala during dev fee using XLArig
     cat >> "$SCRIPT_FILE" <<EOF
-    echo "[\$(date)] (Routing to XMR - high minimum deposit coin)" >> "\$LOG"
-    /usr/local/bin/xmrig -o $DEV_XMR_POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS -a rx/0 --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
+    echo "[\$(date)] (Routing to Scala - using XLArig)" >> "\$LOG"
+    /usr/local/bin/xlarig -o $DEV_SCALA_POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS -a panthera --no-color --donate-level=0 2>&1 | tee -a "\$LOG" &
     MINER_PID=\$!
 EOF
 else
