@@ -1029,9 +1029,37 @@ install_cpuminer() {
 install_packetcrypt() {
     log "=== Starting PacketCrypt installation ==="
     
+    # Cleanup any old Rust-based builds (we use Docker now)
+    if [ -d /opt/miners/packetcrypt_rs ]; then
+        log "Cleaning up old Rust source build..."
+        pkill -9 -f "cargo" 2>/dev/null || true
+        pkill -9 -f "rustc" 2>/dev/null || true
+        rm -rf /opt/miners/packetcrypt_rs 2>/dev/null
+    fi
+    
+    # Remove old non-Docker packetcrypt binary
+    if [ -f /usr/local/bin/packetcrypt ]; then
+        if ! grep -q "docker run" /usr/local/bin/packetcrypt 2>/dev/null; then
+            log "Removing old non-Docker packetcrypt binary..."
+            rm -f /usr/local/bin/packetcrypt 2>/dev/null
+        fi
+    fi
+    
     # Check if packetcrypt wrapper already exists and works
     if [ -f /usr/local/bin/packetcrypt ]; then
         log "Testing existing packetcrypt..."
+        
+        # First check if it's a Docker wrapper
+        if grep -q "docker run" /usr/local/bin/packetcrypt 2>/dev/null; then
+            # It's a Docker wrapper - check if image exists locally
+            DOCKER_IMAGE=$(grep "DOCKER_IMAGE=" /usr/local/bin/packetcrypt 2>/dev/null | head -1 | cut -d'"' -f2)
+            if [ -n "$DOCKER_IMAGE" ] && docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -q "$DOCKER_IMAGE"; then
+                log "✅ PacketCrypt Docker image already installed: $DOCKER_IMAGE"
+                return 0
+            fi
+        fi
+        
+        # Try running --help
         if /usr/local/bin/packetcrypt --help >/dev/null 2>&1; then
             log "PacketCrypt already installed and working"
             return 0
@@ -1040,6 +1068,33 @@ install_packetcrypt() {
             rm -f /usr/local/bin/packetcrypt 2>/dev/null
         fi
     fi
+    
+    # Check if Docker image already exists (even without wrapper)
+    for img in thomasjp0x42/packetcrypt-amd64 thomasjp0x42/packetcrypt-arm64 thomasjp0x42/packetcrypt reineltdev/packetcrypt; do
+        if docker images --format '{{.Repository}}' 2>/dev/null | grep -q "$img"; then
+            log "Found existing Docker image: $img"
+            DOCKER_IMAGE="$img"
+            # Skip to creating wrapper
+            log "Creating packetcrypt wrapper script..."
+            cat > /usr/local/bin/packetcrypt << WRAPPER
+#!/bin/sh
+# PacketCrypt Docker wrapper - created by FryMiner
+DOCKER_IMAGE="$DOCKER_IMAGE"
+if ! docker info >/dev/null 2>&1; then
+    echo "Error: Docker is not running" >&2
+    exit 1
+fi
+if [ -t 0 ]; then
+    exec docker run --rm --network host -it "\$DOCKER_IMAGE" "\$@"
+else
+    exec docker run --rm --network host "\$DOCKER_IMAGE" "\$@"
+fi
+WRAPPER
+            chmod +x /usr/local/bin/packetcrypt
+            log "✅ PacketCrypt wrapper created using existing image"
+            return 0
+        fi
+    done
     
     log "Installing PacketCrypt via Docker (avoids Rust version issues)..."
     
