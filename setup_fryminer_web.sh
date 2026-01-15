@@ -299,6 +299,7 @@ if [ $UPDATE_STATUS -eq 0 ]; then
         if [ -f "$SCRIPT_FILE" ]; then
             # Kill any existing miners
             pkill -9 -f "xmrig" 2>/dev/null || true
+            pkill -9 -f "xlarig" 2>/dev/null || true
             pkill -9 -f "cpuminer" 2>/dev/null || true
             pkill -9 -f "packetcrypt" 2>/dev/null || true
             sleep 2
@@ -1646,6 +1647,7 @@ main() {
     
     # Stop miners
     pkill -f xmrig 2>/dev/null || true
+    pkill -f xlarig 2>/dev/null || true
     pkill -f cpuminer 2>/dev/null || true
     pkill -f minerd 2>/dev/null || true
     pkill -f packetcrypt 2>/dev/null || true
@@ -2746,6 +2748,7 @@ fi
 # Function to stop miner gracefully
 stop_miner() {
     pkill -f "xmrig" 2>/dev/null
+    pkill -f "xlarig" 2>/dev/null
     pkill -f "cpuminer" 2>/dev/null
     pkill -f "minerd" 2>/dev/null
     pkill -f "packetcrypt" 2>/dev/null
@@ -3129,6 +3132,7 @@ fi
 
 # Stop any existing miners first
 pkill -9 -f "xmrig" 2>/dev/null || true
+pkill -9 -f "xlarig" 2>/dev/null || true
 pkill -9 -f "cpuminer" 2>/dev/null || true
 pkill -9 -f "minerd" 2>/dev/null || true
 pkill -9 -f "packetcrypt" 2>/dev/null || true
@@ -3228,11 +3232,13 @@ fi
 # Also kill any stray miners
 if [ "$CAN_SUDO" = "true" ]; then
     sudo pkill -9 -f xmrig 2>/dev/null || true
+    sudo pkill -9 -f xlarig 2>/dev/null || true
     sudo pkill -9 -f cpuminer 2>/dev/null || true
     sudo pkill -9 -f minerd 2>/dev/null || true
     sudo pkill -9 -f packetcrypt 2>/dev/null || true
 else
     pkill -9 -f xmrig 2>/dev/null || true
+    pkill -9 -f xlarig 2>/dev/null || true
     pkill -9 -f cpuminer 2>/dev/null || true
     pkill -9 -f minerd 2>/dev/null || true
     pkill -9 -f packetcrypt 2>/dev/null || true
@@ -3524,10 +3530,12 @@ case "$ACTION" in
                     # Use sudo if available
                     if [ "$CAN_SUDO" = "true" ]; then
                         sudo pkill -9 -f "xmrig" 2>/dev/null || true
+                        sudo pkill -9 -f "xlarig" 2>/dev/null || true
                         sudo pkill -9 -f "cpuminer" 2>/dev/null || true
                         sudo pkill -9 -f "packetcrypt" 2>/dev/null || true
                     else
                         pkill -9 -f "xmrig" 2>/dev/null || true
+                        pkill -9 -f "xlarig" 2>/dev/null || true
                         pkill -9 -f "cpuminer" 2>/dev/null || true
                         pkill -9 -f "packetcrypt" 2>/dev/null || true
                     fi
