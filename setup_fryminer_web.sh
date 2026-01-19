@@ -291,11 +291,11 @@ if [ $UPDATE_STATUS -eq 0 ]; then
     if [ "$WAS_MINING" = "true" ] && [ -f "$CONFIG_FILE" ]; then
         log_msg "Restarting mining..."
         sleep 3
-        
+
         # Source config and find start script
         . "$CONFIG_FILE"
         SCRIPT_FILE="/opt/frynet-config/output/$miner/start.sh"
-        
+
         if [ -f "$SCRIPT_FILE" ]; then
             # Kill any existing miners
             pkill -9 -f "xmrig" 2>/dev/null || true
@@ -303,12 +303,21 @@ if [ $UPDATE_STATUS -eq 0 ]; then
             pkill -9 -f "cpuminer" 2>/dev/null || true
             pkill -9 -f "packetcrypt" 2>/dev/null || true
             sleep 2
-            
+
             # Start miner - script handles its own logging
             nohup sh "$SCRIPT_FILE" >/dev/null 2>&1 &
             NEW_PID=$!
             echo "$NEW_PID" > "$PID_FILE"
             log_msg "Mining restarted with PID $NEW_PID"
+        else
+            log_msg "WARNING: Start script not found at $SCRIPT_FILE"
+            log_msg "Mining was active but cannot auto-restart."
+            log_msg "Please re-save configuration via web interface to regenerate start script."
+            # Also log to miner log for visibility in the Activity tab
+            MINER_LOG="/opt/frynet-config/logs/miner.log"
+            echo "[$(date)] WARNING: Auto-update completed but start script missing" >> "$MINER_LOG"
+            echo "[$(date)] Expected: $SCRIPT_FILE" >> "$MINER_LOG"
+            echo "[$(date)] Please click 'Save' in web interface to regenerate and restart mining" >> "$MINER_LOG"
         fi
     fi
     
@@ -1661,11 +1670,41 @@ main() {
     
     # Setup directory structure
     log "Setting up FryMiner directory..."
-    rm -rf "$BASE"
-    mkdir -p "$BASE"
-    mkdir -p "$BASE/cgi-bin"
-    mkdir -p "$BASE/output"
-    mkdir -p "$BASE/logs"
+
+    # During UPDATE_MODE, preserve config.txt and output directory (contains start.sh scripts)
+    if [ "$UPDATE_MODE" = "true" ]; then
+        log "UPDATE_MODE: Preserving existing configuration and start scripts..."
+        # Backup config and output directory
+        if [ -f "$BASE/config.txt" ]; then
+            cp "$BASE/config.txt" /tmp/fryminer_config_backup.txt
+        fi
+        if [ -d "$BASE/output" ]; then
+            cp -r "$BASE/output" /tmp/fryminer_output_backup
+        fi
+        # Remove everything except what we're backing up
+        rm -rf "$BASE/cgi-bin" "$BASE/index.html" "$BASE/logs" "$BASE/optimize.sh" "$BASE/auto_update.sh" 2>/dev/null || true
+        mkdir -p "$BASE"
+        mkdir -p "$BASE/cgi-bin"
+        mkdir -p "$BASE/logs"
+        # Restore backups
+        if [ -f /tmp/fryminer_config_backup.txt ]; then
+            cp /tmp/fryminer_config_backup.txt "$BASE/config.txt"
+            rm -f /tmp/fryminer_config_backup.txt
+        fi
+        if [ -d /tmp/fryminer_output_backup ]; then
+            rm -rf "$BASE/output"
+            cp -r /tmp/fryminer_output_backup "$BASE/output"
+            rm -rf /tmp/fryminer_output_backup
+        else
+            mkdir -p "$BASE/output"
+        fi
+    else
+        rm -rf "$BASE"
+        mkdir -p "$BASE"
+        mkdir -p "$BASE/cgi-bin"
+        mkdir -p "$BASE/output"
+        mkdir -p "$BASE/logs"
+    fi
     
     # Set permissions
     chmod 777 "$BASE"
@@ -3527,7 +3566,7 @@ case "$ACTION" in
                 if [ -f "$SCRIPT_FILE" ]; then
                     echo "[$(date)] 🔄 Restarting $MINER_COIN mining..." >> "$MINER_LOG"
                     echo "[$(date)] Restarting $MINER_COIN mining..." >> "$UPDATE_LOG"
-                    
+
                     # Use sudo if available
                     if [ "$CAN_SUDO" = "true" ]; then
                         sudo pkill -9 -f "xmrig" 2>/dev/null || true
@@ -3540,13 +3579,18 @@ case "$ACTION" in
                         pkill -9 -f "cpuminer" 2>/dev/null || true
                         pkill -9 -f "packetcrypt" 2>/dev/null || true
                     fi
-                    
+
                     sleep 2
                     nohup sh "$SCRIPT_FILE" >/dev/null 2>&1 &
                     NEW_PID=$!
                     echo "$NEW_PID" > "$PID_FILE"
                     echo "[$(date)] ✅ Mining restarted PID $NEW_PID" >> "$MINER_LOG"
                     echo "[$(date)] Mining restarted PID $NEW_PID" >> "$UPDATE_LOG"
+                else
+                    echo "[$(date)] ⚠️  WARNING: Start script not found: $SCRIPT_FILE" >> "$MINER_LOG"
+                    echo "[$(date)] WARNING: Start script not found: $SCRIPT_FILE" >> "$UPDATE_LOG"
+                    echo "[$(date)] Mining was active but cannot auto-restart" >> "$MINER_LOG"
+                    echo "[$(date)] Please click 'Save' in Settings tab to regenerate start script" >> "$MINER_LOG"
                 fi
             fi
             
