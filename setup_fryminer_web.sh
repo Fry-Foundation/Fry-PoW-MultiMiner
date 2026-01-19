@@ -2785,14 +2785,35 @@ if [ -x /opt/frynet-config/optimize.sh ]; then
     /opt/frynet-config/optimize.sh >> "\$LOG" 2>&1
 fi
 
-# Function to stop miner gracefully
+# Function to stop miner gracefully with proper cleanup
 stop_miner() {
-    pkill -f "xmrig" 2>/dev/null
-    pkill -f "xlarig" 2>/dev/null
-    pkill -f "cpuminer" 2>/dev/null
-    pkill -f "minerd" 2>/dev/null
-    pkill -f "packetcrypt" 2>/dev/null
-    sleep 2
+    # Send SIGTERM first for graceful shutdown
+    pkill -TERM -f "xmrig" 2>/dev/null
+    pkill -TERM -f "xlarig" 2>/dev/null
+    pkill -TERM -f "cpuminer" 2>/dev/null
+    pkill -TERM -f "minerd" 2>/dev/null
+    pkill -TERM -f "packetcrypt" 2>/dev/null
+
+    # Wait for processes to actually terminate (up to 5 seconds)
+    WAIT_COUNT=0
+    while [ \$WAIT_COUNT -lt 10 ]; do
+        # Check if any miner processes are still running
+        if ! pgrep -f "xmrig|xlarig|cpuminer|minerd|packetcrypt" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+        WAIT_COUNT=\$((WAIT_COUNT + 1))
+    done
+
+    # Force kill any remaining processes
+    pkill -KILL -f "xmrig" 2>/dev/null
+    pkill -KILL -f "xlarig" 2>/dev/null
+    pkill -KILL -f "cpuminer" 2>/dev/null
+    pkill -KILL -f "minerd" 2>/dev/null
+    pkill -KILL -f "packetcrypt" 2>/dev/null
+
+    # Additional wait for TCP connections to fully close (TIME_WAIT cleanup)
+    sleep 3
 }
 
 # Trap to cleanup on exit
