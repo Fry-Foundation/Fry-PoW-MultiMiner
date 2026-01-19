@@ -2426,6 +2426,80 @@ function updateMiningModeUI() {
     }
 }
 
+// GPU detection state
+let gpuDetectionResult = null;
+
+// Check for GPU availability
+function checkGpuAvailability() {
+    fetch('/cgi-bin/gpu.cgi')
+        .then(r => r.json())
+        .then(data => {
+            gpuDetectionResult = data;
+            const gpuCheckbox = document.getElementById('gpu_mining');
+            const gpuMinerGroup = document.getElementById('gpuMinerGroup');
+            const gpuMinerSelect = document.getElementById('gpu_miner');
+
+            if (!data.gpu_available) {
+                // Disable GPU mining option
+                gpuCheckbox.disabled = true;
+                gpuCheckbox.checked = false;
+
+                // Add visual indication and tooltip
+                const gpuLabel = gpuCheckbox.parentElement;
+                gpuLabel.style.opacity = '0.5';
+                gpuLabel.style.cursor = 'not-allowed';
+                gpuLabel.title = data.reason || 'No GPU detected';
+
+                // Hide GPU miner selection
+                gpuMinerGroup.style.display = 'none';
+
+                // Add info message
+                const miningModeDiv = gpuCheckbox.closest('.form-group');
+                let infoEl = document.getElementById('gpuNotAvailableInfo');
+                if (!infoEl) {
+                    infoEl = document.createElement('small');
+                    infoEl.id = 'gpuNotAvailableInfo';
+                    infoEl.style.color = '#ff6b6b';
+                    infoEl.style.display = 'block';
+                    infoEl.style.marginTop = '5px';
+                    miningModeDiv.appendChild(infoEl);
+                }
+                infoEl.textContent = '⚠️ ' + (data.reason || 'GPU not available');
+            } else {
+                // GPU is available - update miner options based on GPU type
+                const gpuLabel = gpuCheckbox.parentElement;
+                gpuLabel.title = 'GPU detected: ' + (data.gpu_name || 'Unknown');
+
+                // Show recommended miner based on GPU type
+                if (data.nvidia && !data.amd) {
+                    // NVIDIA only - recommend T-Rex
+                    gpuMinerSelect.value = 'trex';
+                } else if (data.amd && !data.nvidia) {
+                    // AMD only - recommend SRBMiner
+                    gpuMinerSelect.value = 'srbminer';
+                }
+                // If both, leave default (srbminer works with both)
+
+                // Add success info
+                const miningModeDiv = gpuCheckbox.closest('.form-group');
+                let infoEl = document.getElementById('gpuNotAvailableInfo');
+                if (!infoEl) {
+                    infoEl = document.createElement('small');
+                    infoEl.id = 'gpuNotAvailableInfo';
+                    infoEl.style.color = '#4caf50';
+                    infoEl.style.display = 'block';
+                    infoEl.style.marginTop = '5px';
+                    miningModeDiv.appendChild(infoEl);
+                }
+                infoEl.style.color = '#4caf50';
+                infoEl.textContent = '✓ GPU detected: ' + (data.gpu_name || 'Unknown');
+            }
+        })
+        .catch(err => {
+            console.error('GPU detection failed:', err);
+        });
+}
+
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     const cpuCheckbox = document.getElementById('cpu_mining');
@@ -2440,6 +2514,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Initial UI update
     updateMiningModeUI();
+
+    // Check GPU availability
+    checkGpuAvailability();
 });
 
 function showTab(tabName) {
@@ -2854,7 +2931,92 @@ CORES=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || ech
 printf '{"cores":%d}' "$CORES"
 SCRIPT
     chmod 755 "$BASE/cgi-bin/cores.cgi"
-    
+
+    # GPU Detection CGI - Detects if GPU is present and what type
+    cat > "$BASE/cgi-bin/gpu.cgi" <<'SCRIPT'
+#!/bin/sh
+echo "Content-type: application/json"
+echo ""
+
+# Check architecture first - GPU mining only on x86_64
+ARCH=$(uname -m)
+if [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "amd64" ]; then
+    printf '{"gpu_available":false,"reason":"GPU mining only supported on x86_64 architecture","arch":"%s","nvidia":false,"amd":false}' "$ARCH"
+    exit 0
+fi
+
+NVIDIA_FOUND=false
+AMD_FOUND=false
+GPU_NAME=""
+
+# Check for NVIDIA GPU
+# Method 1: nvidia-smi (most reliable if drivers installed)
+if command -v nvidia-smi >/dev/null 2>&1; then
+    if nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | grep -qi .; then
+        NVIDIA_FOUND=true
+        GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+    fi
+fi
+
+# Method 2: lspci for NVIDIA
+if [ "$NVIDIA_FOUND" = "false" ] && command -v lspci >/dev/null 2>&1; then
+    if lspci 2>/dev/null | grep -i "vga\|3d\|display" | grep -qi nvidia; then
+        NVIDIA_FOUND=true
+        GPU_NAME=$(lspci 2>/dev/null | grep -i "vga\|3d\|display" | grep -i nvidia | head -1 | sed 's/.*: //')
+    fi
+fi
+
+# Method 3: Check /sys for NVIDIA
+if [ "$NVIDIA_FOUND" = "false" ]; then
+    if ls /sys/class/drm/card*/device/vendor 2>/dev/null | xargs cat 2>/dev/null | grep -q "0x10de"; then
+        NVIDIA_FOUND=true
+        GPU_NAME="NVIDIA GPU (detected via sysfs)"
+    fi
+fi
+
+# Check for AMD GPU
+# Method 1: lspci for AMD/ATI
+if command -v lspci >/dev/null 2>&1; then
+    if lspci 2>/dev/null | grep -i "vga\|3d\|display" | grep -qi "amd\|ati\|radeon"; then
+        AMD_FOUND=true
+        if [ -z "$GPU_NAME" ]; then
+            GPU_NAME=$(lspci 2>/dev/null | grep -i "vga\|3d\|display" | grep -i "amd\|ati\|radeon" | head -1 | sed 's/.*: //')
+        fi
+    fi
+fi
+
+# Method 2: Check /sys for AMD (vendor 0x1002)
+if [ "$AMD_FOUND" = "false" ]; then
+    if ls /sys/class/drm/card*/device/vendor 2>/dev/null | xargs cat 2>/dev/null | grep -q "0x1002"; then
+        AMD_FOUND=true
+        if [ -z "$GPU_NAME" ]; then
+            GPU_NAME="AMD GPU (detected via sysfs)"
+        fi
+    fi
+fi
+
+# Method 3: Check for amdgpu or radeon driver loaded
+if [ "$AMD_FOUND" = "false" ]; then
+    if lsmod 2>/dev/null | grep -qi "amdgpu\|radeon"; then
+        AMD_FOUND=true
+        if [ -z "$GPU_NAME" ]; then
+            GPU_NAME="AMD GPU (driver loaded)"
+        fi
+    fi
+fi
+
+# Determine if GPU mining is available
+if [ "$NVIDIA_FOUND" = "true" ] || [ "$AMD_FOUND" = "true" ]; then
+    # Escape quotes in GPU name for JSON
+    GPU_NAME_ESCAPED=$(echo "$GPU_NAME" | sed 's/"/\\"/g')
+    printf '{"gpu_available":true,"gpu_name":"%s","nvidia":%s,"amd":%s,"arch":"%s"}' \
+        "$GPU_NAME_ESCAPED" "$NVIDIA_FOUND" "$AMD_FOUND" "$ARCH"
+else
+    printf '{"gpu_available":false,"reason":"No NVIDIA or AMD GPU detected","nvidia":false,"amd":false,"arch":"%s"}' "$ARCH"
+fi
+SCRIPT
+    chmod 755 "$BASE/cgi-bin/gpu.cgi"
+
     # Save CGI - WITH STRATUM URL FIX
     cat > "$BASE/cgi-bin/save.cgi" <<'SCRIPT'
 #!/bin/sh
