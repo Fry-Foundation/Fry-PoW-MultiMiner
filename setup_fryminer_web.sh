@@ -2471,14 +2471,12 @@ function checkGpuAvailability() {
                 gpuLabel.title = 'GPU detected: ' + (data.gpu_name || 'Unknown');
 
                 // Show recommended miner based on GPU type
-                if (data.nvidia && !data.amd) {
-                    // NVIDIA only - recommend T-Rex
-                    gpuMinerSelect.value = 'trex';
-                } else if (data.amd && !data.nvidia) {
-                    // AMD only - recommend SRBMiner
-                    gpuMinerSelect.value = 'srbminer';
-                }
-                // If both, leave default (srbminer works with both)
+                // SRBMiner-Multi supports all GPU types (NVIDIA, AMD, Intel)
+                // so it's the recommended default for any GPU configuration
+                gpuMinerSelect.value = 'srbminer';
+                // Alternative miners:
+                // - T-Rex: NVIDIA only (CUDA-based)
+                // - lolMiner: NVIDIA and AMD (OpenCL/CUDA)
 
                 // Add success info
                 const miningModeDiv = gpuCheckbox.closest('.form-group');
@@ -2941,12 +2939,13 @@ echo ""
 # Check architecture first - GPU mining only on x86_64
 ARCH=$(uname -m)
 if [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "amd64" ]; then
-    printf '{"gpu_available":false,"reason":"GPU mining only supported on x86_64 architecture","arch":"%s","nvidia":false,"amd":false}' "$ARCH"
+    printf '{"gpu_available":false,"reason":"GPU mining only supported on x86_64 architecture","arch":"%s","nvidia":false,"amd":false,"intel":false}' "$ARCH"
     exit 0
 fi
 
 NVIDIA_FOUND=false
 AMD_FOUND=false
+INTEL_FOUND=false
 GPU_NAME=""
 
 # Check for NVIDIA GPU
@@ -3005,14 +3004,45 @@ if [ "$AMD_FOUND" = "false" ]; then
     fi
 fi
 
+# Check for Intel GPU
+# Method 1: lspci for Intel (Arc, Iris, UHD, HD Graphics)
+if command -v lspci >/dev/null 2>&1; then
+    if lspci 2>/dev/null | grep -i "vga\|3d\|display" | grep -qi "intel"; then
+        INTEL_FOUND=true
+        if [ -z "$GPU_NAME" ]; then
+            GPU_NAME=$(lspci 2>/dev/null | grep -i "vga\|3d\|display" | grep -i "intel" | head -1 | sed 's/.*: //')
+        fi
+    fi
+fi
+
+# Method 2: Check /sys for Intel (vendor 0x8086)
+if [ "$INTEL_FOUND" = "false" ]; then
+    if ls /sys/class/drm/card*/device/vendor 2>/dev/null | xargs cat 2>/dev/null | grep -q "0x8086"; then
+        INTEL_FOUND=true
+        if [ -z "$GPU_NAME" ]; then
+            GPU_NAME="Intel GPU (detected via sysfs)"
+        fi
+    fi
+fi
+
+# Method 3: Check for i915 driver loaded (Intel graphics driver)
+if [ "$INTEL_FOUND" = "false" ]; then
+    if lsmod 2>/dev/null | grep -qi "i915"; then
+        INTEL_FOUND=true
+        if [ -z "$GPU_NAME" ]; then
+            GPU_NAME="Intel GPU (driver loaded)"
+        fi
+    fi
+fi
+
 # Determine if GPU mining is available
-if [ "$NVIDIA_FOUND" = "true" ] || [ "$AMD_FOUND" = "true" ]; then
+if [ "$NVIDIA_FOUND" = "true" ] || [ "$AMD_FOUND" = "true" ] || [ "$INTEL_FOUND" = "true" ]; then
     # Escape quotes in GPU name for JSON
     GPU_NAME_ESCAPED=$(echo "$GPU_NAME" | sed 's/"/\\"/g')
-    printf '{"gpu_available":true,"gpu_name":"%s","nvidia":%s,"amd":%s,"arch":"%s"}' \
-        "$GPU_NAME_ESCAPED" "$NVIDIA_FOUND" "$AMD_FOUND" "$ARCH"
+    printf '{"gpu_available":true,"gpu_name":"%s","nvidia":%s,"amd":%s,"intel":%s,"arch":"%s"}' \
+        "$GPU_NAME_ESCAPED" "$NVIDIA_FOUND" "$AMD_FOUND" "$INTEL_FOUND" "$ARCH"
 else
-    printf '{"gpu_available":false,"reason":"No NVIDIA or AMD GPU detected","nvidia":false,"amd":false,"arch":"%s"}' "$ARCH"
+    printf '{"gpu_available":false,"reason":"No NVIDIA, AMD, or Intel GPU detected","nvidia":false,"amd":false,"intel":false,"arch":"%s"}' "$ARCH"
 fi
 SCRIPT
     chmod 755 "$BASE/cgi-bin/gpu.cgi"
