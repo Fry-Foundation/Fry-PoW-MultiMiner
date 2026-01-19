@@ -1447,6 +1447,299 @@ WRAPPER
     fi
 }
 
+# =============================================================================
+# GPU MINING SUPPORT
+# Supports: SRBMiner-Multi (AMD/CPU), lolMiner (AMD/NVIDIA), T-Rex (NVIDIA)
+# GPU mining is optional and only available on x86_64 architecture
+# =============================================================================
+
+# Install SRBMiner-Multi - AMD GPU and CPU miner (x86_64 only)
+install_srbminer() {
+    log "=== Starting SRBMiner-Multi installation ==="
+
+    # SRBMiner only supports x86_64
+    if [ "$ARCH_TYPE" != "x86_64" ]; then
+        warn "SRBMiner-Multi only supports x86_64 architecture (current: $ARCH_TYPE)"
+        return 1
+    fi
+
+    # Check if already installed and working
+    if [ -f /usr/local/bin/SRBMiner-MULTI ]; then
+        log "Testing existing SRBMiner-Multi..."
+        if /usr/local/bin/SRBMiner-MULTI --help >/dev/null 2>&1; then
+            log "SRBMiner-Multi already installed and working"
+            return 0
+        else
+            warn "Existing SRBMiner-Multi is broken, reinstalling..."
+            rm -f /usr/local/bin/SRBMiner-MULTI 2>/dev/null
+        fi
+    fi
+
+    mkdir -p "$MINERS_DIR"
+    cd "$MINERS_DIR" || return 1
+    rm -rf SRBMiner-Multi* srbminer* 2>/dev/null
+
+    # Get latest version from GitHub API
+    log "Fetching latest SRBMiner-Multi version..."
+    SRBMINER_VERSION=""
+    if command -v curl >/dev/null 2>&1; then
+        SRBMINER_VERSION=$(curl -s --connect-timeout 10 "https://api.github.com/repos/doktor83/SRBMiner-Multi/releases/latest" 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4)
+    elif command -v wget >/dev/null 2>&1; then
+        SRBMINER_VERSION=$(wget -qO- --timeout=10 "https://api.github.com/repos/doktor83/SRBMiner-Multi/releases/latest" 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4)
+    fi
+
+    # Fallback to known version
+    [ -z "$SRBMINER_VERSION" ] && SRBMINER_VERSION="2.6.9"
+    log "Using SRBMiner-Multi version: $SRBMINER_VERSION"
+
+    # Download
+    DOWNLOAD_URL="https://github.com/doktor83/SRBMiner-Multi/releases/download/${SRBMINER_VERSION}/SRBMiner-Multi-${SRBMINER_VERSION#v}-Linux.tar.gz"
+    log "Downloading from: $DOWNLOAD_URL"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -sL -o srbminer.tar.gz "$DOWNLOAD_URL" 2>/dev/null
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O srbminer.tar.gz "$DOWNLOAD_URL" 2>/dev/null
+    fi
+
+    if [ ! -f srbminer.tar.gz ] || [ ! -s srbminer.tar.gz ]; then
+        warn "Failed to download SRBMiner-Multi"
+        return 1
+    fi
+
+    log "Extracting SRBMiner-Multi..."
+    tar -xzf srbminer.tar.gz 2>/dev/null
+
+    # Find the binary
+    SRBMINER_BIN=$(find . -name "SRBMiner-MULTI" -type f 2>/dev/null | head -1)
+    if [ -z "$SRBMINER_BIN" ]; then
+        warn "SRBMiner-MULTI binary not found in archive"
+        rm -rf SRBMiner-Multi* srbminer* 2>/dev/null
+        return 1
+    fi
+
+    cp "$SRBMINER_BIN" /usr/local/bin/SRBMiner-MULTI
+    chmod +x /usr/local/bin/SRBMiner-MULTI
+
+    # Cleanup
+    rm -rf SRBMiner-Multi* srbminer* 2>/dev/null
+
+    # Verify
+    if /usr/local/bin/SRBMiner-MULTI --help >/dev/null 2>&1; then
+        log "SRBMiner-Multi installed successfully"
+        return 0
+    else
+        warn "SRBMiner-Multi installation verification failed"
+        return 1
+    fi
+}
+
+# Install lolMiner - AMD and NVIDIA GPU miner (x86_64 only)
+install_lolminer() {
+    log "=== Starting lolMiner installation ==="
+
+    # lolMiner only supports x86_64
+    if [ "$ARCH_TYPE" != "x86_64" ]; then
+        warn "lolMiner only supports x86_64 architecture (current: $ARCH_TYPE)"
+        return 1
+    fi
+
+    # Check if already installed and working
+    if [ -f /usr/local/bin/lolMiner ]; then
+        log "Testing existing lolMiner..."
+        if /usr/local/bin/lolMiner --help >/dev/null 2>&1; then
+            log "lolMiner already installed and working"
+            return 0
+        else
+            warn "Existing lolMiner is broken, reinstalling..."
+            rm -f /usr/local/bin/lolMiner 2>/dev/null
+        fi
+    fi
+
+    mkdir -p "$MINERS_DIR"
+    cd "$MINERS_DIR" || return 1
+    rm -rf lolMiner* 2>/dev/null
+
+    # Get latest version from GitHub API
+    log "Fetching latest lolMiner version..."
+    LOLMINER_VERSION=""
+    if command -v curl >/dev/null 2>&1; then
+        LOLMINER_VERSION=$(curl -s --connect-timeout 10 "https://api.github.com/repos/Lolliedieb/lolMiner-releases/releases/latest" 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4)
+    elif command -v wget >/dev/null 2>&1; then
+        LOLMINER_VERSION=$(wget -qO- --timeout=10 "https://api.github.com/repos/Lolliedieb/lolMiner-releases/releases/latest" 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4)
+    fi
+
+    # Fallback to known version
+    [ -z "$LOLMINER_VERSION" ] && LOLMINER_VERSION="1.88"
+    log "Using lolMiner version: $LOLMINER_VERSION"
+
+    # Download
+    DOWNLOAD_URL="https://github.com/Lolliedieb/lolMiner-releases/releases/download/${LOLMINER_VERSION}/lolMiner_v${LOLMINER_VERSION}_Lin64.tar.gz"
+    log "Downloading from: $DOWNLOAD_URL"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -sL -o lolminer.tar.gz "$DOWNLOAD_URL" 2>/dev/null
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O lolminer.tar.gz "$DOWNLOAD_URL" 2>/dev/null
+    fi
+
+    if [ ! -f lolminer.tar.gz ] || [ ! -s lolminer.tar.gz ]; then
+        warn "Failed to download lolMiner"
+        return 1
+    fi
+
+    log "Extracting lolMiner..."
+    tar -xzf lolminer.tar.gz 2>/dev/null
+
+    # Find the binary
+    LOLMINER_BIN=$(find . -name "lolMiner" -type f -executable 2>/dev/null | head -1)
+    if [ -z "$LOLMINER_BIN" ]; then
+        LOLMINER_BIN=$(find . -name "lolMiner" -type f 2>/dev/null | head -1)
+    fi
+
+    if [ -z "$LOLMINER_BIN" ]; then
+        warn "lolMiner binary not found in archive"
+        rm -rf lolMiner* lolminer* 2>/dev/null
+        return 1
+    fi
+
+    cp "$LOLMINER_BIN" /usr/local/bin/lolMiner
+    chmod +x /usr/local/bin/lolMiner
+
+    # Cleanup
+    rm -rf lolMiner* lolminer* 2>/dev/null
+
+    # Verify
+    if /usr/local/bin/lolMiner --help >/dev/null 2>&1; then
+        log "lolMiner installed successfully"
+        return 0
+    else
+        warn "lolMiner installation verification failed"
+        return 1
+    fi
+}
+
+# Install T-Rex miner - NVIDIA GPU miner (x86_64 only)
+install_trex() {
+    log "=== Starting T-Rex miner installation ==="
+
+    # T-Rex only supports x86_64
+    if [ "$ARCH_TYPE" != "x86_64" ]; then
+        warn "T-Rex only supports x86_64 architecture (current: $ARCH_TYPE)"
+        return 1
+    fi
+
+    # Check if already installed and working
+    if [ -f /usr/local/bin/t-rex ]; then
+        log "Testing existing T-Rex..."
+        if /usr/local/bin/t-rex --help >/dev/null 2>&1; then
+            log "T-Rex already installed and working"
+            return 0
+        else
+            warn "Existing T-Rex is broken, reinstalling..."
+            rm -f /usr/local/bin/t-rex 2>/dev/null
+        fi
+    fi
+
+    mkdir -p "$MINERS_DIR"
+    cd "$MINERS_DIR" || return 1
+    rm -rf t-rex* 2>/dev/null
+
+    # Get latest version from GitHub API
+    log "Fetching latest T-Rex version..."
+    TREX_VERSION=""
+    if command -v curl >/dev/null 2>&1; then
+        TREX_VERSION=$(curl -s --connect-timeout 10 "https://api.github.com/repos/trexminer/T-Rex/releases/latest" 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4)
+    elif command -v wget >/dev/null 2>&1; then
+        TREX_VERSION=$(wget -qO- --timeout=10 "https://api.github.com/repos/trexminer/T-Rex/releases/latest" 2>/dev/null | grep '"tag_name"' | cut -d'"' -f4)
+    fi
+
+    # Fallback to known version
+    [ -z "$TREX_VERSION" ] && TREX_VERSION="0.26.8"
+    log "Using T-Rex version: $TREX_VERSION"
+
+    # Download
+    DOWNLOAD_URL="https://github.com/trexminer/T-Rex/releases/download/${TREX_VERSION}/t-rex-${TREX_VERSION}-linux.tar.gz"
+    log "Downloading from: $DOWNLOAD_URL"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -sL -o trex.tar.gz "$DOWNLOAD_URL" 2>/dev/null
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O trex.tar.gz "$DOWNLOAD_URL" 2>/dev/null
+    fi
+
+    if [ ! -f trex.tar.gz ] || [ ! -s trex.tar.gz ]; then
+        warn "Failed to download T-Rex"
+        return 1
+    fi
+
+    log "Extracting T-Rex..."
+    tar -xzf trex.tar.gz 2>/dev/null
+
+    # Find the binary
+    TREX_BIN=$(find . -name "t-rex" -type f -executable 2>/dev/null | head -1)
+    if [ -z "$TREX_BIN" ]; then
+        TREX_BIN=$(find . -name "t-rex" -type f 2>/dev/null | head -1)
+    fi
+
+    if [ -z "$TREX_BIN" ]; then
+        warn "T-Rex binary not found in archive"
+        rm -rf t-rex* trex* 2>/dev/null
+        return 1
+    fi
+
+    cp "$TREX_BIN" /usr/local/bin/t-rex
+    chmod +x /usr/local/bin/t-rex
+
+    # Cleanup
+    rm -rf t-rex* trex* 2>/dev/null
+
+    # Verify
+    if /usr/local/bin/t-rex --help >/dev/null 2>&1; then
+        log "T-Rex installed successfully"
+        return 0
+    else
+        warn "T-Rex installation verification failed"
+        return 1
+    fi
+}
+
+# Master function to install GPU miners (optional)
+install_gpu_miners() {
+    log "=== Installing GPU miners (optional) ==="
+
+    if [ "$ARCH_TYPE" != "x86_64" ]; then
+        warn "GPU mining is only supported on x86_64 architecture"
+        warn "Current architecture: $ARCH_TYPE - skipping GPU miner installation"
+        return 1
+    fi
+
+    GPU_MINERS_INSTALLED=0
+
+    # Install SRBMiner-Multi (AMD GPU and CPU support)
+    if install_srbminer; then
+        GPU_MINERS_INSTALLED=$((GPU_MINERS_INSTALLED + 1))
+    fi
+
+    # Install lolMiner (AMD and NVIDIA)
+    if install_lolminer; then
+        GPU_MINERS_INSTALLED=$((GPU_MINERS_INSTALLED + 1))
+    fi
+
+    # Install T-Rex (NVIDIA only)
+    if install_trex; then
+        GPU_MINERS_INSTALLED=$((GPU_MINERS_INSTALLED + 1))
+    fi
+
+    if [ $GPU_MINERS_INSTALLED -gt 0 ]; then
+        log "GPU miners installed: $GPU_MINERS_INSTALLED"
+        return 0
+    else
+        warn "No GPU miners were installed"
+        return 1
+    fi
+}
+
 # Configure sudo permissions for web server to run updates
 setup_sudo_permissions() {
     log "Configuring sudo permissions for updates..."
@@ -1638,7 +1931,12 @@ main() {
     if ! install_packetcrypt; then
         warn "PacketCrypt installation failed - PKT mining will not be available"
     fi
-    
+
+    # Install GPU miners (optional - x86_64 only)
+    if ! install_gpu_miners; then
+        warn "GPU miner installation skipped or failed - GPU mining will not be available"
+    fi
+
     # Apply mining optimizations (huge pages, MSR, CPU governor)
     optimize_for_mining
     
@@ -1902,10 +2200,35 @@ optgroup { background: #1a1a1a; color: #dc143c; }
                 </div>
                 
                 <div class="form-group">
+                    <label>Mining Mode:</label>
+                    <div style="display: flex; gap: 20px; margin-top: 10px;">
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="checkbox" id="cpu_mining" name="cpu_mining" value="true" checked style="width: auto; margin-right: 8px;">
+                            <span>CPU Mining</span>
+                        </label>
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="checkbox" id="gpu_mining" name="gpu_mining" value="true" style="width: auto; margin-right: 8px;">
+                            <span>GPU Mining</span>
+                        </label>
+                    </div>
+                    <small style="color: #888;">Select at least one mining mode. GPU mining requires x86_64 architecture.</small>
+                </div>
+
+                <div class="form-group" id="cpuThreadsGroup">
                     <label>CPU Threads:</label>
                     <input type="number" id="threads" name="threads" min="1" max="128" value="2">
                 </div>
-                
+
+                <div class="form-group" id="gpuMinerGroup" style="display: none;">
+                    <label>GPU Miner:</label>
+                    <select id="gpu_miner" name="gpu_miner">
+                        <option value="srbminer">SRBMiner-Multi (AMD + CPU)</option>
+                        <option value="lolminer">lolMiner (AMD + NVIDIA)</option>
+                        <option value="trex">T-Rex (NVIDIA only)</option>
+                    </select>
+                    <small style="color: #888;">SRBMiner works best with AMD GPUs. T-Rex is optimized for NVIDIA.</small>
+                </div>
+
                 <div class="form-group" id="poolGroup">
                     <label>Mining Pool:</label>
                     <input type="text" id="pool" name="pool" placeholder="pool.example.com:3333">
@@ -2083,6 +2406,119 @@ const coinInfo = {
     'xmr-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!'
 };
 
+// GPU/CPU mining toggle handlers
+function updateMiningModeUI() {
+    const cpuMining = document.getElementById('cpu_mining').checked;
+    const gpuMining = document.getElementById('gpu_mining').checked;
+    const cpuThreadsGroup = document.getElementById('cpuThreadsGroup');
+    const gpuMinerGroup = document.getElementById('gpuMinerGroup');
+
+    // Show/hide CPU threads based on CPU mining toggle
+    cpuThreadsGroup.style.display = cpuMining ? 'block' : 'none';
+
+    // Show/hide GPU miner selection based on GPU mining toggle
+    gpuMinerGroup.style.display = gpuMining ? 'block' : 'none';
+
+    // Ensure at least one mining mode is selected
+    if (!cpuMining && !gpuMining) {
+        document.getElementById('cpu_mining').checked = true;
+        cpuThreadsGroup.style.display = 'block';
+    }
+}
+
+// GPU detection state
+let gpuDetectionResult = null;
+
+// Check for GPU availability
+function checkGpuAvailability() {
+    fetch('/cgi-bin/gpu.cgi')
+        .then(r => r.json())
+        .then(data => {
+            gpuDetectionResult = data;
+            const gpuCheckbox = document.getElementById('gpu_mining');
+            const gpuMinerGroup = document.getElementById('gpuMinerGroup');
+            const gpuMinerSelect = document.getElementById('gpu_miner');
+
+            if (!data.gpu_available) {
+                // Disable GPU mining option
+                gpuCheckbox.disabled = true;
+                gpuCheckbox.checked = false;
+
+                // Add visual indication and tooltip
+                const gpuLabel = gpuCheckbox.parentElement;
+                gpuLabel.style.opacity = '0.5';
+                gpuLabel.style.cursor = 'not-allowed';
+                gpuLabel.title = data.reason || 'No GPU detected';
+
+                // Hide GPU miner selection
+                gpuMinerGroup.style.display = 'none';
+
+                // Add info message
+                const miningModeDiv = gpuCheckbox.closest('.form-group');
+                let infoEl = document.getElementById('gpuNotAvailableInfo');
+                if (!infoEl) {
+                    infoEl = document.createElement('small');
+                    infoEl.id = 'gpuNotAvailableInfo';
+                    infoEl.style.color = '#ff6b6b';
+                    infoEl.style.display = 'block';
+                    infoEl.style.marginTop = '5px';
+                    miningModeDiv.appendChild(infoEl);
+                }
+                infoEl.textContent = '⚠️ ' + (data.reason || 'GPU not available');
+            } else {
+                // GPU is available - update miner options based on GPU type
+                const gpuLabel = gpuCheckbox.parentElement;
+                gpuLabel.title = 'GPU detected: ' + (data.gpu_name || 'Unknown');
+
+                // Show recommended miner based on GPU type
+                if (data.nvidia && !data.amd) {
+                    // NVIDIA only - recommend T-Rex
+                    gpuMinerSelect.value = 'trex';
+                } else if (data.amd && !data.nvidia) {
+                    // AMD only - recommend SRBMiner
+                    gpuMinerSelect.value = 'srbminer';
+                }
+                // If both, leave default (srbminer works with both)
+
+                // Add success info
+                const miningModeDiv = gpuCheckbox.closest('.form-group');
+                let infoEl = document.getElementById('gpuNotAvailableInfo');
+                if (!infoEl) {
+                    infoEl = document.createElement('small');
+                    infoEl.id = 'gpuNotAvailableInfo';
+                    infoEl.style.color = '#4caf50';
+                    infoEl.style.display = 'block';
+                    infoEl.style.marginTop = '5px';
+                    miningModeDiv.appendChild(infoEl);
+                }
+                infoEl.style.color = '#4caf50';
+                infoEl.textContent = '✓ GPU detected: ' + (data.gpu_name || 'Unknown');
+            }
+        })
+        .catch(err => {
+            console.error('GPU detection failed:', err);
+        });
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    const cpuCheckbox = document.getElementById('cpu_mining');
+    const gpuCheckbox = document.getElementById('gpu_mining');
+
+    if (cpuCheckbox) {
+        cpuCheckbox.addEventListener('change', updateMiningModeUI);
+    }
+    if (gpuCheckbox) {
+        gpuCheckbox.addEventListener('change', updateMiningModeUI);
+    }
+
+    // Initial UI update
+    updateMiningModeUI();
+
+    // Check GPU availability
+    checkGpuAvailability();
+});
+
 function showTab(tabName) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
@@ -2142,23 +2578,36 @@ document.getElementById('miner').addEventListener('change', function() {
 
 document.getElementById('configForm').addEventListener('submit', function(e) {
     e.preventDefault();
-    
+
+    // Validate mining mode - at least one must be selected
+    const cpuMining = document.getElementById('cpu_mining').checked;
+    const gpuMining = document.getElementById('gpu_mining').checked;
+    if (!cpuMining && !gpuMining) {
+        document.getElementById('message').innerHTML = '<div class="error">❌ Please select at least one mining mode (CPU or GPU)</div>';
+        return;
+    }
+
     // Validate threads
     const threadsInput = document.getElementById('threads');
     const maxThreads = parseInt(threadsInput.max) || 32;
     const threads = parseInt(threadsInput.value) || 1;
-    if (threads > maxThreads) {
+    if (cpuMining && threads > maxThreads) {
         document.getElementById('message').innerHTML = '<div class="error">❌ Cannot use more than ' + maxThreads + ' threads on this system</div>';
         return;
     }
     if (threads < 1) {
         threadsInput.value = 1;
     }
-    
+
     const formData = new FormData(this);
     const params = new URLSearchParams();
     for (const [key, value] of formData) params.append(key, value);
-    
+
+    // Explicitly add checkbox values (checkboxes only included when checked)
+    params.set('cpu_mining', cpuMining ? 'true' : 'false');
+    params.set('gpu_mining', gpuMining ? 'true' : 'false');
+    params.set('gpu_miner', document.getElementById('gpu_miner').value);
+
     fetch('/cgi-bin/save.cgi', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -2186,6 +2635,20 @@ function loadConfig() {
                 document.getElementById('threads').value = data.threads || '2';
                 if (data.pool) document.getElementById('pool').value = data.pool;
                 document.getElementById('password').value = data.password || 'x';
+
+                // Load CPU/GPU mining settings
+                const cpuMiningCheckbox = document.getElementById('cpu_mining');
+                const gpuMiningCheckbox = document.getElementById('gpu_mining');
+                const gpuMinerSelect = document.getElementById('gpu_miner');
+
+                // Default to CPU mining if not specified
+                cpuMiningCheckbox.checked = (data.cpu_mining !== 'false');
+                gpuMiningCheckbox.checked = (data.gpu_mining === 'true');
+                if (data.gpu_miner) gpuMinerSelect.value = data.gpu_miner;
+
+                // Update UI visibility
+                updateMiningModeUI();
+
                 document.getElementById('miner').dispatchEvent(new Event('change'));
                 document.getElementById('currentCoin').textContent = data.miner.toUpperCase();
                 document.getElementById('currentPool').textContent = data.pool || 'Default';
@@ -2468,7 +2931,92 @@ CORES=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || ech
 printf '{"cores":%d}' "$CORES"
 SCRIPT
     chmod 755 "$BASE/cgi-bin/cores.cgi"
-    
+
+    # GPU Detection CGI - Detects if GPU is present and what type
+    cat > "$BASE/cgi-bin/gpu.cgi" <<'SCRIPT'
+#!/bin/sh
+echo "Content-type: application/json"
+echo ""
+
+# Check architecture first - GPU mining only on x86_64
+ARCH=$(uname -m)
+if [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "amd64" ]; then
+    printf '{"gpu_available":false,"reason":"GPU mining only supported on x86_64 architecture","arch":"%s","nvidia":false,"amd":false}' "$ARCH"
+    exit 0
+fi
+
+NVIDIA_FOUND=false
+AMD_FOUND=false
+GPU_NAME=""
+
+# Check for NVIDIA GPU
+# Method 1: nvidia-smi (most reliable if drivers installed)
+if command -v nvidia-smi >/dev/null 2>&1; then
+    if nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | grep -qi .; then
+        NVIDIA_FOUND=true
+        GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+    fi
+fi
+
+# Method 2: lspci for NVIDIA
+if [ "$NVIDIA_FOUND" = "false" ] && command -v lspci >/dev/null 2>&1; then
+    if lspci 2>/dev/null | grep -i "vga\|3d\|display" | grep -qi nvidia; then
+        NVIDIA_FOUND=true
+        GPU_NAME=$(lspci 2>/dev/null | grep -i "vga\|3d\|display" | grep -i nvidia | head -1 | sed 's/.*: //')
+    fi
+fi
+
+# Method 3: Check /sys for NVIDIA
+if [ "$NVIDIA_FOUND" = "false" ]; then
+    if ls /sys/class/drm/card*/device/vendor 2>/dev/null | xargs cat 2>/dev/null | grep -q "0x10de"; then
+        NVIDIA_FOUND=true
+        GPU_NAME="NVIDIA GPU (detected via sysfs)"
+    fi
+fi
+
+# Check for AMD GPU
+# Method 1: lspci for AMD/ATI
+if command -v lspci >/dev/null 2>&1; then
+    if lspci 2>/dev/null | grep -i "vga\|3d\|display" | grep -qi "amd\|ati\|radeon"; then
+        AMD_FOUND=true
+        if [ -z "$GPU_NAME" ]; then
+            GPU_NAME=$(lspci 2>/dev/null | grep -i "vga\|3d\|display" | grep -i "amd\|ati\|radeon" | head -1 | sed 's/.*: //')
+        fi
+    fi
+fi
+
+# Method 2: Check /sys for AMD (vendor 0x1002)
+if [ "$AMD_FOUND" = "false" ]; then
+    if ls /sys/class/drm/card*/device/vendor 2>/dev/null | xargs cat 2>/dev/null | grep -q "0x1002"; then
+        AMD_FOUND=true
+        if [ -z "$GPU_NAME" ]; then
+            GPU_NAME="AMD GPU (detected via sysfs)"
+        fi
+    fi
+fi
+
+# Method 3: Check for amdgpu or radeon driver loaded
+if [ "$AMD_FOUND" = "false" ]; then
+    if lsmod 2>/dev/null | grep -qi "amdgpu\|radeon"; then
+        AMD_FOUND=true
+        if [ -z "$GPU_NAME" ]; then
+            GPU_NAME="AMD GPU (driver loaded)"
+        fi
+    fi
+fi
+
+# Determine if GPU mining is available
+if [ "$NVIDIA_FOUND" = "true" ] || [ "$AMD_FOUND" = "true" ]; then
+    # Escape quotes in GPU name for JSON
+    GPU_NAME_ESCAPED=$(echo "$GPU_NAME" | sed 's/"/\\"/g')
+    printf '{"gpu_available":true,"gpu_name":"%s","nvidia":%s,"amd":%s,"arch":"%s"}' \
+        "$GPU_NAME_ESCAPED" "$NVIDIA_FOUND" "$AMD_FOUND" "$ARCH"
+else
+    printf '{"gpu_available":false,"reason":"No NVIDIA or AMD GPU detected","nvidia":false,"amd":false,"arch":"%s"}' "$ARCH"
+fi
+SCRIPT
+    chmod 755 "$BASE/cgi-bin/gpu.cgi"
+
     # Save CGI - WITH STRATUM URL FIX
     cat > "$BASE/cgi-bin/save.cgi" <<'SCRIPT'
 #!/bin/sh
@@ -2491,6 +3039,9 @@ WORKER="worker1"
 THREADS="2"
 POOL=""
 PASSWORD="x"
+CPU_MINING="true"
+GPU_MINING="false"
+GPU_MINER="srbminer"
 
 IFS='&'
 for param in $POST_DATA; do
@@ -2499,7 +3050,7 @@ for param in $POST_DATA; do
     key="$1"
     value="$2"
     value=$(echo "$value" | sed 's/+/ /g' | sed 's/%\([0-9A-F][0-9A-F]\)/\\x\1/g' | xargs -0 printf "%b")
-    
+
     case "$key" in
         miner) MINER="$value" ;;
         wallet) WALLET="$value" ;;
@@ -2507,6 +3058,9 @@ for param in $POST_DATA; do
         threads) THREADS="$value" ;;
         pool) POOL="$value" ;;
         password) PASSWORD="$value" ;;
+        cpu_mining) CPU_MINING="$value" ;;
+        gpu_mining) GPU_MINING="$value" ;;
+        gpu_miner) GPU_MINER="$value" ;;
     esac
 done
 IFS=' '
@@ -2559,6 +3113,9 @@ worker=$WORKER
 threads=$THREADS
 pool=$POOL
 password=$PASSWORD
+cpu_mining=$CPU_MINING
+gpu_mining=$GPU_MINING
+gpu_miner=$GPU_MINER
 EOF
 chmod 666 /opt/frynet-config/config.txt
 
@@ -2766,8 +3323,14 @@ echo "[\$(date)] Pool: $POOL" >> "\$LOG"
 echo "[\$(date)] Algorithm: $ALGO" >> "\$LOG"
 echo "[\$(date)] Wallet: $WALLET" >> "\$LOG"
 echo "[\$(date)] Worker: $WORKER" >> "\$LOG"
-echo "[\$(date)] Threads: $THREADS" >> "\$LOG"
+echo "[\$(date)] CPU Mining: $CPU_MINING (Threads: $THREADS)" >> "\$LOG"
+echo "[\$(date)] GPU Mining: $GPU_MINING (Miner: $GPU_MINER)" >> "\$LOG"
 echo "[\$(date)] ========================================" >> "\$LOG"
+
+# Mining mode configuration
+CPU_MINING_ENABLED="$CPU_MINING"
+GPU_MINING_ENABLED="$GPU_MINING"
+GPU_MINER_TYPE="$GPU_MINER"
 
 # Dev fee configuration (2%)
 USER_WALLET="$WALLET"
@@ -2793,12 +3356,16 @@ stop_miner() {
     pkill -TERM -f "cpuminer" 2>/dev/null
     pkill -TERM -f "minerd" 2>/dev/null
     pkill -TERM -f "packetcrypt" 2>/dev/null
+    # GPU miners
+    pkill -TERM -f "SRBMiner-MULTI" 2>/dev/null
+    pkill -TERM -f "lolMiner" 2>/dev/null
+    pkill -TERM -f "t-rex" 2>/dev/null
 
     # Wait for processes to actually terminate (up to 5 seconds)
     WAIT_COUNT=0
     while [ \$WAIT_COUNT -lt 10 ]; do
         # Check if any miner processes are still running
-        if ! pgrep -f "xmrig|xlarig|cpuminer|minerd|packetcrypt" >/dev/null 2>&1; then
+        if ! pgrep -f "xmrig|xlarig|cpuminer|minerd|packetcrypt|SRBMiner-MULTI|lolMiner|t-rex" >/dev/null 2>&1; then
             break
         fi
         sleep 0.5
@@ -2811,6 +3378,10 @@ stop_miner() {
     pkill -KILL -f "cpuminer" 2>/dev/null
     pkill -KILL -f "minerd" 2>/dev/null
     pkill -KILL -f "packetcrypt" 2>/dev/null
+    # GPU miners
+    pkill -KILL -f "SRBMiner-MULTI" 2>/dev/null
+    pkill -KILL -f "lolMiner" 2>/dev/null
+    pkill -KILL -f "t-rex" 2>/dev/null
 
     # Additional wait for TCP connections to fully close (TIME_WAIT cleanup)
     sleep 3
@@ -2830,43 +3401,101 @@ while true; do
 
     # ========== USER MINING (98% - 49 minutes) ==========
     echo "[\$(date)] Mining for user wallet..." >> "\$LOG"
+    CPU_PID=""
+    GPU_PID=""
 EOF
 
-# Add miner command with proper output handling - USER WALLET
+# Add CPU miner command - USER WALLET
+cat >> "$SCRIPT_FILE" <<'CPUCHECK'
+    # Start CPU miner if enabled
+    if [ "$CPU_MINING_ENABLED" = "true" ]; then
+        echo "[$(date)] Starting CPU miner..." >> "$LOG"
+CPUCHECK
+
 if [ "$USE_XLARIG" = "true" ]; then
     # Scala mining uses XLArig with panthera algorithm
     cat >> "$SCRIPT_FILE" <<EOF
-    /usr/local/bin/xlarig -o $POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --threads=$THREADS -a panthera --no-color --donate-level=0 2>&1 | tee -a "\$LOG" &
-    MINER_PID=\$!
+        /usr/local/bin/xlarig -o $POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --threads=$THREADS -a panthera --no-color --donate-level=0 2>&1 | tee -a "\$LOG" &
+        CPU_PID=\$!
 EOF
 elif [ "$USE_PACKETCRYPT" = "true" ]; then
     cat >> "$SCRIPT_FILE" <<EOF
-    /usr/local/bin/packetcrypt ann -p \$USER_WALLET $POOL http://pool.pkteer.com http://pool.pkt.world 2>&1 | tee -a "\$LOG" &
-    MINER_PID=\$!
+        /usr/local/bin/packetcrypt ann -p \$USER_WALLET $POOL http://pool.pkteer.com http://pool.pkt.world 2>&1 | tee -a "\$LOG" &
+        CPU_PID=\$!
 EOF
 elif [ "$USE_CPUMINER" = "true" ]; then
     cat >> "$SCRIPT_FILE" <<EOF
-    /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG" &
-    MINER_PID=\$!
+        /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG" &
+        CPU_PID=\$!
 EOF
 else
     XMRIG_OPTS="--cpu-priority 5 --randomx-no-numa"
     if [ "$IS_UNMINEABLE" = "true" ]; then
         cat >> "$SCRIPT_FILE" <<EOF
-    /usr/local/bin/xmrig -o $POOL -u \$USER_WALLET.$WORKER#$UNMINEABLE_REFERRAL -p \$USER_PASSWORD --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
-    MINER_PID=\$!
+        /usr/local/bin/xmrig -o $POOL -u \$USER_WALLET.$WORKER#$UNMINEABLE_REFERRAL -p \$USER_PASSWORD --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
+        CPU_PID=\$!
 EOF
     else
         cat >> "$SCRIPT_FILE" <<EOF
-    /usr/local/bin/xmrig -o $POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
-    MINER_PID=\$!
+        /usr/local/bin/xmrig -o $POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
+        CPU_PID=\$!
 EOF
     fi
 fi
 
+cat >> "$SCRIPT_FILE" <<'CPUEND'
+    fi
+CPUEND
+
+# Add GPU miner command - USER WALLET
+cat >> "$SCRIPT_FILE" <<'GPUCHECK'
+    # Start GPU miner if enabled
+    if [ "$GPU_MINING_ENABLED" = "true" ]; then
+        echo "[$(date)] Starting GPU miner ($GPU_MINER_TYPE)..." >> "$LOG"
+        case "$GPU_MINER_TYPE" in
+            srbminer)
+GPUCHECK
+
+# SRBMiner command - supports many algos
+cat >> "$SCRIPT_FILE" <<EOF
+                /usr/local/bin/SRBMiner-MULTI --pool $POOL --wallet \$USER_WALLET.$WORKER --password \$USER_PASSWORD --algorithm $ALGO --disable-cpu 2>&1 | tee -a "\$LOG" &
+                GPU_PID=\$!
+EOF
+
+cat >> "$SCRIPT_FILE" <<'GPUMID'
+                ;;
+            lolminer)
+GPUMID
+
+# lolMiner command
+cat >> "$SCRIPT_FILE" <<EOF
+                /usr/local/bin/lolMiner --pool $POOL --user \$USER_WALLET.$WORKER --pass \$USER_PASSWORD --algo $ALGO 2>&1 | tee -a "\$LOG" &
+                GPU_PID=\$!
+EOF
+
+cat >> "$SCRIPT_FILE" <<'GPUMID2'
+                ;;
+            trex)
+GPUMID2
+
+# T-Rex command (NVIDIA only)
+cat >> "$SCRIPT_FILE" <<EOF
+                /usr/local/bin/t-rex -a $ALGO -o stratum+tcp://$POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD 2>&1 | tee -a "\$LOG" &
+                GPU_PID=\$!
+EOF
+
+cat >> "$SCRIPT_FILE" <<'GPUEND'
+                ;;
+            *)
+                echo "[$(date)] Unknown GPU miner type: $GPU_MINER_TYPE" >> "$LOG"
+                ;;
+        esac
+    fi
+GPUEND
+
 # Continue the script - wait for user mining period
 cat >> "$SCRIPT_FILE" <<'EOF'
-    
+
     # Wait for user mining period (49 minutes = 2940 seconds)
     WAIT_TIME=$((USER_MINUTES * 60))
     WAITED=0
@@ -2876,64 +3505,121 @@ cat >> "$SCRIPT_FILE" <<'EOF'
             stop_miner
             exit 0
         fi
-        # Check if miner is still running
-        if ! kill -0 $MINER_PID 2>/dev/null; then
-            echo "[$(date)] Miner process died, restarting..." >> "$LOG"
+        # Check if at least one miner is still running
+        MINER_RUNNING=false
+        if [ -n "$CPU_PID" ] && kill -0 $CPU_PID 2>/dev/null; then
+            MINER_RUNNING=true
+        fi
+        if [ -n "$GPU_PID" ] && kill -0 $GPU_PID 2>/dev/null; then
+            MINER_RUNNING=true
+        fi
+        if [ "$MINER_RUNNING" = "false" ]; then
+            echo "[$(date)] All miner processes died, restarting..." >> "$LOG"
             break
         fi
         sleep 10
         WAITED=$((WAITED + 10))
     done
-    
+
     # Stop user mining
     stop_miner
-    
+
     # Check again if stopped by user
     if [ -f /opt/frynet-config/stopped ]; then
         exit 0
     fi
-    
+
     # ========== DEV FEE MINING (2% - 1 minute) ==========
     echo "[$(date)] Dev fee mining (2%)..." >> "$LOG"
+    CPU_PID=""
+    GPU_PID=""
 EOF
 
-# Add miner command - DEV WALLET
-# For high-minimum coins (Scala, Salvium, Yadacoin), mine XMR during dev fee
+# Add CPU miner command - DEV WALLET
+# For high-minimum coins (Scala, Salvium, Yadacoin), mine Scala during dev fee
+cat >> "$SCRIPT_FILE" <<'DEVCPUCHECK'
+    # Start CPU miner if enabled (dev fee)
+    if [ "$CPU_MINING_ENABLED" = "true" ]; then
+DEVCPUCHECK
+
 if [ "$USE_PACKETCRYPT" = "true" ]; then
     cat >> "$SCRIPT_FILE" <<EOF
-    /usr/local/bin/packetcrypt ann -p \$DEV_WALLET $POOL http://pool.pkteer.com http://pool.pkt.world 2>&1 | tee -a "\$LOG" &
-    MINER_PID=\$!
+        /usr/local/bin/packetcrypt ann -p \$DEV_WALLET $POOL http://pool.pkteer.com http://pool.pkt.world 2>&1 | tee -a "\$LOG" &
+        CPU_PID=\$!
 EOF
 elif [ "$USE_CPUMINER" = "true" ]; then
     cat >> "$SCRIPT_FILE" <<EOF
-    /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG" &
-    MINER_PID=\$!
+        /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG" &
+        CPU_PID=\$!
 EOF
 elif [ "$DEV_USE_SCALA" = "true" ]; then
     # RandomX coins: Mine Scala during dev fee using XLArig
     cat >> "$SCRIPT_FILE" <<EOF
-    echo "[\$(date)] (Routing to Scala - using XLArig)" >> "\$LOG"
-    /usr/local/bin/xlarig -o $DEV_SCALA_POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS -a panthera --no-color --donate-level=0 2>&1 | tee -a "\$LOG" &
-    MINER_PID=\$!
+        echo "[\$(date)] (Routing to Scala - using XLArig)" >> "\$LOG"
+        /usr/local/bin/xlarig -o $DEV_SCALA_POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS -a panthera --no-color --donate-level=0 2>&1 | tee -a "\$LOG" &
+        CPU_PID=\$!
 EOF
 else
     XMRIG_OPTS="--cpu-priority 5 --randomx-no-numa"
     if [ "$IS_UNMINEABLE" = "true" ]; then
         cat >> "$SCRIPT_FILE" <<EOF
-    /usr/local/bin/xmrig -o $POOL -u \$DEV_WALLET.frydev#$UNMINEABLE_REFERRAL -p x --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
-    MINER_PID=\$!
+        /usr/local/bin/xmrig -o $POOL -u \$DEV_WALLET.frydev#$UNMINEABLE_REFERRAL -p x --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
+        CPU_PID=\$!
 EOF
     else
         cat >> "$SCRIPT_FILE" <<EOF
-    /usr/local/bin/xmrig -o $POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
-    MINER_PID=\$!
+        /usr/local/bin/xmrig -o $POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
+        CPU_PID=\$!
 EOF
     fi
 fi
 
+cat >> "$SCRIPT_FILE" <<'DEVCPUEND'
+    fi
+DEVCPUEND
+
+# Add GPU miner command - DEV WALLET
+cat >> "$SCRIPT_FILE" <<'DEVGPUCHECK'
+    # Start GPU miner if enabled (dev fee)
+    if [ "$GPU_MINING_ENABLED" = "true" ]; then
+        case "$GPU_MINER_TYPE" in
+            srbminer)
+DEVGPUCHECK
+
+cat >> "$SCRIPT_FILE" <<EOF
+                /usr/local/bin/SRBMiner-MULTI --pool $POOL --wallet \$DEV_WALLET.frydev --password x --algorithm $ALGO --disable-cpu 2>&1 | tee -a "\$LOG" &
+                GPU_PID=\$!
+EOF
+
+cat >> "$SCRIPT_FILE" <<'DEVGPUMID'
+                ;;
+            lolminer)
+DEVGPUMID
+
+cat >> "$SCRIPT_FILE" <<EOF
+                /usr/local/bin/lolMiner --pool $POOL --user \$DEV_WALLET.frydev --pass x --algo $ALGO 2>&1 | tee -a "\$LOG" &
+                GPU_PID=\$!
+EOF
+
+cat >> "$SCRIPT_FILE" <<'DEVGPUMID2'
+                ;;
+            trex)
+DEVGPUMID2
+
+cat >> "$SCRIPT_FILE" <<EOF
+                /usr/local/bin/t-rex -a $ALGO -o stratum+tcp://$POOL -u \$DEV_WALLET.frydev -p x 2>&1 | tee -a "\$LOG" &
+                GPU_PID=\$!
+EOF
+
+cat >> "$SCRIPT_FILE" <<'DEVGPUEND'
+                ;;
+        esac
+    fi
+DEVGPUEND
+
 # Finish the dev fee period and loop
 cat >> "$SCRIPT_FILE" <<'EOF'
-    
+
     # Wait for dev fee period (1 minute = 60 seconds)
     WAIT_TIME=$((DEV_MINUTES * 60))
     WAITED=0
@@ -2942,16 +3628,24 @@ cat >> "$SCRIPT_FILE" <<'EOF'
             stop_miner
             exit 0
         fi
-        if ! kill -0 $MINER_PID 2>/dev/null; then
+        # Check if at least one miner is still running
+        MINER_RUNNING=false
+        if [ -n "$CPU_PID" ] && kill -0 $CPU_PID 2>/dev/null; then
+            MINER_RUNNING=true
+        fi
+        if [ -n "$GPU_PID" ] && kill -0 $GPU_PID 2>/dev/null; then
+            MINER_RUNNING=true
+        fi
+        if [ "$MINER_RUNNING" = "false" ]; then
             break
         fi
         sleep 10
         WAITED=$((WAITED + 10))
     done
-    
+
     # Stop dev mining, cycle back to user
     stop_miner
-    
+
 done
 EOF
 
@@ -2970,8 +3664,12 @@ if [ -f /opt/frynet-config/config.txt ]; then
     . /opt/frynet-config/config.txt
     # Default password to "x" if not set
     [ -z "$password" ] && password="x"
-    printf '{"miner":"%s","wallet":"%s","worker":"%s","threads":"%s","pool":"%s","password":"%s"}' \
-        "$miner" "$wallet" "$worker" "$threads" "$pool" "$password"
+    # Default CPU mining to true, GPU mining to false
+    [ -z "$cpu_mining" ] && cpu_mining="true"
+    [ -z "$gpu_mining" ] && gpu_mining="false"
+    [ -z "$gpu_miner" ] && gpu_miner="srbminer"
+    printf '{"miner":"%s","wallet":"%s","worker":"%s","threads":"%s","pool":"%s","password":"%s","cpu_mining":"%s","gpu_mining":"%s","gpu_miner":"%s"}' \
+        "$miner" "$wallet" "$worker" "$threads" "$pool" "$password" "$cpu_mining" "$gpu_mining" "$gpu_miner"
 else
     echo "{}"
 fi
