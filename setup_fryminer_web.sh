@@ -2689,8 +2689,9 @@ case "$MINER" in
         DEV_USE_SCALA=true
         ;;
     scala)
-        # Scala - mine directly to Scala wallet
+        # Scala - mine directly to Scala wallet using XLArig
         DEV_WALLET_FOR_COIN="$DEV_SCALA_WALLET"
+        DEV_USE_SCALA=true
         ;;
     verus)
         DEV_WALLET_FOR_COIN="RRhFqT2bfXQmsnqtyrVxikhy94KqnVf5nt"
