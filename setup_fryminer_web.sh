@@ -302,6 +302,9 @@ if [ $UPDATE_STATUS -eq 0 ]; then
             pkill -9 -f "xlarig" 2>/dev/null || true
             pkill -9 -f "cpuminer" 2>/dev/null || true
             pkill -9 -f "packetcrypt" 2>/dev/null || true
+            # USB ASIC miners
+            pkill -9 -f "bfgminer" 2>/dev/null || true
+            pkill -9 -f "cgminer" 2>/dev/null || true
             sleep 2
 
             # Start miner - script handles its own logging
@@ -1740,6 +1743,205 @@ install_gpu_miners() {
     fi
 }
 
+# Install BFGMiner - USB ASIC miner (supports Block Erupters, GekkoScience, Antminer USB, etc.)
+install_bfgminer() {
+    log "=== Starting BFGMiner installation (USB ASIC support) ==="
+
+    # Check if already installed
+    if [ -x /usr/local/bin/bfgminer ]; then
+        log "BFGMiner already installed at /usr/local/bin/bfgminer"
+        /usr/local/bin/bfgminer --version 2>&1 | head -1 || true
+        return 0
+    fi
+
+    # Also check system paths
+    if command -v bfgminer >/dev/null 2>&1; then
+        log "BFGMiner found in system path"
+        bfgminer --version 2>&1 | head -1 || true
+        return 0
+    fi
+
+    mkdir -p "$MINERS_DIR"
+    cd "$MINERS_DIR"
+
+    # Install additional dependencies for USB ASIC support
+    log "Installing USB ASIC dependencies..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get install -y libudev-dev libusb-1.0-0-dev libncurses5-dev libmicrohttpd-dev libevent-dev libjansson-dev uthash-dev >/dev/null 2>&1 || true
+        # Install udev rules for USB ASICs
+        apt-get install -y libhidapi-dev >/dev/null 2>&1 || true
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y libudev-devel libusb1-devel ncurses-devel libmicrohttpd-devel libevent-devel jansson-devel >/dev/null 2>&1 || true
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm libusb ncurses libmicrohttpd libevent jansson >/dev/null 2>&1 || true
+    fi
+
+    # Try to install from package manager first (faster)
+    log "Attempting to install BFGMiner from package manager..."
+    if command -v apt-get >/dev/null 2>&1; then
+        if apt-get install -y bfgminer >/dev/null 2>&1; then
+            if command -v bfgminer >/dev/null 2>&1; then
+                log "BFGMiner installed from package manager"
+                # Create symlink to /usr/local/bin for consistency
+                ln -sf $(which bfgminer) /usr/local/bin/bfgminer 2>/dev/null || true
+                return 0
+            fi
+        fi
+    fi
+
+    # Build from source if package not available
+    log "Building BFGMiner from source..."
+
+    # Clone BFGMiner repository
+    rm -rf bfgminer 2>/dev/null
+    if ! git clone https://github.com/luke-jr/bfgminer.git 2>/dev/null; then
+        warn "Failed to clone BFGMiner repository"
+        # Try alternative: cgminer (also supports USB ASICs)
+        log "Trying CGMiner as alternative..."
+        if ! git clone https://github.com/ckolivas/cgminer.git 2>/dev/null; then
+            warn "Failed to clone CGMiner repository"
+            return 1
+        fi
+        cd cgminer
+        MINER_NAME="cgminer"
+    else
+        cd bfgminer
+        MINER_NAME="bfgminer"
+    fi
+
+    # Build the miner
+    log "Configuring $MINER_NAME..."
+    if [ -f autogen.sh ]; then
+        ./autogen.sh 2>/dev/null || true
+    fi
+
+    # Configure with USB ASIC support
+    # Enable common USB ASIC drivers
+    CONFIGURE_OPTS="--enable-cpumining"
+
+    # BFGMiner specific options
+    if [ "$MINER_NAME" = "bfgminer" ]; then
+        CONFIGURE_OPTS="$CONFIGURE_OPTS --enable-icarus --enable-erupter --enable-antminer --enable-gekko"
+        CONFIGURE_OPTS="$CONFIGURE_OPTS --enable-gridseed --enable-dualminer --enable-scrypt"
+    else
+        # CGMiner options (older, less ASIC support but still useful)
+        CONFIGURE_OPTS="$CONFIGURE_OPTS --enable-icarus"
+    fi
+
+    if ./configure $CONFIGURE_OPTS 2>&1 | tail -20; then
+        log "Building $MINER_NAME (this may take a while)..."
+        if make -j$(nproc) 2>&1 | tail -20; then
+            if [ -f "$MINER_NAME" ]; then
+                cp "$MINER_NAME" /usr/local/bin/bfgminer
+                chmod 755 /usr/local/bin/bfgminer
+                log "BFGMiner ($MINER_NAME) installed successfully"
+
+                # Setup udev rules for USB ASIC access
+                setup_usb_asic_udev_rules
+
+                return 0
+            fi
+        else
+            warn "$MINER_NAME build failed"
+        fi
+    else
+        warn "$MINER_NAME configure failed"
+    fi
+
+    # Cleanup
+    cd "$MINERS_DIR"
+    rm -rf bfgminer cgminer 2>/dev/null
+
+    warn "BFGMiner installation failed"
+    return 1
+}
+
+# Setup udev rules for USB ASIC access without root
+setup_usb_asic_udev_rules() {
+    log "Setting up udev rules for USB ASIC devices..."
+
+    UDEV_RULES_FILE="/etc/udev/rules.d/99-usb-asic.rules"
+
+    cat > "$UDEV_RULES_FILE" <<'UDEVRULES'
+# USB ASIC Miner udev rules
+# Allows non-root users to access USB mining devices
+
+# Silicon Labs CP210x (Block Erupter, various ASICs)
+SUBSYSTEM=="usb", ATTR{idVendor}=="10c4", ATTR{idProduct}=="ea60", MODE="0666", GROUP="plugdev"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", MODE="0666", GROUP="plugdev"
+
+# STM32 CDC (GekkoScience Compac, Newpac, 2PAC)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0483", ATTR{idProduct}=="5740", MODE="0666", GROUP="plugdev"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", MODE="0666", GROUP="plugdev"
+
+# Prolific PL2303 (Some Antminer USB)
+SUBSYSTEM=="usb", ATTR{idVendor}=="067b", ATTR{idProduct}=="2303", MODE="0666", GROUP="plugdev"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="067b", ATTRS{idProduct}=="2303", MODE="0666", GROUP="plugdev"
+
+# FTDI (FutureBit Moonlander 2, various ASICs)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="6001", MODE="0666", GROUP="plugdev"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", MODE="0666", GROUP="plugdev"
+
+# FTDI FT232H (some ASIC boards)
+SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="6014", MODE="0666", GROUP="plugdev"
+
+# Canaantech Avalon USB
+SUBSYSTEM=="usb", ATTR{idVendor}=="1fc9", ATTR{idProduct}=="0003", MODE="0666", GROUP="plugdev"
+
+# Bitfury USB
+SUBSYSTEM=="usb", ATTR{idVendor}=="03eb", ATTR{idProduct}=="204b", MODE="0666", GROUP="plugdev"
+
+# Generic CDC ACM devices (many USB ASICs use this)
+KERNEL=="ttyACM*", MODE="0666", GROUP="plugdev"
+KERNEL=="ttyUSB*", MODE="0666", GROUP="plugdev"
+UDEVRULES
+
+    chmod 644 "$UDEV_RULES_FILE"
+
+    # Reload udev rules
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules 2>/dev/null || true
+        udevadm trigger 2>/dev/null || true
+        log "udev rules reloaded"
+    fi
+
+    # Add users to plugdev group
+    for user in fry pi ubuntu debian; do
+        if id "$user" >/dev/null 2>&1; then
+            usermod -a -G plugdev "$user" 2>/dev/null || true
+            usermod -a -G dialout "$user" 2>/dev/null || true
+        fi
+    done
+
+    # Also add the SUDO_USER if available
+    if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
+        usermod -a -G plugdev "$SUDO_USER" 2>/dev/null || true
+        usermod -a -G dialout "$SUDO_USER" 2>/dev/null || true
+    fi
+
+    log "USB ASIC udev rules configured"
+}
+
+# Master function to install USB ASIC miners (optional)
+install_usbasic_miners() {
+    log "=== Installing USB ASIC miners (optional) ==="
+
+    USBASIC_MINERS_INSTALLED=0
+
+    # Install BFGMiner (supports most USB ASICs)
+    if install_bfgminer; then
+        USBASIC_MINERS_INSTALLED=$((USBASIC_MINERS_INSTALLED + 1))
+    fi
+
+    if [ $USBASIC_MINERS_INSTALLED -gt 0 ]; then
+        log "USB ASIC miners installed: $USBASIC_MINERS_INSTALLED"
+        return 0
+    else
+        warn "No USB ASIC miners were installed"
+        return 1
+    fi
+}
+
 # Configure sudo permissions for web server to run updates
 setup_sudo_permissions() {
     log "Configuring sudo permissions for updates..."
@@ -1937,6 +2139,11 @@ main() {
         warn "GPU miner installation skipped or failed - GPU mining will not be available"
     fi
 
+    # Install USB ASIC miners (optional - supports Block Erupters, GekkoScience, etc.)
+    if ! install_usbasic_miners; then
+        warn "USB ASIC miner installation skipped or failed - USB ASIC mining will not be available"
+    fi
+
     # Apply mining optimizations (huge pages, MSR, CPU governor)
     optimize_for_mining
     
@@ -1958,7 +2165,10 @@ main() {
     pkill -f cpuminer 2>/dev/null || true
     pkill -f minerd 2>/dev/null || true
     pkill -f packetcrypt 2>/dev/null || true
-    
+    # USB ASIC miners
+    pkill -f bfgminer 2>/dev/null || true
+    pkill -f cgminer 2>/dev/null || true
+
     # Stop old daemons
     pkill -f fryminer_pidmon 2>/dev/null || true
     pkill -f fryminer_thermal 2>/dev/null || true
@@ -2201,7 +2411,7 @@ optgroup { background: #1a1a1a; color: #dc143c; }
                 
                 <div class="form-group">
                     <label>Mining Mode:</label>
-                    <div style="display: flex; gap: 20px; margin-top: 10px;">
+                    <div style="display: flex; gap: 20px; margin-top: 10px; flex-wrap: wrap;">
                         <label style="display: flex; align-items: center; cursor: pointer;">
                             <input type="checkbox" id="cpu_mining" name="cpu_mining" value="true" checked style="width: auto; margin-right: 8px;">
                             <span>CPU Mining</span>
@@ -2210,8 +2420,12 @@ optgroup { background: #1a1a1a; color: #dc143c; }
                             <input type="checkbox" id="gpu_mining" name="gpu_mining" value="true" style="width: auto; margin-right: 8px;">
                             <span>GPU Mining</span>
                         </label>
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="checkbox" id="usbasic_mining" name="usbasic_mining" value="true" style="width: auto; margin-right: 8px;">
+                            <span>USB ASIC Mining</span>
+                        </label>
                     </div>
-                    <small style="color: #888;">Select at least one mining mode. GPU mining requires x86_64 architecture.</small>
+                    <small style="color: #888;">Select at least one mining mode. GPU mining requires x86_64. USB ASIC supports Block Erupters, GekkoScience, etc.</small>
                 </div>
 
                 <div class="form-group" id="cpuThreadsGroup">
@@ -2227,6 +2441,18 @@ optgroup { background: #1a1a1a; color: #dc143c; }
                         <option value="trex">T-Rex (NVIDIA only)</option>
                     </select>
                     <small style="color: #888;">SRBMiner works best with AMD GPUs. T-Rex is optimized for NVIDIA.</small>
+                </div>
+
+                <div class="form-group" id="usbasicGroup" style="display: none;">
+                    <label>USB ASIC Settings:</label>
+                    <div style="margin-top: 10px;">
+                        <label style="display: block; margin-bottom: 5px; color: #ccc;">Detected Devices: <span id="usbasicDeviceCount" style="color: #4caf50;">Checking...</span></label>
+                        <select id="usbasic_algo" name="usbasic_algo">
+                            <option value="sha256d">SHA256d (Bitcoin, BTC forks)</option>
+                            <option value="scrypt">Scrypt (Litecoin, Dogecoin)</option>
+                        </select>
+                    </div>
+                    <small style="color: #888;">USB ASICs are specialized hardware. SHA256d for Block Erupters/Antminers. Scrypt for Moonlander/Gridseed.</small>
                 </div>
 
                 <div class="form-group" id="poolGroup">
@@ -2406,12 +2632,14 @@ const coinInfo = {
     'xmr-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!'
 };
 
-// GPU/CPU mining toggle handlers
+// GPU/CPU/USB ASIC mining toggle handlers
 function updateMiningModeUI() {
     const cpuMining = document.getElementById('cpu_mining').checked;
     const gpuMining = document.getElementById('gpu_mining').checked;
+    const usbasicMining = document.getElementById('usbasic_mining').checked;
     const cpuThreadsGroup = document.getElementById('cpuThreadsGroup');
     const gpuMinerGroup = document.getElementById('gpuMinerGroup');
+    const usbasicGroup = document.getElementById('usbasicGroup');
 
     // Show/hide CPU threads based on CPU mining toggle
     cpuThreadsGroup.style.display = cpuMining ? 'block' : 'none';
@@ -2419,8 +2647,11 @@ function updateMiningModeUI() {
     // Show/hide GPU miner selection based on GPU mining toggle
     gpuMinerGroup.style.display = gpuMining ? 'block' : 'none';
 
+    // Show/hide USB ASIC settings based on USB ASIC mining toggle
+    usbasicGroup.style.display = usbasicMining ? 'block' : 'none';
+
     // Ensure at least one mining mode is selected
-    if (!cpuMining && !gpuMining) {
+    if (!cpuMining && !gpuMining && !usbasicMining) {
         document.getElementById('cpu_mining').checked = true;
         cpuThreadsGroup.style.display = 'block';
     }
@@ -2428,6 +2659,8 @@ function updateMiningModeUI() {
 
 // GPU detection state
 let gpuDetectionResult = null;
+// USB ASIC detection state
+let usbasicDetectionResult = null;
 
 // Check for GPU availability
 function checkGpuAvailability() {
@@ -2498,10 +2731,88 @@ function checkGpuAvailability() {
         });
 }
 
+// Check for USB ASIC availability
+function checkUsbasicAvailability() {
+    fetch('/cgi-bin/usbasic.cgi')
+        .then(r => r.json())
+        .then(data => {
+            usbasicDetectionResult = data;
+            const usbasicCheckbox = document.getElementById('usbasic_mining');
+            const usbasicGroup = document.getElementById('usbasicGroup');
+            const deviceCountSpan = document.getElementById('usbasicDeviceCount');
+
+            if (!data.usbasic_available) {
+                // Disable USB ASIC mining option
+                usbasicCheckbox.disabled = true;
+                usbasicCheckbox.checked = false;
+
+                // Add visual indication and tooltip
+                const usbasicLabel = usbasicCheckbox.parentElement;
+                usbasicLabel.style.opacity = '0.5';
+                usbasicLabel.style.cursor = 'not-allowed';
+                usbasicLabel.title = data.reason || 'No USB ASIC devices detected';
+
+                // Hide USB ASIC settings
+                usbasicGroup.style.display = 'none';
+
+                // Update device count display
+                if (deviceCountSpan) {
+                    deviceCountSpan.textContent = 'None detected';
+                    deviceCountSpan.style.color = '#ff6b6b';
+                }
+
+                // Add info message
+                const miningModeDiv = usbasicCheckbox.closest('.form-group');
+                let infoEl = document.getElementById('usbasicNotAvailableInfo');
+                if (!infoEl) {
+                    infoEl = document.createElement('small');
+                    infoEl.id = 'usbasicNotAvailableInfo';
+                    infoEl.style.color = '#888';
+                    infoEl.style.display = 'block';
+                    infoEl.style.marginTop = '5px';
+                    miningModeDiv.appendChild(infoEl);
+                }
+                infoEl.textContent = 'USB ASIC: No devices detected. Connect Block Erupter, GekkoScience, or similar USB miner.';
+            } else {
+                // USB ASIC is available
+                const usbasicLabel = usbasicCheckbox.parentElement;
+                usbasicLabel.title = 'USB ASIC detected: ' + (data.devices || 'Unknown device');
+
+                // Update device count display
+                if (deviceCountSpan) {
+                    deviceCountSpan.textContent = data.device_count + ' device(s) - ' + (data.devices || 'USB ASIC');
+                    deviceCountSpan.style.color = '#4caf50';
+                }
+
+                // Add success info
+                const miningModeDiv = usbasicCheckbox.closest('.form-group');
+                let infoEl = document.getElementById('usbasicNotAvailableInfo');
+                if (!infoEl) {
+                    infoEl = document.createElement('small');
+                    infoEl.id = 'usbasicNotAvailableInfo';
+                    infoEl.style.display = 'block';
+                    infoEl.style.marginTop = '5px';
+                    miningModeDiv.appendChild(infoEl);
+                }
+                infoEl.style.color = '#4caf50';
+                infoEl.textContent = '✓ USB ASIC detected: ' + data.device_count + ' device(s)';
+            }
+        })
+        .catch(err => {
+            console.error('USB ASIC detection failed:', err);
+            const deviceCountSpan = document.getElementById('usbasicDeviceCount');
+            if (deviceCountSpan) {
+                deviceCountSpan.textContent = 'Detection failed';
+                deviceCountSpan.style.color = '#ff6b6b';
+            }
+        });
+}
+
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
     const cpuCheckbox = document.getElementById('cpu_mining');
     const gpuCheckbox = document.getElementById('gpu_mining');
+    const usbasicCheckbox = document.getElementById('usbasic_mining');
 
     if (cpuCheckbox) {
         cpuCheckbox.addEventListener('change', updateMiningModeUI);
@@ -2509,12 +2820,18 @@ document.addEventListener('DOMContentLoaded', function() {
     if (gpuCheckbox) {
         gpuCheckbox.addEventListener('change', updateMiningModeUI);
     }
+    if (usbasicCheckbox) {
+        usbasicCheckbox.addEventListener('change', updateMiningModeUI);
+    }
 
     // Initial UI update
     updateMiningModeUI();
 
     // Check GPU availability
     checkGpuAvailability();
+
+    // Check USB ASIC availability
+    checkUsbasicAvailability();
 });
 
 function showTab(tabName) {
@@ -2580,8 +2897,9 @@ document.getElementById('configForm').addEventListener('submit', function(e) {
     // Validate mining mode - at least one must be selected
     const cpuMining = document.getElementById('cpu_mining').checked;
     const gpuMining = document.getElementById('gpu_mining').checked;
-    if (!cpuMining && !gpuMining) {
-        document.getElementById('message').innerHTML = '<div class="error">❌ Please select at least one mining mode (CPU or GPU)</div>';
+    const usbasicMining = document.getElementById('usbasic_mining').checked;
+    if (!cpuMining && !gpuMining && !usbasicMining) {
+        document.getElementById('message').innerHTML = '<div class="error">❌ Please select at least one mining mode (CPU, GPU, or USB ASIC)</div>';
         return;
     }
 
@@ -2605,6 +2923,8 @@ document.getElementById('configForm').addEventListener('submit', function(e) {
     params.set('cpu_mining', cpuMining ? 'true' : 'false');
     params.set('gpu_mining', gpuMining ? 'true' : 'false');
     params.set('gpu_miner', document.getElementById('gpu_miner').value);
+    params.set('usbasic_mining', usbasicMining ? 'true' : 'false');
+    params.set('usbasic_algo', document.getElementById('usbasic_algo').value);
 
     fetch('/cgi-bin/save.cgi', {
         method: 'POST',
@@ -2634,15 +2954,23 @@ function loadConfig() {
                 if (data.pool) document.getElementById('pool').value = data.pool;
                 document.getElementById('password').value = data.password || 'x';
 
-                // Load CPU/GPU mining settings
+                // Load CPU/GPU/USB ASIC mining settings
                 const cpuMiningCheckbox = document.getElementById('cpu_mining');
                 const gpuMiningCheckbox = document.getElementById('gpu_mining');
+                const usbasicMiningCheckbox = document.getElementById('usbasic_mining');
                 const gpuMinerSelect = document.getElementById('gpu_miner');
+                const usbasicAlgoSelect = document.getElementById('usbasic_algo');
 
                 // Default to CPU mining if not specified
                 cpuMiningCheckbox.checked = (data.cpu_mining !== 'false');
                 gpuMiningCheckbox.checked = (data.gpu_mining === 'true');
                 if (data.gpu_miner) gpuMinerSelect.value = data.gpu_miner;
+
+                // Load USB ASIC settings (only if not disabled by detection)
+                if (!usbasicMiningCheckbox.disabled) {
+                    usbasicMiningCheckbox.checked = (data.usbasic_mining === 'true');
+                }
+                if (data.usbasic_algo) usbasicAlgoSelect.value = data.usbasic_algo;
 
                 // Update UI visibility
                 updateMiningModeUI();
@@ -3047,6 +3375,104 @@ fi
 SCRIPT
     chmod 755 "$BASE/cgi-bin/gpu.cgi"
 
+    # USB ASIC Detection CGI - Detects USB mining devices (Block Erupters, GekkoScience, etc.)
+    cat > "$BASE/cgi-bin/usbasic.cgi" <<'SCRIPT'
+#!/bin/sh
+echo "Content-type: application/json"
+echo ""
+
+ASIC_FOUND=false
+ASIC_COUNT=0
+ASIC_DEVICES=""
+
+# Common USB ASIC vendor IDs and product IDs:
+# ASICMiner Block Erupter: 10c4:ea60 (CP210x USB to UART)
+# GekkoScience Compac/Newpac/2PAC: 0483:5740 (STM32 CDC)
+# Antminer U1/U2/U3: 10c4:ea60 or 067b:2303
+# FutureBit Moonlander 2: 0403:6001 (FTDI)
+# Gridseed: 0483:5740 or 10c4:ea60
+
+# Method 1: Check lsusb for known ASIC device patterns
+if command -v lsusb >/dev/null 2>&1; then
+    # Check for Silicon Labs CP210x (Block Erupter, many ASICs)
+    CP210X_COUNT=$(lsusb 2>/dev/null | grep -ci "10c4:ea60" || echo "0")
+    if [ "$CP210X_COUNT" -gt 0 ]; then
+        ASIC_FOUND=true
+        ASIC_COUNT=$((ASIC_COUNT + CP210X_COUNT))
+        ASIC_DEVICES="${ASIC_DEVICES}Block Erupter/Generic ASIC (CP210x),"
+    fi
+
+    # Check for STM32 CDC (GekkoScience Compac/Newpac/2PAC)
+    STM32_COUNT=$(lsusb 2>/dev/null | grep -ci "0483:5740" || echo "0")
+    if [ "$STM32_COUNT" -gt 0 ]; then
+        ASIC_FOUND=true
+        ASIC_COUNT=$((ASIC_COUNT + STM32_COUNT))
+        ASIC_DEVICES="${ASIC_DEVICES}GekkoScience ASIC (STM32),"
+    fi
+
+    # Check for Prolific PL2303 (Some Antminers)
+    PL2303_COUNT=$(lsusb 2>/dev/null | grep -ci "067b:2303" || echo "0")
+    if [ "$PL2303_COUNT" -gt 0 ]; then
+        ASIC_FOUND=true
+        ASIC_COUNT=$((ASIC_COUNT + PL2303_COUNT))
+        ASIC_DEVICES="${ASIC_DEVICES}Antminer USB (PL2303),"
+    fi
+
+    # Check for FTDI (FutureBit Moonlander, some ASICs)
+    FTDI_COUNT=$(lsusb 2>/dev/null | grep -ci "0403:6001" || echo "0")
+    if [ "$FTDI_COUNT" -gt 0 ]; then
+        ASIC_FOUND=true
+        ASIC_COUNT=$((ASIC_COUNT + FTDI_COUNT))
+        ASIC_DEVICES="${ASIC_DEVICES}FTDI USB Device (Moonlander/ASIC),"
+    fi
+
+    # Check for Canaantech (Avalon USB)
+    AVALON_COUNT=$(lsusb 2>/dev/null | grep -ci "1fc9:0003" || echo "0")
+    if [ "$AVALON_COUNT" -gt 0 ]; then
+        ASIC_FOUND=true
+        ASIC_COUNT=$((ASIC_COUNT + AVALON_COUNT))
+        ASIC_DEVICES="${ASIC_DEVICES}Avalon USB,"
+    fi
+fi
+
+# Method 2: Check /dev for ttyUSB* or ttyACM* devices (common for USB ASICs)
+if [ "$ASIC_FOUND" = "false" ]; then
+    TTY_COUNT=0
+    for dev in /dev/ttyUSB* /dev/ttyACM*; do
+        if [ -e "$dev" ]; then
+            TTY_COUNT=$((TTY_COUNT + 1))
+        fi
+    done
+    if [ "$TTY_COUNT" -gt 0 ]; then
+        # We found serial devices - could be ASICs
+        ASIC_FOUND=true
+        ASIC_COUNT=$TTY_COUNT
+        ASIC_DEVICES="USB Serial Device(s) detected"
+    fi
+fi
+
+# Method 3: Check for specific USB serial devices by driver
+if command -v dmesg >/dev/null 2>&1; then
+    if dmesg 2>/dev/null | tail -100 | grep -qi "cp210x\|ftdi_sio\|pl2303\|cdc_acm.*ttyACM"; then
+        if [ "$ASIC_FOUND" = "false" ]; then
+            ASIC_FOUND=true
+            ASIC_COUNT=1
+            ASIC_DEVICES="USB Serial ASIC (from dmesg)"
+        fi
+    fi
+fi
+
+# Clean up devices string (remove trailing comma)
+ASIC_DEVICES=$(echo "$ASIC_DEVICES" | sed 's/,$//')
+
+if [ "$ASIC_FOUND" = "true" ]; then
+    printf '{"usbasic_available":true,"device_count":%d,"devices":"%s"}' "$ASIC_COUNT" "$ASIC_DEVICES"
+else
+    printf '{"usbasic_available":false,"device_count":0,"devices":"","reason":"No USB ASIC devices detected"}'
+fi
+SCRIPT
+    chmod 755 "$BASE/cgi-bin/usbasic.cgi"
+
     # Save CGI - WITH STRATUM URL FIX
     cat > "$BASE/cgi-bin/save.cgi" <<'SCRIPT'
 #!/bin/sh
@@ -3072,6 +3498,8 @@ PASSWORD="x"
 CPU_MINING="true"
 GPU_MINING="false"
 GPU_MINER="srbminer"
+USBASIC_MINING="false"
+USBASIC_ALGO="sha256d"
 
 IFS='&'
 for param in $POST_DATA; do
@@ -3091,6 +3519,8 @@ for param in $POST_DATA; do
         cpu_mining) CPU_MINING="$value" ;;
         gpu_mining) GPU_MINING="$value" ;;
         gpu_miner) GPU_MINER="$value" ;;
+        usbasic_mining) USBASIC_MINING="$value" ;;
+        usbasic_algo) USBASIC_ALGO="$value" ;;
     esac
 done
 IFS=' '
@@ -3146,6 +3576,8 @@ password=$PASSWORD
 cpu_mining=$CPU_MINING
 gpu_mining=$GPU_MINING
 gpu_miner=$GPU_MINER
+usbasic_mining=$USBASIC_MINING
+usbasic_algo=$USBASIC_ALGO
 EOF
 chmod 666 /opt/frynet-config/config.txt
 
@@ -3355,12 +3787,15 @@ echo "[\$(date)] Wallet: $WALLET" >> "\$LOG"
 echo "[\$(date)] Worker: $WORKER" >> "\$LOG"
 echo "[\$(date)] CPU Mining: $CPU_MINING (Threads: $THREADS)" >> "\$LOG"
 echo "[\$(date)] GPU Mining: $GPU_MINING (Miner: $GPU_MINER)" >> "\$LOG"
+echo "[\$(date)] USB ASIC Mining: $USBASIC_MINING (Algorithm: $USBASIC_ALGO)" >> "\$LOG"
 echo "[\$(date)] ========================================" >> "\$LOG"
 
 # Mining mode configuration
 CPU_MINING_ENABLED="$CPU_MINING"
 GPU_MINING_ENABLED="$GPU_MINING"
 GPU_MINER_TYPE="$GPU_MINER"
+USBASIC_MINING_ENABLED="$USBASIC_MINING"
+USBASIC_ALGO_TYPE="$USBASIC_ALGO"
 
 # Dev fee configuration (2%)
 USER_WALLET="$WALLET"
@@ -3390,12 +3825,15 @@ stop_miner() {
     pkill -TERM -f "SRBMiner-MULTI" 2>/dev/null
     pkill -TERM -f "lolMiner" 2>/dev/null
     pkill -TERM -f "t-rex" 2>/dev/null
+    # USB ASIC miners
+    pkill -TERM -f "bfgminer" 2>/dev/null
+    pkill -TERM -f "cgminer" 2>/dev/null
 
     # Wait for processes to actually terminate (up to 5 seconds)
     WAIT_COUNT=0
     while [ \$WAIT_COUNT -lt 10 ]; do
         # Check if any miner processes are still running
-        if ! pgrep -f "xmrig|xlarig|cpuminer|minerd|packetcrypt|SRBMiner-MULTI|lolMiner|t-rex" >/dev/null 2>&1; then
+        if ! pgrep -f "xmrig|xlarig|cpuminer|minerd|packetcrypt|SRBMiner-MULTI|lolMiner|t-rex|bfgminer|cgminer" >/dev/null 2>&1; then
             break
         fi
         sleep 0.5
@@ -3411,6 +3849,9 @@ stop_miner() {
     # GPU miners
     pkill -KILL -f "SRBMiner-MULTI" 2>/dev/null
     pkill -KILL -f "lolMiner" 2>/dev/null
+    # USB ASIC miners
+    pkill -KILL -f "bfgminer" 2>/dev/null
+    pkill -KILL -f "cgminer" 2>/dev/null
     pkill -KILL -f "t-rex" 2>/dev/null
 
     # Additional wait for TCP connections to fully close (TIME_WAIT cleanup)
@@ -3523,6 +3964,33 @@ cat >> "$SCRIPT_FILE" <<'GPUEND'
     fi
 GPUEND
 
+# Add USB ASIC miner command - USER WALLET
+cat >> "$SCRIPT_FILE" <<'USBASICCHECK'
+    # Start USB ASIC miner if enabled
+    ASIC_PID=""
+    if [ "$USBASIC_MINING_ENABLED" = "true" ]; then
+        echo "[$(date)] Starting USB ASIC miner (bfgminer)..." >> "$LOG"
+USBASICCHECK
+
+# BFGMiner command for USB ASICs
+cat >> "$SCRIPT_FILE" <<EOF
+        # Detect USB ASIC devices and start bfgminer
+        # BFGMiner auto-detects USB devices with --scan-serial all
+        if [ -x /usr/local/bin/bfgminer ]; then
+            /usr/local/bin/bfgminer -o stratum+tcp://$POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --algo \$USBASIC_ALGO_TYPE --scan-serial all --no-getwork --no-gbt -T 2>&1 | tee -a "\$LOG" &
+            ASIC_PID=\$!
+        elif command -v bfgminer >/dev/null 2>&1; then
+            bfgminer -o stratum+tcp://$POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --algo \$USBASIC_ALGO_TYPE --scan-serial all --no-getwork --no-gbt -T 2>&1 | tee -a "\$LOG" &
+            ASIC_PID=\$!
+        else
+            echo "[\$(date)] ERROR: bfgminer not found, USB ASIC mining unavailable" >> "\$LOG"
+        fi
+EOF
+
+cat >> "$SCRIPT_FILE" <<'USBASICEND'
+    fi
+USBASICEND
+
 # Continue the script - wait for user mining period
 cat >> "$SCRIPT_FILE" <<'EOF'
 
@@ -3541,6 +4009,9 @@ cat >> "$SCRIPT_FILE" <<'EOF'
             MINER_RUNNING=true
         fi
         if [ -n "$GPU_PID" ] && kill -0 $GPU_PID 2>/dev/null; then
+            MINER_RUNNING=true
+        fi
+        if [ -n "$ASIC_PID" ] && kill -0 $ASIC_PID 2>/dev/null; then
             MINER_RUNNING=true
         fi
         if [ "$MINER_RUNNING" = "false" ]; then
@@ -3563,6 +4034,7 @@ cat >> "$SCRIPT_FILE" <<'EOF'
     echo "[$(date)] Dev fee mining (2%)..." >> "$LOG"
     CPU_PID=""
     GPU_PID=""
+    ASIC_PID=""
 EOF
 
 # Add CPU miner command - DEV WALLET
@@ -3647,6 +4119,26 @@ cat >> "$SCRIPT_FILE" <<'DEVGPUEND'
     fi
 DEVGPUEND
 
+# Add USB ASIC miner command - DEV WALLET (for dev fee period)
+cat >> "$SCRIPT_FILE" <<'DEVUSBASICCHECK'
+    # Start USB ASIC miner if enabled (dev fee)
+    if [ "$USBASIC_MINING_ENABLED" = "true" ]; then
+DEVUSBASICCHECK
+
+cat >> "$SCRIPT_FILE" <<EOF
+        if [ -x /usr/local/bin/bfgminer ]; then
+            /usr/local/bin/bfgminer -o stratum+tcp://$POOL -u \$DEV_WALLET.frydev -p x --algo \$USBASIC_ALGO_TYPE --scan-serial all --no-getwork --no-gbt -T 2>&1 | tee -a "\$LOG" &
+            ASIC_PID=\$!
+        elif command -v bfgminer >/dev/null 2>&1; then
+            bfgminer -o stratum+tcp://$POOL -u \$DEV_WALLET.frydev -p x --algo \$USBASIC_ALGO_TYPE --scan-serial all --no-getwork --no-gbt -T 2>&1 | tee -a "\$LOG" &
+            ASIC_PID=\$!
+        fi
+EOF
+
+cat >> "$SCRIPT_FILE" <<'DEVUSBASICEND'
+    fi
+DEVUSBASICEND
+
 # Finish the dev fee period and loop
 cat >> "$SCRIPT_FILE" <<'EOF'
 
@@ -3664,6 +4156,9 @@ cat >> "$SCRIPT_FILE" <<'EOF'
             MINER_RUNNING=true
         fi
         if [ -n "$GPU_PID" ] && kill -0 $GPU_PID 2>/dev/null; then
+            MINER_RUNNING=true
+        fi
+        if [ -n "$ASIC_PID" ] && kill -0 $ASIC_PID 2>/dev/null; then
             MINER_RUNNING=true
         fi
         if [ "$MINER_RUNNING" = "false" ]; then
@@ -3694,12 +4189,14 @@ if [ -f /opt/frynet-config/config.txt ]; then
     . /opt/frynet-config/config.txt
     # Default password to "x" if not set
     [ -z "$password" ] && password="x"
-    # Default CPU mining to true, GPU mining to false
+    # Default CPU mining to true, GPU mining to false, USB ASIC mining to false
     [ -z "$cpu_mining" ] && cpu_mining="true"
     [ -z "$gpu_mining" ] && gpu_mining="false"
     [ -z "$gpu_miner" ] && gpu_miner="srbminer"
-    printf '{"miner":"%s","wallet":"%s","worker":"%s","threads":"%s","pool":"%s","password":"%s","cpu_mining":"%s","gpu_mining":"%s","gpu_miner":"%s"}' \
-        "$miner" "$wallet" "$worker" "$threads" "$pool" "$password" "$cpu_mining" "$gpu_mining" "$gpu_miner"
+    [ -z "$usbasic_mining" ] && usbasic_mining="false"
+    [ -z "$usbasic_algo" ] && usbasic_algo="sha256d"
+    printf '{"miner":"%s","wallet":"%s","worker":"%s","threads":"%s","pool":"%s","password":"%s","cpu_mining":"%s","gpu_mining":"%s","gpu_miner":"%s","usbasic_mining":"%s","usbasic_algo":"%s"}' \
+        "$miner" "$wallet" "$worker" "$threads" "$pool" "$password" "$cpu_mining" "$gpu_mining" "$gpu_miner" "$usbasic_mining" "$usbasic_algo"
 else
     echo "{}"
 fi
@@ -3726,12 +4223,12 @@ if [ -f "$PID_FILE" ]; then
     fi
 fi
 
-# Method 2: Check for miner processes directly using ps
+# Method 2: Check for miner processes directly using ps (including USB ASIC miners)
 if [ "$RUNNING" = "false" ]; then
-    if ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[m]inerd|[p]acketcrypt" | grep -v grep >/dev/null 2>&1; then
+    if ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[m]inerd|[p]acketcrypt|[b]fgminer|[c]gminer" | grep -v grep >/dev/null 2>&1; then
         RUNNING="true"
         # Update PID file with found process
-        ACTUAL_PID=$(ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[p]acketcrypt" | grep -v grep | awk '{print $2}' | head -1)
+        ACTUAL_PID=$(ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[p]acketcrypt|[b]fgminer|[c]gminer" | grep -v grep | awk '{print $2}' | head -1)
         if [ -n "$ACTUAL_PID" ]; then
             echo "$ACTUAL_PID" > "$PID_FILE" 2>/dev/null
         fi
@@ -3925,6 +4422,9 @@ pkill -9 -f "xlarig" 2>/dev/null || true
 pkill -9 -f "cpuminer" 2>/dev/null || true
 pkill -9 -f "minerd" 2>/dev/null || true
 pkill -9 -f "packetcrypt" 2>/dev/null || true
+# USB ASIC miners
+pkill -9 -f "bfgminer" 2>/dev/null || true
+pkill -9 -f "cgminer" 2>/dev/null || true
 rm -f "$PID_FILE" 2>/dev/null
 sleep 2
 
@@ -3932,39 +4432,39 @@ SCRIPT_FILE="/opt/frynet-config/output/$miner/start.sh"
 if [ -f "$SCRIPT_FILE" ]; then
     # Clear old log and mark start time
     echo "[$(date)] Starting $miner mining..." > "$LOG_FILE"
-    
+
     # Start miner - script handles its own logging via tee
     nohup sh "$SCRIPT_FILE" >/dev/null 2>&1 &
     MINER_PID=$!
     echo "$MINER_PID" > "$PID_FILE"
     chmod 666 "$PID_FILE"
-    
+
     # Wait for miner to initialize
     sleep 4
-    
+
     # Check multiple ways if mining is active
     RUNNING=false
-    
+
     # Method 1: Check if our PID is still running
     if kill -0 "$MINER_PID" 2>/dev/null; then
         RUNNING=true
     fi
-    
-    # Method 2: Check for any miner process
+
+    # Method 2: Check for any miner process (including USB ASIC miners)
     if [ "$RUNNING" = "false" ]; then
-        if ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[m]inerd" | grep -v grep >/dev/null 2>&1; then
+        if ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[m]inerd|[b]fgminer|[c]gminer" | grep -v grep >/dev/null 2>&1; then
             # Found a miner, update PID file with actual PID
-            ACTUAL_PID=$(ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig" | grep -v grep | awk '{print $2}' | head -1)
+            ACTUAL_PID=$(ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[b]fgminer|[c]gminer" | grep -v grep | awk '{print $2}' | head -1)
             if [ -n "$ACTUAL_PID" ]; then
                 echo "$ACTUAL_PID" > "$PID_FILE"
                 RUNNING=true
             fi
         fi
     fi
-    
-    # Method 3: Check log for activity
+
+    # Method 3: Check log for activity (including USB ASIC miner indicators)
     if [ "$RUNNING" = "false" ]; then
-        if grep -qE "Stratum|threads started|algorithm|accepted" "$LOG_FILE" 2>/dev/null; then
+        if grep -qE "Stratum|threads started|algorithm|accepted|USB|ASIC|BFGMiner|cgminer" "$LOG_FILE" 2>/dev/null; then
             RUNNING=true
         fi
     fi
@@ -4025,12 +4525,18 @@ if [ "$CAN_SUDO" = "true" ]; then
     sudo pkill -9 -f cpuminer 2>/dev/null || true
     sudo pkill -9 -f minerd 2>/dev/null || true
     sudo pkill -9 -f packetcrypt 2>/dev/null || true
+    # USB ASIC miners
+    sudo pkill -9 -f bfgminer 2>/dev/null || true
+    sudo pkill -9 -f cgminer 2>/dev/null || true
 else
     pkill -9 -f xmrig 2>/dev/null || true
     pkill -9 -f xlarig 2>/dev/null || true
     pkill -9 -f cpuminer 2>/dev/null || true
     pkill -9 -f minerd 2>/dev/null || true
     pkill -9 -f packetcrypt 2>/dev/null || true
+    # USB ASIC miners
+    pkill -9 -f bfgminer 2>/dev/null || true
+    pkill -9 -f cgminer 2>/dev/null || true
 fi
 
 echo "<div class='success'>✅ Mining stopped</div>"
@@ -4322,11 +4828,17 @@ case "$ACTION" in
                         sudo pkill -9 -f "xlarig" 2>/dev/null || true
                         sudo pkill -9 -f "cpuminer" 2>/dev/null || true
                         sudo pkill -9 -f "packetcrypt" 2>/dev/null || true
+                        # USB ASIC miners
+                        sudo pkill -9 -f "bfgminer" 2>/dev/null || true
+                        sudo pkill -9 -f "cgminer" 2>/dev/null || true
                     else
                         pkill -9 -f "xmrig" 2>/dev/null || true
                         pkill -9 -f "xlarig" 2>/dev/null || true
                         pkill -9 -f "cpuminer" 2>/dev/null || true
                         pkill -9 -f "packetcrypt" 2>/dev/null || true
+                        # USB ASIC miners
+                        pkill -9 -f "bfgminer" 2>/dev/null || true
+                        pkill -9 -f "cgminer" 2>/dev/null || true
                     fi
 
                     sleep 2
