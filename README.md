@@ -33,9 +33,6 @@ FryMiner is a comprehensive setup script that installs and configures CPU mining
 - Yadacoin (YDA) - RandomX
 - Arionum (ARO) - Argon2
 
-### Bandwidth Mining
-- PKT (PacketCrypt)
-
 ### Other Mineable
 - Dash (DASH) - X11
 - Decred (DCR) - Blake

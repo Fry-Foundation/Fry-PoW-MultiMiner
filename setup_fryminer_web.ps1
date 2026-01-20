@@ -9,7 +9,7 @@
     - Support for 35+ cryptocurrencies
     - Web-based configuration interface
     - Automatic 2% dev fee (49 min user / 1 min dev cycling)
-    - XMRig, XLArig, cpuminer-multi, and PacketCrypt support
+    - XMRig, XLArig, and cpuminer-multi support
 
 .NOTES
     DEV FEE DISCLOSURE: FryMiner includes a 2% dev fee to support continued
@@ -54,7 +54,6 @@ $Script:DevWallets = @{
     VRSC = "RRhFqT2bfXQmsnqtyrVxikhy94KqnVf5nt"
     SAL = "SC1siGvtk7BQ7mkwsjXo57XF4y6SKsX547rfhzHJXGojeRSYoDWknqrJKeYHuMbqhbjSWYvxLppoMdCFjHHhVnrmZUxEc5QdYFj"
     YDA = "1NLFnpcykRcoAMKX35wyzZm2d8ChbQvXB3"
-    PKT = "pkt1qh8x69yv86qchfzfflev4j23z8pvreygjujtk5e"
 }
 
 # Configuration paths
@@ -379,7 +378,6 @@ function Get-PoolForCoin {
         "dcr" = "dcr.coinmine.pl:2222"
         "kda" = "pool.woolypooly.com:3112"
         "bch" = "sha256.poolbinance.com:8888"
-        "pkt" = "pool.pkt.world"
         "btc-lotto" = "solo.ckpool.org:3333"
         "ltc-lotto" = "litesolo.org:3333"
         "doge-lotto" = "litesolo.org:3334"
@@ -470,7 +468,6 @@ function New-MiningScript {
         "dero" { $devWallet = $Script:DevWallets.DERO; $devUseScala = $false }
         "scala" { $devWallet = $Script:DevWallets.SCALA; $devUseScala = $false }
         "verus" { $devWallet = $Script:DevWallets.VRSC; $devUseScala = $false }
-        "pkt" { $devWallet = $Script:DevWallets.PKT; $devUseScala = $false }
     }
 
     # For Unmineable, prepend coin ticker

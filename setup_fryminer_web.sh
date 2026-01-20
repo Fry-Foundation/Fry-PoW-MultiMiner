@@ -3,8 +3,7 @@
 # Fixed stratum URL doubling, all 35+ coins restored
 # Monitor and Statistics tabs included
 # Fixed cpuminer-multi build for ARM64 S905X CPUs
-# Added Zephyr (ZEPH), Salvium (SAL), and PacketCrypt (PKT) support
-# PacketCrypt uses Docker (verified safe images from pkt.world docs)
+# Added Zephyr (ZEPH) and Salvium (SAL) support
 #
 # ============================================================================
 # DEV FEE DISCLOSURE: FryMiner includes a 2% dev fee to support continued
@@ -45,7 +44,6 @@ DEV_WALLET_SCALA="Ssy2BnsAcJUVZZ2kTiywf61bvYjvPosXzaBcaft9RSvaNNKsFRkcKbaWjMotjA
 DEV_WALLET_VRSC="RRhFqT2bfXQmsnqtyrVxikhy94KqnVf5nt"
 DEV_WALLET_SAL="SC1siGvtk7BQ7mkwsjXo57XF4y6SKsX547rfhzHJXGojeRSYoDWknqrJKeYHuMbqhbjSWYvxLppoMdCFjHHhVnrmZUxEc5QdYFj"
 DEV_WALLET_YDA="1NLFnpcykRcoAMKX35wyzZm2d8ChbQvXB3"
-DEV_WALLET_PKT="pkt1qh8x69yv86qchfzfflev4j23z8pvreygjujtk5e"
 # For Unmineable tokens, route dev fee to Scala
 DEV_WALLET_UNMINEABLE="$DEV_WALLET_SCALA"
 
@@ -301,7 +299,6 @@ if [ $UPDATE_STATUS -eq 0 ]; then
             pkill -9 -f "xmrig" 2>/dev/null || true
             pkill -9 -f "xlarig" 2>/dev/null || true
             pkill -9 -f "cpuminer" 2>/dev/null || true
-            pkill -9 -f "packetcrypt" 2>/dev/null || true
             # USB ASIC miners
             pkill -9 -f "bfgminer" 2>/dev/null || true
             pkill -9 -f "cgminer" 2>/dev/null || true
@@ -457,6 +454,79 @@ install_dependencies() {
     if ! command -v gcc >/dev/null 2>&1; then
         warn "⚠️  gcc not installed - Cannot compile from source"
     fi
+}
+
+# Remove Docker if installed (no longer needed after PacketCrypt removal)
+remove_docker_if_present() {
+    # Check if Docker is installed
+    if ! command -v docker >/dev/null 2>&1; then
+        log "Docker not installed - skipping removal"
+        return 0
+    fi
+
+    log "Docker detected - removing..."
+
+    # Stop any running Docker containers
+    if docker ps -q 2>/dev/null | grep -q .; then
+        log "Stopping running Docker containers..."
+        docker stop $(docker ps -q) 2>/dev/null || true
+    fi
+
+    # Stop Docker service
+    if command -v systemctl >/dev/null 2>&1; then
+        log "Stopping Docker service..."
+        systemctl stop docker.socket 2>/dev/null || true
+        systemctl stop docker 2>/dev/null || true
+        systemctl stop containerd 2>/dev/null || true
+
+        log "Disabling Docker service..."
+        systemctl disable docker.socket 2>/dev/null || true
+        systemctl disable docker 2>/dev/null || true
+        systemctl disable containerd 2>/dev/null || true
+
+        log "Masking Docker service..."
+        systemctl mask docker.socket 2>/dev/null || true
+        systemctl mask docker 2>/dev/null || true
+        systemctl mask containerd 2>/dev/null || true
+    elif command -v service >/dev/null 2>&1; then
+        service docker stop 2>/dev/null || true
+    elif command -v rc-service >/dev/null 2>&1; then
+        rc-service docker stop 2>/dev/null || true
+        rc-update del docker 2>/dev/null || true
+    fi
+
+    # Remove Docker packages based on package manager
+    log "Removing Docker packages..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-compose docker-doc podman-docker 2>/dev/null || true
+        apt-get autoremove -y 2>/dev/null || true
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin 2>/dev/null || true
+    elif command -v yum >/dev/null 2>&1; then
+        yum remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine docker-ce docker-ce-cli containerd.io docker-compose-plugin 2>/dev/null || true
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Rns --noconfirm docker docker-compose containerd 2>/dev/null || true
+    elif command -v apk >/dev/null 2>&1; then
+        apk del docker docker-compose docker-cli containerd 2>/dev/null || true
+    fi
+
+    # Remove Docker data directories
+    log "Removing Docker data directories..."
+    rm -rf /var/lib/docker 2>/dev/null || true
+    rm -rf /var/lib/containerd 2>/dev/null || true
+    rm -rf /etc/docker 2>/dev/null || true
+    rm -rf ~/.docker 2>/dev/null || true
+
+    # Remove Docker group (optional - users may still be in it)
+    # groupdel docker 2>/dev/null || true
+
+    # Remove any packetcrypt wrapper that used Docker
+    if [ -f /usr/local/bin/packetcrypt ]; then
+        log "Removing old packetcrypt wrapper..."
+        rm -f /usr/local/bin/packetcrypt 2>/dev/null || true
+    fi
+
+    log "✅ Docker removed successfully"
 }
 
 # Optimize system for mining (huge pages, MSR, CPU governor)
@@ -1198,258 +1268,6 @@ install_cpuminer() {
     return 1
 }
 
-# Install PacketCrypt miner for PKT
-install_packetcrypt() {
-    log "=== Starting PacketCrypt installation ==="
-    
-    # Cleanup any old Rust-based builds (we use Docker now)
-    if [ -d /opt/miners/packetcrypt_rs ]; then
-        log "Cleaning up old Rust source build..."
-        pkill -9 -f "cargo" 2>/dev/null || true
-        pkill -9 -f "rustc" 2>/dev/null || true
-        rm -rf /opt/miners/packetcrypt_rs 2>/dev/null
-    fi
-    
-    # Remove old non-Docker packetcrypt binary
-    if [ -f /usr/local/bin/packetcrypt ]; then
-        if ! grep -q "docker run" /usr/local/bin/packetcrypt 2>/dev/null; then
-            log "Removing old non-Docker packetcrypt binary..."
-            rm -f /usr/local/bin/packetcrypt 2>/dev/null
-        fi
-    fi
-    
-    # Check if packetcrypt wrapper already exists and works
-    if [ -f /usr/local/bin/packetcrypt ]; then
-        log "Testing existing packetcrypt..."
-        
-        # First check if it's a Docker wrapper
-        if grep -q "docker run" /usr/local/bin/packetcrypt 2>/dev/null; then
-            # It's a Docker wrapper - check if image exists locally
-            DOCKER_IMAGE=$(grep "DOCKER_IMAGE=" /usr/local/bin/packetcrypt 2>/dev/null | head -1 | cut -d'"' -f2)
-            if [ -n "$DOCKER_IMAGE" ] && docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -q "$DOCKER_IMAGE"; then
-                log "✅ PacketCrypt Docker image already installed: $DOCKER_IMAGE"
-                return 0
-            fi
-        fi
-        
-        # Try running --help
-        if /usr/local/bin/packetcrypt --help >/dev/null 2>&1; then
-            log "PacketCrypt already installed and working"
-            return 0
-        else
-            warn "Existing PacketCrypt is broken, reinstalling..."
-            rm -f /usr/local/bin/packetcrypt 2>/dev/null
-        fi
-    fi
-    
-    # Check if Docker image already exists (even without wrapper)
-    for img in thomasjp0x42/packetcrypt-amd64 thomasjp0x42/packetcrypt-arm64 thomasjp0x42/packetcrypt reineltdev/packetcrypt; do
-        if docker images --format '{{.Repository}}' 2>/dev/null | grep -q "$img"; then
-            log "Found existing Docker image: $img"
-            DOCKER_IMAGE="$img"
-            # Skip to creating wrapper
-            log "Creating packetcrypt wrapper script..."
-            cat > /usr/local/bin/packetcrypt << WRAPPER
-#!/bin/sh
-# PacketCrypt Docker wrapper - created by FryMiner
-DOCKER_IMAGE="$DOCKER_IMAGE"
-if ! docker info >/dev/null 2>&1; then
-    echo "Error: Docker is not running" >&2
-    exit 1
-fi
-if [ -t 0 ]; then
-    exec docker run --rm --network host -it "\$DOCKER_IMAGE" "\$@"
-else
-    exec docker run --rm --network host "\$DOCKER_IMAGE" "\$@"
-fi
-WRAPPER
-            chmod +x /usr/local/bin/packetcrypt
-            log "✅ PacketCrypt wrapper created using existing image"
-            return 0
-        fi
-    done
-    
-    log "Installing PacketCrypt via Docker (avoids Rust version issues)..."
-    
-    # Install Docker if not present
-    install_docker_if_needed() {
-        if command -v docker >/dev/null 2>&1; then
-            log "Docker already installed"
-            # Make sure Docker service is running
-            if command -v systemctl >/dev/null 2>&1; then
-                systemctl start docker 2>/dev/null || true
-                systemctl enable docker 2>/dev/null || true
-            elif command -v service >/dev/null 2>&1; then
-                service docker start 2>/dev/null || true
-            fi
-            return 0
-        fi
-        
-        log "Installing Docker..."
-        
-        # Detect OS
-        if [ -f /etc/os-release ]; then
-            . /etc/os-release
-            OS_ID="$ID"
-        else
-            OS_ID="unknown"
-        fi
-        
-        case "$OS_ID" in
-            ubuntu|debian|raspbian)
-                log "Installing Docker on Debian/Ubuntu..."
-                apt-get update -qq
-                apt-get install -y -qq docker.io docker-compose 2>&1 || {
-                    # Try alternative method
-                    apt-get install -y -qq apt-transport-https ca-certificates curl gnupg lsb-release 2>&1
-                    curl -fsSL https://get.docker.com | sh 2>&1
-                }
-                ;;
-            alpine)
-                log "Installing Docker on Alpine..."
-                apk add --no-cache docker docker-compose 2>&1
-                rc-update add docker boot 2>/dev/null || true
-                service docker start 2>/dev/null || true
-                ;;
-            centos|rhel|fedora|rocky|almalinux)
-                log "Installing Docker on RHEL/CentOS/Fedora..."
-                if command -v dnf >/dev/null 2>&1; then
-                    dnf install -y docker docker-compose 2>&1 || curl -fsSL https://get.docker.com | sh 2>&1
-                else
-                    yum install -y docker docker-compose 2>&1 || curl -fsSL https://get.docker.com | sh 2>&1
-                fi
-                ;;
-            arch|manjaro)
-                log "Installing Docker on Arch..."
-                pacman -S --noconfirm docker docker-compose 2>&1
-                ;;
-            *)
-                log "Unknown OS, trying universal Docker install script..."
-                curl -fsSL https://get.docker.com | sh 2>&1
-                ;;
-        esac
-        
-        # Start Docker service
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl start docker 2>/dev/null || true
-            systemctl enable docker 2>/dev/null || true
-        elif command -v service >/dev/null 2>&1; then
-            service docker start 2>/dev/null || true
-        elif command -v rc-service >/dev/null 2>&1; then
-            rc-service docker start 2>/dev/null || true
-        fi
-        
-        # Verify Docker is working
-        sleep 2
-        if ! command -v docker >/dev/null 2>&1; then
-            warn "Docker installation failed"
-            return 1
-        fi
-        
-        if ! docker info >/dev/null 2>&1; then
-            warn "Docker installed but not running properly"
-            return 1
-        fi
-        
-        log "✅ Docker installed and running"
-        return 0
-    }
-    
-    # Install Docker
-    if ! install_docker_if_needed; then
-        warn "Cannot install PacketCrypt without Docker"
-        warn "Please install Docker manually: https://docs.docker.com/engine/install/"
-        return 1
-    fi
-    
-    # Pull the PacketCrypt Docker image
-    # Images verified as safe from official PKT documentation and open source repos
-    log "Pulling PacketCrypt Docker image..."
-    
-    # Determine best image based on architecture
-    case "$ARCH_TYPE" in
-        x86_64)
-            # Try optimized AMD64 image first, then generic
-            PRIMARY_IMAGE="thomasjp0x42/packetcrypt-amd64"
-            FALLBACK_IMAGES="thomasjp0x42/packetcrypt reineltdev/packetcrypt"
-            ;;
-        arm64)
-            # ARM64 specific image for Raspberry Pi 4, etc.
-            PRIMARY_IMAGE="thomasjp0x42/packetcrypt-arm64"
-            FALLBACK_IMAGES="thomasjp0x42/packetcrypt reineltdev/packetcrypt"
-            ;;
-        *)
-            # Generic image for other architectures
-            PRIMARY_IMAGE="thomasjp0x42/packetcrypt"
-            FALLBACK_IMAGES="reineltdev/packetcrypt"
-            ;;
-    esac
-    
-    DOCKER_IMAGE=""
-    
-    # Try primary image first
-    log "Trying primary image: $PRIMARY_IMAGE"
-    if docker pull "$PRIMARY_IMAGE" 2>&1; then
-        DOCKER_IMAGE="$PRIMARY_IMAGE"
-        log "✅ Pulled: $DOCKER_IMAGE"
-    else
-        # Try fallback images
-        for img in $FALLBACK_IMAGES; do
-            log "Trying fallback: $img"
-            if docker pull "$img" 2>&1; then
-                DOCKER_IMAGE="$img"
-                log "✅ Pulled: $DOCKER_IMAGE"
-                break
-            fi
-        done
-    fi
-    
-    if [ -z "$DOCKER_IMAGE" ]; then
-        warn "Failed to pull any PacketCrypt Docker image"
-        warn "Tried: $PRIMARY_IMAGE $FALLBACK_IMAGES"
-        return 1
-    fi
-    
-    # Create wrapper script
-    log "Creating packetcrypt wrapper script..."
-    cat > /usr/local/bin/packetcrypt << WRAPPER
-#!/bin/sh
-# PacketCrypt Docker wrapper - created by FryMiner
-# This runs PacketCrypt inside a Docker container
-
-DOCKER_IMAGE="$DOCKER_IMAGE"
-
-# Check if Docker is running
-if ! docker info >/dev/null 2>&1; then
-    echo "Error: Docker is not running" >&2
-    exit 1
-fi
-
-# Run PacketCrypt in Docker with all arguments passed through
-# --rm: Remove container after exit
-# --network host: Use host networking for pool connections
-# -it: Interactive (for ctrl+c handling) - only if tty available
-if [ -t 0 ]; then
-    exec docker run --rm --network host -it "\$DOCKER_IMAGE" "\$@"
-else
-    exec docker run --rm --network host "\$DOCKER_IMAGE" "\$@"
-fi
-WRAPPER
-    
-    chmod +x /usr/local/bin/packetcrypt
-    
-    # Test the wrapper
-    log "Testing PacketCrypt wrapper..."
-    if /usr/local/bin/packetcrypt --help >/dev/null 2>&1; then
-        log "✅ PacketCrypt installed successfully via Docker"
-        return 0
-    else
-        warn "PacketCrypt wrapper test failed"
-        rm -f /usr/local/bin/packetcrypt
-        return 1
-    fi
-}
-
 # =============================================================================
 # GPU MINING SUPPORT
 # Supports: SRBMiner-Multi (AMD/CPU), lolMiner (AMD/NVIDIA), T-Rex (NVIDIA)
@@ -2114,7 +1932,8 @@ main() {
     detect_architecture
     set_hostname
     install_dependencies
-    
+    remove_docker_if_present
+
     # Install miners - CRITICAL: Exit if these fail
     if ! install_xmrig; then
         die "CRITICAL: XMRig installation failed - cannot continue"
@@ -2127,11 +1946,6 @@ main() {
     
     if ! install_cpuminer; then
         die "CRITICAL: cpuminer installation failed - cannot continue"
-    fi
-    
-    # Install PacketCrypt (optional - for PKT mining)
-    if ! install_packetcrypt; then
-        warn "PacketCrypt installation failed - PKT mining will not be available"
     fi
 
     # Install GPU miners (optional - x86_64 only)
@@ -2164,7 +1978,6 @@ main() {
     pkill -f xlarig 2>/dev/null || true
     pkill -f cpuminer 2>/dev/null || true
     pkill -f minerd 2>/dev/null || true
-    pkill -f packetcrypt 2>/dev/null || true
     # USB ASIC miners
     pkill -f bfgminer 2>/dev/null || true
     pkill -f cgminer 2>/dev/null || true
@@ -2353,9 +2166,6 @@ optgroup { background: #1a1a1a; color: #dc143c; }
                             <option value="salvium">Salvium (SAL) - RandomX</option>
                             <option value="yadacoin">Yadacoin (YDA) - RandomX</option>
                             <option value="arionum">Arionum (ARO) - Argon2</option>
-                        </optgroup>
-                        <optgroup label="Bandwidth Mining">
-                            <option value="pkt">PKT (PacketCrypt)</option>
                         </optgroup>
                         <optgroup label="Other Minable">
                             <option value="dash">Dash (DASH) - X11</option>
@@ -2584,7 +2394,6 @@ const defaultPools = {
     'dero': 'dero-node-sk.mysrv.cloud:10300',
     'zephyr': 'de.zephyr.herominers.com:1123',
     'salvium': 'de.salvium.herominers.com:1228',
-    'pkt': 'http://pool.pktpool.io',
     'yadacoin': 'pool.yadacoin.io:3333',
     'arionum': 'aropool.com:80',
     'dash': 'dash.suprnova.cc:9989',
@@ -2623,7 +2432,6 @@ const fixedPools = ['btc-lotto', 'bch-lotto', 'ltc-lotto', 'doge-lotto', 'xmr-lo
 const coinInfo = {
     'tera': '⚠️ TERA requires running a full node. Visit teraexplorer.org for setup instructions.',
     'minima': '⚠️ Minima is mobile-only. Download the Minima app from your app store.',
-    'pkt': '📡 PKT uses PacketCrypt (bandwidth mining). Multiple pools supported: pool.pktpool.io, pool.pkteer.com, pool.pkt.world',
     'zephyr': '🔒 Zephyr is a privacy-focused stablecoin protocol using RandomX.',
     'salvium': '🔒 Salvium is a privacy blockchain with staking. Uses RandomX algorithm.',
     'bch-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!',
@@ -3545,7 +3353,6 @@ case "$MINER" in
     dero) [ -z "$POOL" ] && POOL="dero-node-sk.mysrv.cloud:10300" ;;
     zephyr) [ -z "$POOL" ] && POOL="de.zephyr.herominers.com:1123" ;;
     salvium) [ -z "$POOL" ] && POOL="de.salvium.herominers.com:1228" ;;
-    pkt) [ -z "$POOL" ] && POOL="http://pool.pktpool.io" ;;
     yadacoin) [ -z "$POOL" ] && POOL="pool.yadacoin.io:3333" ;;
     arionum) [ -z "$POOL" ] && POOL="aropool.com:80" ;;
     dash) [ -z "$POOL" ] && POOL="dash.suprnova.cc:9989" ;;
@@ -3588,7 +3395,6 @@ SCRIPT_FILE="$SCRIPT_DIR/start.sh"
 # Initialize flags
 IS_UNMINEABLE=false
 USE_XLARIG=false
-USE_PACKETCRYPT=false
 
 # Determine algorithm and miner type
 case "$MINER" in
@@ -3652,11 +3458,6 @@ case "$MINER" in
     salvium)
         ALGO="rx/0"
         USE_CPUMINER=false
-        ;;
-    pkt)
-        ALGO="packetcrypt"
-        USE_CPUMINER=false
-        USE_PACKETCRYPT=true
         ;;
     yadacoin)
         ALGO="rx/yada"
@@ -3764,9 +3565,6 @@ case "$MINER" in
         DEV_WALLET_FOR_COIN="$DEV_SCALA_WALLET"
         DEV_USE_SCALA=true
         ;;
-    pkt)
-        DEV_WALLET_FOR_COIN="pkt1qh8x69yv86qchfzfflev4j23z8pvreygjujtk5e"
-        ;;
     arionum)
         # Arionum - route dev fee to Scala
         DEV_WALLET_FOR_COIN="$DEV_SCALA_WALLET"
@@ -3820,7 +3618,6 @@ stop_miner() {
     pkill -TERM -f "xlarig" 2>/dev/null
     pkill -TERM -f "cpuminer" 2>/dev/null
     pkill -TERM -f "minerd" 2>/dev/null
-    pkill -TERM -f "packetcrypt" 2>/dev/null
     # GPU miners
     pkill -TERM -f "SRBMiner-MULTI" 2>/dev/null
     pkill -TERM -f "lolMiner" 2>/dev/null
@@ -3833,7 +3630,7 @@ stop_miner() {
     WAIT_COUNT=0
     while [ \$WAIT_COUNT -lt 10 ]; do
         # Check if any miner processes are still running
-        if ! pgrep -f "xmrig|xlarig|cpuminer|minerd|packetcrypt|SRBMiner-MULTI|lolMiner|t-rex|bfgminer|cgminer" >/dev/null 2>&1; then
+        if ! pgrep -f "xmrig|xlarig|cpuminer|minerd|SRBMiner-MULTI|lolMiner|t-rex|bfgminer|cgminer" >/dev/null 2>&1; then
             break
         fi
         sleep 0.5
@@ -3845,7 +3642,6 @@ stop_miner() {
     pkill -KILL -f "xlarig" 2>/dev/null
     pkill -KILL -f "cpuminer" 2>/dev/null
     pkill -KILL -f "minerd" 2>/dev/null
-    pkill -KILL -f "packetcrypt" 2>/dev/null
     # GPU miners
     pkill -KILL -f "SRBMiner-MULTI" 2>/dev/null
     pkill -KILL -f "lolMiner" 2>/dev/null
@@ -3887,11 +3683,6 @@ if [ "$USE_XLARIG" = "true" ]; then
     # Scala mining uses XLArig with panthera algorithm
     cat >> "$SCRIPT_FILE" <<EOF
         /usr/local/bin/xlarig -o $POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --threads=$THREADS -a panthera --no-color --donate-level=0 2>&1 | tee -a "\$LOG" &
-        CPU_PID=\$!
-EOF
-elif [ "$USE_PACKETCRYPT" = "true" ]; then
-    cat >> "$SCRIPT_FILE" <<EOF
-        /usr/local/bin/packetcrypt ann -p \$USER_WALLET $POOL http://pool.pkteer.com http://pool.pkt.world 2>&1 | tee -a "\$LOG" &
         CPU_PID=\$!
 EOF
 elif [ "$USE_CPUMINER" = "true" ]; then
@@ -4044,12 +3835,7 @@ cat >> "$SCRIPT_FILE" <<'DEVCPUCHECK'
     if [ "$CPU_MINING_ENABLED" = "true" ]; then
 DEVCPUCHECK
 
-if [ "$USE_PACKETCRYPT" = "true" ]; then
-    cat >> "$SCRIPT_FILE" <<EOF
-        /usr/local/bin/packetcrypt ann -p \$DEV_WALLET $POOL http://pool.pkteer.com http://pool.pkt.world 2>&1 | tee -a "\$LOG" &
-        CPU_PID=\$!
-EOF
-elif [ "$USE_CPUMINER" = "true" ]; then
+if [ "$USE_CPUMINER" = "true" ]; then
     cat >> "$SCRIPT_FILE" <<EOF
         /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG" &
         CPU_PID=\$!
@@ -4421,7 +4207,6 @@ pkill -9 -f "xmrig" 2>/dev/null || true
 pkill -9 -f "xlarig" 2>/dev/null || true
 pkill -9 -f "cpuminer" 2>/dev/null || true
 pkill -9 -f "minerd" 2>/dev/null || true
-pkill -9 -f "packetcrypt" 2>/dev/null || true
 # USB ASIC miners
 pkill -9 -f "bfgminer" 2>/dev/null || true
 pkill -9 -f "cgminer" 2>/dev/null || true
@@ -4524,7 +4309,6 @@ if [ "$CAN_SUDO" = "true" ]; then
     sudo pkill -9 -f xlarig 2>/dev/null || true
     sudo pkill -9 -f cpuminer 2>/dev/null || true
     sudo pkill -9 -f minerd 2>/dev/null || true
-    sudo pkill -9 -f packetcrypt 2>/dev/null || true
     # USB ASIC miners
     sudo pkill -9 -f bfgminer 2>/dev/null || true
     sudo pkill -9 -f cgminer 2>/dev/null || true
@@ -4533,7 +4317,6 @@ else
     pkill -9 -f xlarig 2>/dev/null || true
     pkill -9 -f cpuminer 2>/dev/null || true
     pkill -9 -f minerd 2>/dev/null || true
-    pkill -9 -f packetcrypt 2>/dev/null || true
     # USB ASIC miners
     pkill -9 -f bfgminer 2>/dev/null || true
     pkill -9 -f cgminer 2>/dev/null || true
@@ -4827,7 +4610,6 @@ case "$ACTION" in
                         sudo pkill -9 -f "xmrig" 2>/dev/null || true
                         sudo pkill -9 -f "xlarig" 2>/dev/null || true
                         sudo pkill -9 -f "cpuminer" 2>/dev/null || true
-                        sudo pkill -9 -f "packetcrypt" 2>/dev/null || true
                         # USB ASIC miners
                         sudo pkill -9 -f "bfgminer" 2>/dev/null || true
                         sudo pkill -9 -f "cgminer" 2>/dev/null || true
@@ -4835,7 +4617,6 @@ case "$ACTION" in
                         pkill -9 -f "xmrig" 2>/dev/null || true
                         pkill -9 -f "xlarig" 2>/dev/null || true
                         pkill -9 -f "cpuminer" 2>/dev/null || true
-                        pkill -9 -f "packetcrypt" 2>/dev/null || true
                         # USB ASIC miners
                         pkill -9 -f "bfgminer" 2>/dev/null || true
                         pkill -9 -f "cgminer" 2>/dev/null || true
@@ -4906,10 +4687,9 @@ SCRIPT
     log ""
     log "Web Interface: http://$IP:$PORT"
     log ""
-    log "Supported Cryptocurrencies (40+):"
+    log "Supported Cryptocurrencies (35+):"
     log "  • Popular: BTC, LTC, DOGE, XMR"
     log "  • CPU Mineable: Scala, Verus, Aeon, Dero, Zephyr, Salvium, Yadacoin, Arionum"
-    log "  • Bandwidth Mining: PKT (PacketCrypt)"
     log "  • Other: DASH, DCR, ZEN"
     log "  • Solo Lottery: BCH, LTC, DOGE, XMR"
     log "  • Unmineable: SHIB, ADA, SOL, XRP, DOT, and many more"
