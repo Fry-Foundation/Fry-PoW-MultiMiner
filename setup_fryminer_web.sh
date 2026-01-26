@@ -2538,23 +2538,23 @@ const defaultPools = {
     'dash': 'dash.suprnova.cc:9989',
     'dcr': 'dcr.suprnova.cc:3252',
     'kda': 'pool.woolypooly.com:3112',
-    'bch-lotto': 'bch.solopool.org:3333',
-    'btc-lotto': 'btc.solopool.org:3333',
-    'ltc-lotto': 'ltc.solopool.org:3333',
-    'doge-lotto': 'doge.solopool.org:3333',
-    'xmr-lotto': 'xmr.solopool.org:3333',
-    'etc-lotto': 'etc.solopool.org:8008',
-    'ethw-lotto': 'ethw.solopool.org:8008',
-    'kas-lotto': 'kas.solopool.org:8008',
-    'erg-lotto': 'erg.solopool.org:8008',
-    'rvn-lotto': 'rvn.solopool.org:8008',
-    'zeph-lotto': 'zeph.solopool.org:8008',
-    'dgb-lotto': 'dgb.solopool.org:3333',
-    'xec-lotto': 'xec.solopool.org:3333',
-    'fb-lotto': 'fb.solopool.org:3333',
-    'bc2-lotto': 'bc2.solopool.org:3333',
-    'xel-lotto': 'xel.solopool.org:8008',
-    'octa-lotto': 'octa.solopool.org:8008',
+    'bch-lotto': 'eu2.solopool.org:8002',
+    'btc-lotto': 'eu3.solopool.org:8005',
+    'ltc-lotto': 'eu3.solopool.org:8003',
+    'doge-lotto': 'eu3.solopool.org:8003',
+    'xmr-lotto': 'eu1.solopool.org:8010',
+    'etc-lotto': 'eu1.solopool.org:8011',
+    'ethw-lotto': 'eu2.solopool.org:8005',
+    'kas-lotto': 'eu2.solopool.org:8008',
+    'erg-lotto': 'eu1.solopool.org:8001',
+    'rvn-lotto': 'eu1.solopool.org:8013',
+    'zeph-lotto': 'eu2.solopool.org:8006',
+    'dgb-lotto': 'eu1.solopool.org:8004',
+    'xec-lotto': 'eu2.solopool.org:8013',
+    'fb-lotto': 'eu3.solopool.org:8002',
+    'bc2-lotto': 'eu3.solopool.org:8001',
+    'xel-lotto': 'eu3.solopool.org:8004',
+    'octa-lotto': 'eu2.solopool.org:8004',
     'shib': 'rx.unmineable.com:3333',
     'ada': 'rx.unmineable.com:3333',
     'sol': 'rx.unmineable.com:3333',
@@ -3619,23 +3619,23 @@ case "$MINER" in
     zen) [ -z "$POOL" ] && POOL="zen.suprnova.cc:3618" ;;
     kda) [ -z "$POOL" ] && POOL="pool.woolypooly.com:3112" ;;
     # Solopool.org lottery pools
-    btc-lotto) [ -z "$POOL" ] && POOL="btc.solopool.org:3333" ;;
-    bch-lotto) [ -z "$POOL" ] && POOL="bch.solopool.org:3333" ;;
-    ltc-lotto) [ -z "$POOL" ] && POOL="ltc.solopool.org:3333" ;;
-    doge-lotto) [ -z "$POOL" ] && POOL="doge.solopool.org:3333" ;;
-    xmr-lotto) [ -z "$POOL" ] && POOL="xmr.solopool.org:3333" ;;
-    etc-lotto) [ -z "$POOL" ] && POOL="etc.solopool.org:8008" ;;
-    ethw-lotto) [ -z "$POOL" ] && POOL="ethw.solopool.org:8008" ;;
-    kas-lotto) [ -z "$POOL" ] && POOL="kas.solopool.org:8008" ;;
-    erg-lotto) [ -z "$POOL" ] && POOL="erg.solopool.org:8008" ;;
-    rvn-lotto) [ -z "$POOL" ] && POOL="rvn.solopool.org:8008" ;;
-    zeph-lotto) [ -z "$POOL" ] && POOL="zeph.solopool.org:8008" ;;
-    dgb-lotto) [ -z "$POOL" ] && POOL="dgb.solopool.org:3333" ;;
-    xec-lotto) [ -z "$POOL" ] && POOL="xec.solopool.org:3333" ;;
-    fb-lotto) [ -z "$POOL" ] && POOL="fb.solopool.org:3333" ;;
-    bc2-lotto) [ -z "$POOL" ] && POOL="bc2.solopool.org:3333" ;;
-    xel-lotto) [ -z "$POOL" ] && POOL="xel.solopool.org:8008" ;;
-    octa-lotto) [ -z "$POOL" ] && POOL="octa.solopool.org:8008" ;;
+    btc-lotto) [ -z "$POOL" ] && POOL="eu3.solopool.org:8005" ;;
+    bch-lotto) [ -z "$POOL" ] && POOL="eu2.solopool.org:8002" ;;
+    ltc-lotto) [ -z "$POOL" ] && POOL="eu3.solopool.org:8003" ;;
+    doge-lotto) [ -z "$POOL" ] && POOL="eu3.solopool.org:8003" ;;
+    xmr-lotto) [ -z "$POOL" ] && POOL="eu1.solopool.org:8010" ;;
+    etc-lotto) [ -z "$POOL" ] && POOL="eu1.solopool.org:8011" ;;
+    ethw-lotto) [ -z "$POOL" ] && POOL="eu2.solopool.org:8005" ;;
+    kas-lotto) [ -z "$POOL" ] && POOL="eu2.solopool.org:8008" ;;
+    erg-lotto) [ -z "$POOL" ] && POOL="eu1.solopool.org:8001" ;;
+    rvn-lotto) [ -z "$POOL" ] && POOL="eu1.solopool.org:8013" ;;
+    zeph-lotto) [ -z "$POOL" ] && POOL="eu2.solopool.org:8006" ;;
+    dgb-lotto) [ -z "$POOL" ] && POOL="eu1.solopool.org:8004" ;;
+    xec-lotto) [ -z "$POOL" ] && POOL="eu2.solopool.org:8013" ;;
+    fb-lotto) [ -z "$POOL" ] && POOL="eu3.solopool.org:8002" ;;
+    bc2-lotto) [ -z "$POOL" ] && POOL="eu3.solopool.org:8001" ;;
+    xel-lotto) [ -z "$POOL" ] && POOL="eu3.solopool.org:8004" ;;
+    octa-lotto) [ -z "$POOL" ] && POOL="eu2.solopool.org:8004" ;;
     *) [ -z "$POOL" ] && POOL="rx.unmineable.com:3333" ;;
 esac
 
