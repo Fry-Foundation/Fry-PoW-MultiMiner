@@ -448,8 +448,13 @@ install_dependencies() {
         # cpuminer dependencies  
         apt-get install -y libcurl4-openssl-dev libjansson-dev libgmp-dev >/dev/null 2>&1 || true
         
-        # Mining optimizations
-        apt-get install -y msr-tools cpufrequtils >/dev/null 2>&1 || true
+        # Mining optimizations (x86 only - msr-tools doesn't work on ARM)
+        if [ "$ARCH_TYPE" = "x86_64" ] || [ "$ARCH_TYPE" = "x86" ]; then
+            apt-get install -y msr-tools cpufrequtils >/dev/null 2>&1 || true
+        else
+            # ARM only needs cpufrequtils
+            apt-get install -y cpufrequtils >/dev/null 2>&1 || true
+        fi
         
     elif command -v yum >/dev/null 2>&1; then
         # Core dependencies
@@ -464,8 +469,13 @@ install_dependencies() {
         # cpuminer dependencies
         yum install -y libcurl-devel jansson-devel gmp-devel >/dev/null 2>&1 || true
         
-        # Mining optimizations
-        yum install -y msr-tools cpufrequtils >/dev/null 2>&1 || true
+        # Mining optimizations (x86 only - msr-tools doesn't work on ARM)
+        if [ "$ARCH_TYPE" = "x86_64" ] || [ "$ARCH_TYPE" = "x86" ]; then
+            yum install -y msr-tools cpufrequtils >/dev/null 2>&1 || true
+        else
+            # ARM only needs cpufrequtils
+            yum install -y cpufrequtils >/dev/null 2>&1 || true
+        fi
         
     elif command -v pacman >/dev/null 2>&1; then
         # Arch Linux
@@ -568,6 +578,36 @@ remove_docker_if_present() {
 # Optimize system for mining (huge pages, MSR, CPU governor)
 optimize_for_mining() {
     log "Applying mining optimizations..."
+    
+    # Skip heavy optimizations on ARM - they have limited RAM and don't support MSR
+    if [ "$ARCH_TYPE" != "x86_64" ] && [ "$ARCH_TYPE" != "x86" ]; then
+        log "  ARM device detected - skipping huge pages and MSR (limited RAM, not supported)"
+        
+        # Only set CPU governor to performance mode on ARM
+        log "  Setting CPU to performance mode..."
+        for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            [ -f "$gov" ] && echo "performance" > "$gov" 2>/dev/null || true
+        done
+        
+        # Create minimal optimization script for ARM
+        cat > /opt/frynet-config/optimize.sh <<'OPTSCRIPT'
+#!/bin/sh
+# Mining optimization script for ARM - minimal version
+
+# Set performance governor
+for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+    [ -f "$gov" ] && echo "performance" > "$gov" 2>/dev/null
+done
+
+echo "ARM optimizations applied (performance governor)"
+OPTSCRIPT
+        chmod 755 /opt/frynet-config/optimize.sh
+        
+        log "ARM mining optimizations applied (CPU governor only)"
+        return 0
+    fi
+    
+    # x86/x86_64 optimizations below
     
     # 1. Enable huge pages (gives 20-30% boost for RandomX)
     log "  Configuring huge pages..."
