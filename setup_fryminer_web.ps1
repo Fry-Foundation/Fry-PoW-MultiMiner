@@ -378,12 +378,24 @@ function Get-PoolForCoin {
         "dcr" = "dcr.suprnova.cc:3252"
         "kda" = "pool.woolypooly.com:3112"
         "bch" = "pool.btc.com:3333"
-        # Solo/Lottery pools - using solopool.org public pools
+        # Solo/Lottery pools - solopool.org
         "btc-lotto" = "btc.solopool.org:3333"
+        "bch-lotto" = "bch.solopool.org:3333"
         "ltc-lotto" = "ltc.solopool.org:3333"
         "doge-lotto" = "doge.solopool.org:3333"
         "xmr-lotto" = "xmr.solopool.org:3333"
-        "bch-lotto" = "bch.solopool.org:3333"
+        "etc-lotto" = "etc.solopool.org:8008"
+        "ethw-lotto" = "ethw.solopool.org:8008"
+        "kas-lotto" = "kas.solopool.org:8008"
+        "erg-lotto" = "erg.solopool.org:8008"
+        "rvn-lotto" = "rvn.solopool.org:8008"
+        "zeph-lotto" = "zeph.solopool.org:8008"
+        "dgb-lotto" = "dgb.solopool.org:3333"
+        "xec-lotto" = "xec.solopool.org:3333"
+        "fb-lotto" = "fb.solopool.org:3333"
+        "bc2-lotto" = "bc2.solopool.org:3333"
+        "xel-lotto" = "xel.solopool.org:8008"
+        "octa-lotto" = "octa.solopool.org:8008"
         # Unmineable coins
         "shib" = "rx.unmineable.com:3333"
         "ada" = "rx.unmineable.com:3333"
@@ -437,6 +449,10 @@ function Get-AlgorithmForCoin {
         "btc-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
         "bch" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
         "bch-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
+        "dgb-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
+        "xec-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
+        "fb-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
+        "bc2-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
         # Scrypt coins
         "ltc" = @{ Algo = "scrypt"; UseCpuminer = $true; UseXlarig = $false }
         "ltc-lotto" = @{ Algo = "scrypt"; UseCpuminer = $true; UseXlarig = $false }
@@ -446,6 +462,16 @@ function Get-AlgorithmForCoin {
         "dash" = @{ Algo = "x11"; UseCpuminer = $true; UseXlarig = $false }
         "dcr" = @{ Algo = "decred"; UseCpuminer = $true; UseXlarig = $false }
         "kda" = @{ Algo = "blake2s"; UseCpuminer = $true; UseXlarig = $false }
+        # Zephyr lottery (RandomX)
+        "zeph-lotto" = @{ Algo = "rx/0"; UseCpuminer = $false; UseXlarig = $false }
+        # GPU-only coins (noted for reference - not CPU mineable)
+        "etc-lotto" = @{ Algo = "etchash"; UseCpuminer = $false; UseXlarig = $false; IsGPUOnly = $true }
+        "ethw-lotto" = @{ Algo = "ethash"; UseCpuminer = $false; UseXlarig = $false; IsGPUOnly = $true }
+        "kas-lotto" = @{ Algo = "kheavyhash"; UseCpuminer = $false; UseXlarig = $false; IsGPUOnly = $true }
+        "erg-lotto" = @{ Algo = "autolykos2"; UseCpuminer = $false; UseXlarig = $false; IsGPUOnly = $true }
+        "rvn-lotto" = @{ Algo = "kawpow"; UseCpuminer = $false; UseXlarig = $false; IsGPUOnly = $true }
+        "xel-lotto" = @{ Algo = "xelishash"; UseCpuminer = $false; UseXlarig = $false }
+        "octa-lotto" = @{ Algo = "ethash"; UseCpuminer = $false; UseXlarig = $false; IsGPUOnly = $true }
     }
 
     if ($algorithms.ContainsKey($Coin.ToLower())) {
@@ -863,12 +889,20 @@ function New-WebInterface {
                 <button class="coin-btn" data-coin="dash">DASH</button>
                 <button class="coin-btn" data-coin="dcr">DCR</button>
                 <button class="coin-btn" data-coin="kda">KDA</button>
-                <!-- Solo/Lottery Mining -->
+                <!-- Solo/Lottery Mining (solopool.org) -->
                 <button class="coin-btn" data-coin="btc-lotto">BTC Solo</button>
                 <button class="coin-btn" data-coin="bch-lotto">BCH Solo</button>
                 <button class="coin-btn" data-coin="ltc-lotto">LTC Solo</button>
                 <button class="coin-btn" data-coin="doge-lotto">DOGE Solo</button>
                 <button class="coin-btn" data-coin="xmr-lotto">XMR Solo</button>
+                <button class="coin-btn" data-coin="zeph-lotto">ZEPH Solo</button>
+                <button class="coin-btn" data-coin="dgb-lotto">DGB Solo</button>
+                <button class="coin-btn" data-coin="xec-lotto">XEC Solo</button>
+                <button class="coin-btn" data-coin="fb-lotto">FB Solo</button>
+                <button class="coin-btn" data-coin="etc-lotto">ETC Solo</button>
+                <button class="coin-btn" data-coin="kas-lotto">KAS Solo</button>
+                <button class="coin-btn" data-coin="erg-lotto">ERG Solo</button>
+                <button class="coin-btn" data-coin="rvn-lotto">RVN Solo</button>
                 <!-- Unmineable tokens -->
                 <button class="coin-btn" data-coin="shib">SHIB</button>
                 <button class="coin-btn" data-coin="ada">ADA</button>
@@ -967,12 +1001,20 @@ function New-WebInterface {
             'dash': 'dash.suprnova.cc:9989',
             'dcr': 'dcr.suprnova.cc:3252',
             'kda': 'pool.woolypooly.com:3112',
-            // Solo/Lottery pools - using solopool.org public pools
+            // Solo/Lottery pools - solopool.org
             'btc-lotto': 'btc.solopool.org:3333',
             'bch-lotto': 'bch.solopool.org:3333',
             'ltc-lotto': 'ltc.solopool.org:3333',
             'doge-lotto': 'doge.solopool.org:3333',
             'xmr-lotto': 'xmr.solopool.org:3333',
+            'etc-lotto': 'etc.solopool.org:8008',
+            'kas-lotto': 'kas.solopool.org:8008',
+            'erg-lotto': 'erg.solopool.org:8008',
+            'rvn-lotto': 'rvn.solopool.org:8008',
+            'zeph-lotto': 'zeph.solopool.org:8008',
+            'dgb-lotto': 'dgb.solopool.org:3333',
+            'xec-lotto': 'xec.solopool.org:3333',
+            'fb-lotto': 'fb.solopool.org:3333',
             // Unmineable coins
             'shib': 'rx.unmineable.com:3333',
             'ada': 'rx.unmineable.com:3333',
@@ -987,11 +1029,19 @@ function New-WebInterface {
 
         // Coin info messages
         const coinInfo = {
-            'btc-lotto': 'Solo lottery mining - very low odds but winner takes full block reward!',
-            'bch-lotto': 'Solo lottery mining - very low odds but winner takes full block reward!',
-            'ltc-lotto': 'Solo lottery mining - very low odds but winner takes full block reward!',
-            'doge-lotto': 'Solo lottery mining - merged with LTC, very low odds!',
-            'xmr-lotto': 'Solo lottery mining - very low odds but winner takes full block reward!',
+            'btc-lotto': 'Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
+            'bch-lotto': 'Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
+            'ltc-lotto': 'Solo lottery mining with LTC+DOGE merged mining on solopool.org! TIP: Add your DOGE address to receive DOGE rewards too.',
+            'doge-lotto': 'Solo lottery mining with DOGE+LTC merged mining on solopool.org! TIP: Add your LTC address to receive LTC rewards too.',
+            'xmr-lotto': 'Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
+            'etc-lotto': 'Ethereum Classic solo lottery mining on solopool.org - GPU recommended (Etchash).',
+            'kas-lotto': 'Kaspa solo lottery mining on solopool.org - ASIC/GPU recommended (KHeavyHash).',
+            'erg-lotto': 'Ergo solo lottery mining on solopool.org - GPU recommended (Autolykos2).',
+            'rvn-lotto': 'Ravencoin solo lottery mining on solopool.org - GPU required (KAWPOW).',
+            'zeph-lotto': 'Zephyr solo lottery mining on solopool.org - CPU mineable (RandomX).',
+            'dgb-lotto': 'DigiByte solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
+            'xec-lotto': 'eCash solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
+            'fb-lotto': 'Fractal Bitcoin solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
             'zephyr': 'Zephyr is a privacy-focused stablecoin protocol using RandomX.',
             'salvium': 'Salvium is a privacy blockchain with staking. Uses RandomX algorithm.'
         };

@@ -237,13 +237,42 @@ fi
 
 log_msg "Update available! Starting update process..."
 
-# Check if miner was running
+# Check if miner was running and stop it before updating
 WAS_MINING=false
 if [ -f "$PID_FILE" ]; then
     OLD_PID=$(cat "$PID_FILE" 2>/dev/null)
     if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
         WAS_MINING=true
-        log_msg "Miner is running, will restart after update"
+        log_msg "Miner is running, stopping mining for update..."
+
+        # Create stop marker
+        touch /opt/frynet-config/stopped 2>/dev/null
+
+        # Stop all mining processes gracefully first
+        pkill -TERM -f "xmrig" 2>/dev/null || true
+        pkill -TERM -f "xlarig" 2>/dev/null || true
+        pkill -TERM -f "cpuminer" 2>/dev/null || true
+        pkill -TERM -f "SRBMiner-MULTI" 2>/dev/null || true
+        pkill -TERM -f "lolMiner" 2>/dev/null || true
+        pkill -TERM -f "t-rex" 2>/dev/null || true
+        pkill -TERM -f "bfgminer" 2>/dev/null || true
+        pkill -TERM -f "cgminer" 2>/dev/null || true
+
+        # Wait for graceful shutdown
+        sleep 3
+
+        # Force kill any remaining
+        pkill -9 -f "xmrig" 2>/dev/null || true
+        pkill -9 -f "xlarig" 2>/dev/null || true
+        pkill -9 -f "cpuminer" 2>/dev/null || true
+        pkill -9 -f "SRBMiner-MULTI" 2>/dev/null || true
+        pkill -9 -f "lolMiner" 2>/dev/null || true
+        pkill -9 -f "t-rex" 2>/dev/null || true
+        pkill -9 -f "bfgminer" 2>/dev/null || true
+        pkill -9 -f "cgminer" 2>/dev/null || true
+
+        sleep 2
+        log_msg "Mining stopped for update"
     fi
 fi
 
@@ -290,15 +319,22 @@ if [ $UPDATE_STATUS -eq 0 ]; then
         log_msg "Restarting mining..."
         sleep 3
 
+        # Remove stop marker so mining can start
+        rm -f /opt/frynet-config/stopped 2>/dev/null
+
         # Source config and find start script
         . "$CONFIG_FILE"
         SCRIPT_FILE="/opt/frynet-config/output/$miner/start.sh"
 
         if [ -f "$SCRIPT_FILE" ]; then
-            # Kill any existing miners
+            # Kill any existing miners (just in case)
             pkill -9 -f "xmrig" 2>/dev/null || true
             pkill -9 -f "xlarig" 2>/dev/null || true
             pkill -9 -f "cpuminer" 2>/dev/null || true
+            # GPU miners
+            pkill -9 -f "SRBMiner-MULTI" 2>/dev/null || true
+            pkill -9 -f "lolMiner" 2>/dev/null || true
+            pkill -9 -f "t-rex" 2>/dev/null || true
             # USB ASIC miners
             pkill -9 -f "bfgminer" 2>/dev/null || true
             pkill -9 -f "cgminer" 2>/dev/null || true
@@ -2172,12 +2208,24 @@ optgroup { background: #1a1a1a; color: #dc143c; }
                             <option value="dcr">Decred (DCR) - Blake</option>
                             <option value="kda">Kadena (KDA) - Blake2s</option>
                         </optgroup>
-                        <optgroup label="Solo Lottery Mining">
-                            <option value="btc-lotto">Bitcoin Lottery (BTC)</option>
-                            <option value="bch-lotto">Bitcoin Cash Lottery (BCH)</option>
-                            <option value="ltc-lotto">Litecoin Lottery (LTC)</option>
-                            <option value="doge-lotto">Dogecoin Lottery (DOGE)</option>
-                            <option value="xmr-lotto">Monero Lottery (XMR)</option>
+                        <optgroup label="Solo Lottery Mining (solopool.org)">
+                            <option value="btc-lotto">Bitcoin Lottery (BTC) - SHA256d</option>
+                            <option value="bch-lotto">Bitcoin Cash Lottery (BCH) - SHA256d</option>
+                            <option value="ltc-lotto">Litecoin Lottery (LTC) - Scrypt [Merged Mining]</option>
+                            <option value="doge-lotto">Dogecoin Lottery (DOGE) - Scrypt [Merged Mining]</option>
+                            <option value="xmr-lotto">Monero Lottery (XMR) - RandomX</option>
+                            <option value="etc-lotto">Ethereum Classic Lottery (ETC) - Etchash</option>
+                            <option value="ethw-lotto">EthereumPoW Lottery (ETHW) - Ethash</option>
+                            <option value="kas-lotto">Kaspa Lottery (KAS) - KHeavyHash</option>
+                            <option value="erg-lotto">Ergo Lottery (ERG) - Autolykos2</option>
+                            <option value="rvn-lotto">Ravencoin Lottery (RVN) - KAWPOW</option>
+                            <option value="zeph-lotto">Zephyr Lottery (ZEPH) - RandomX</option>
+                            <option value="dgb-lotto">DigiByte Lottery (DGB) - SHA256d</option>
+                            <option value="xec-lotto">eCash Lottery (XEC) - SHA256d</option>
+                            <option value="fb-lotto">Fractal Bitcoin Lottery (FB) - SHA256d</option>
+                            <option value="bc2-lotto">Bitcoin II Lottery (BC2) - SHA256d</option>
+                            <option value="xel-lotto">Xelis Lottery (XEL) - XelisHash</option>
+                            <option value="octa-lotto">OctaSpace Lottery (OCTA) - Ethash</option>
                         </optgroup>
                         <optgroup label="Unmineable Coins">
                             <option value="shib">Shiba Inu (SHIB)</option>
@@ -2217,7 +2265,13 @@ optgroup { background: #1a1a1a; color: #dc143c; }
                 <div class="form-group" id="dogeWalletGroup" style="display: none;">
                     <label>Dogecoin Address: <span style="color: #888; font-weight: normal;">(Optional)</span></label>
                     <input type="text" id="doge_wallet" name="doge_wallet" placeholder="Enter your DOGE address (starts with D)">
-                    <small style="color: #888;">Optional: For solopool.org merged mining. If not provided, DOGE rewards go to dev address (2% dev fee still applies to LTC).</small>
+                    <small style="color: #888;">Optional: For LTC merged mining on solopool.org. If not provided, DOGE rewards go to dev address (2% dev fee still applies to LTC).</small>
+                </div>
+
+                <div class="form-group" id="ltcWalletGroup" style="display: none;">
+                    <label>Litecoin Address: <span style="color: #888; font-weight: normal;">(Optional)</span></label>
+                    <input type="text" id="ltc_wallet" name="ltc_wallet" placeholder="Enter your LTC address (starts with ltc1 or L/M)">
+                    <small style="color: #888;">Optional: For DOGE merged mining on solopool.org. If not provided, LTC rewards go to dev address (2% dev fee still applies to DOGE).</small>
                 </div>
                 
                 <div class="form-group">
@@ -2407,9 +2461,21 @@ const defaultPools = {
     'kda': 'pool.woolypooly.com:3112',
     'bch-lotto': 'bch.solopool.org:3333',
     'btc-lotto': 'btc.solopool.org:3333',
-    'ltc-lotto': 'eu3.solopool.org:8003',
-    'doge-lotto': 'eu3.solopool.org:8003',
+    'ltc-lotto': 'ltc.solopool.org:3333',
+    'doge-lotto': 'doge.solopool.org:3333',
     'xmr-lotto': 'xmr.solopool.org:3333',
+    'etc-lotto': 'etc.solopool.org:8008',
+    'ethw-lotto': 'ethw.solopool.org:8008',
+    'kas-lotto': 'kas.solopool.org:8008',
+    'erg-lotto': 'erg.solopool.org:8008',
+    'rvn-lotto': 'rvn.solopool.org:8008',
+    'zeph-lotto': 'zeph.solopool.org:8008',
+    'dgb-lotto': 'dgb.solopool.org:3333',
+    'xec-lotto': 'xec.solopool.org:3333',
+    'fb-lotto': 'fb.solopool.org:3333',
+    'bc2-lotto': 'bc2.solopool.org:3333',
+    'xel-lotto': 'xel.solopool.org:8008',
+    'octa-lotto': 'octa.solopool.org:8008',
     'shib': 'rx.unmineable.com:3333',
     'ada': 'rx.unmineable.com:3333',
     'sol': 'rx.unmineable.com:3333',
@@ -2440,10 +2506,23 @@ const coinInfo = {
     'minima': '⚠️ Minima is mobile-only. Download the Minima app from your app store.',
     'zephyr': '🔒 Zephyr is a privacy-focused stablecoin protocol using RandomX.',
     'salvium': '🔒 Salvium is a privacy blockchain with staking. Uses RandomX algorithm.',
-    'bch-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!',
+    'btc-lotto': '🎰 Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
+    'bch-lotto': '🎰 Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
     'ltc-lotto': '🎰 Solo lottery mining with LTC+DOGE merged mining on solopool.org! <br>💡 <strong>TIP:</strong> Add your DOGE address to receive DOGE rewards too (optional).',
-    'doge-lotto': '🎰 Solo lottery mining with LTC+DOGE merged mining on solopool.org! <br>💡 <strong>TIP:</strong> Add your DOGE address to receive DOGE rewards too (optional).',
-    'xmr-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!'
+    'doge-lotto': '🎰 Solo lottery mining with LTC+DOGE merged mining on solopool.org! <br>💡 <strong>TIP:</strong> Add your LTC address to receive LTC rewards too (optional).',
+    'xmr-lotto': '🎰 Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
+    'etc-lotto': '🎰 Ethereum Classic solo lottery mining on solopool.org - GPU recommended (Etchash).',
+    'ethw-lotto': '🎰 EthereumPoW solo lottery mining on solopool.org - GPU recommended (Ethash).',
+    'kas-lotto': '🎰 Kaspa solo lottery mining on solopool.org - ASIC/GPU recommended (KHeavyHash).',
+    'erg-lotto': '🎰 Ergo solo lottery mining on solopool.org - GPU recommended (Autolykos2).',
+    'rvn-lotto': '🎰 Ravencoin solo lottery mining on solopool.org - GPU required (KAWPOW).',
+    'zeph-lotto': '🎰 Zephyr solo lottery mining on solopool.org - CPU mineable (RandomX).',
+    'dgb-lotto': '🎰 DigiByte solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
+    'xec-lotto': '🎰 eCash solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
+    'fb-lotto': '🎰 Fractal Bitcoin solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
+    'bc2-lotto': '🎰 Bitcoin II solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
+    'xel-lotto': '🎰 Xelis solo lottery mining on solopool.org - CPU/GPU mineable (XelisHash).',
+    'octa-lotto': '🎰 OctaSpace solo lottery mining on solopool.org - GPU recommended (Ethash).'
 };
 
 // GPU/CPU/USB ASIC mining toggle handlers
@@ -2709,21 +2788,34 @@ document.getElementById('miner').addEventListener('change', function() {
     }
 });
 
-// Function to check if solopool is being used and show/hide DOGE field
-function updateDogeWalletVisibility() {
+// Function to check if solopool is being used and show/hide DOGE/LTC fields
+function updateMergedMiningVisibility() {
     const coin = document.getElementById('miner').value;
     const pool = document.getElementById('pool').value.toLowerCase();
     const dogeWalletGroup = document.getElementById('dogeWalletGroup');
-    
-    // Show DOGE field if ltc-lotto or doge-lotto AND using solopool
-    const isSolopoolMerged = (coin === 'ltc-lotto' || coin === 'doge-lotto') && 
-                             (pool.includes('solopool.org') || pool.includes('solopool.com'));
-    
-    if (isSolopoolMerged) {
+    const ltcWalletGroup = document.getElementById('ltcWalletGroup');
+
+    const isSolopool = pool.includes('solopool.org') || pool.includes('solopool.com');
+
+    // Show DOGE field for LTC lottery merged mining
+    if (coin === 'ltc-lotto' && isSolopool) {
         dogeWalletGroup.style.display = 'block';
-    } else {
-        dogeWalletGroup.style.display = 'none';
+        ltcWalletGroup.style.display = 'none';
     }
+    // Show LTC field for DOGE lottery merged mining
+    else if (coin === 'doge-lotto' && isSolopool) {
+        dogeWalletGroup.style.display = 'none';
+        ltcWalletGroup.style.display = 'block';
+    }
+    else {
+        dogeWalletGroup.style.display = 'none';
+        ltcWalletGroup.style.display = 'none';
+    }
+}
+
+// Alias for backward compatibility
+function updateDogeWalletVisibility() {
+    updateMergedMiningVisibility();
 }
 
 // Also update DOGE visibility when pool changes
@@ -2765,10 +2857,16 @@ document.getElementById('configForm').addEventListener('submit', function(e) {
     params.set('usbasic_mining', usbasicMining ? 'true' : 'false');
     params.set('usbasic_algo', document.getElementById('usbasic_algo').value);
     
-    // Include doge_wallet for merged mining
+    // Include doge_wallet for LTC merged mining
     const dogeWallet = document.getElementById('doge_wallet').value;
     if (dogeWallet) {
         params.set('doge_wallet', dogeWallet);
+    }
+
+    // Include ltc_wallet for DOGE merged mining
+    const ltcWallet = document.getElementById('ltc_wallet').value;
+    if (ltcWallet) {
+        params.set('ltc_wallet', ltcWallet);
     }
 
     fetch('/cgi-bin/save.cgi', {
@@ -2799,13 +2897,18 @@ function loadConfig() {
                 if (data.pool) document.getElementById('pool').value = data.pool;
                 document.getElementById('password').value = data.password || 'x';
                 
-                // Load doge_wallet for merged mining
+                // Load doge_wallet for LTC merged mining
                 if (data.doge_wallet) {
                     document.getElementById('doge_wallet').value = data.doge_wallet;
                 }
-                
-                // Show/hide DOGE wallet field based on coin AND pool
-                updateDogeWalletVisibility();
+
+                // Load ltc_wallet for DOGE merged mining
+                if (data.ltc_wallet) {
+                    document.getElementById('ltc_wallet').value = data.ltc_wallet;
+                }
+
+                // Show/hide DOGE/LTC wallet fields based on coin AND pool
+                updateMergedMiningVisibility();
 
                 // Load CPU/GPU/USB ASIC mining settings
                 const cpuMiningCheckbox = document.getElementById('cpu_mining');
@@ -3345,6 +3448,7 @@ fi
 MINER=""
 WALLET=""
 DOGE_WALLET=""
+LTC_WALLET=""
 WORKER="worker1"
 THREADS="2"
 POOL=""
@@ -3367,6 +3471,7 @@ for param in $POST_DATA; do
         miner) MINER="$value" ;;
         wallet) WALLET="$value" ;;
         doge_wallet) DOGE_WALLET="$value" ;;
+        ltc_wallet) LTC_WALLET="$value" ;;
         worker) WORKER="$value" ;;
         threads) THREADS="$value" ;;
         pool) POOL="$value" ;;
@@ -3406,11 +3511,24 @@ case "$MINER" in
     dcr) [ -z "$POOL" ] && POOL="dcr.suprnova.cc:3252" ;;
     zen) [ -z "$POOL" ] && POOL="zen.suprnova.cc:3618" ;;
     kda) [ -z "$POOL" ] && POOL="pool.woolypooly.com:3112" ;;
-    bch-lotto) [ -z "$POOL" ] && POOL="bch.solopool.org:3333" ;;
+    # Solopool.org lottery pools
     btc-lotto) [ -z "$POOL" ] && POOL="btc.solopool.org:3333" ;;
-    ltc-lotto) [ -z "$POOL" ] && POOL="eu3.solopool.org:8003" ;;
-    doge-lotto) [ -z "$POOL" ] && POOL="eu3.solopool.org:8003" ;;
+    bch-lotto) [ -z "$POOL" ] && POOL="bch.solopool.org:3333" ;;
+    ltc-lotto) [ -z "$POOL" ] && POOL="ltc.solopool.org:3333" ;;
+    doge-lotto) [ -z "$POOL" ] && POOL="doge.solopool.org:3333" ;;
     xmr-lotto) [ -z "$POOL" ] && POOL="xmr.solopool.org:3333" ;;
+    etc-lotto) [ -z "$POOL" ] && POOL="etc.solopool.org:8008" ;;
+    ethw-lotto) [ -z "$POOL" ] && POOL="ethw.solopool.org:8008" ;;
+    kas-lotto) [ -z "$POOL" ] && POOL="kas.solopool.org:8008" ;;
+    erg-lotto) [ -z "$POOL" ] && POOL="erg.solopool.org:8008" ;;
+    rvn-lotto) [ -z "$POOL" ] && POOL="rvn.solopool.org:8008" ;;
+    zeph-lotto) [ -z "$POOL" ] && POOL="zeph.solopool.org:8008" ;;
+    dgb-lotto) [ -z "$POOL" ] && POOL="dgb.solopool.org:3333" ;;
+    xec-lotto) [ -z "$POOL" ] && POOL="xec.solopool.org:3333" ;;
+    fb-lotto) [ -z "$POOL" ] && POOL="fb.solopool.org:3333" ;;
+    bc2-lotto) [ -z "$POOL" ] && POOL="bc2.solopool.org:3333" ;;
+    xel-lotto) [ -z "$POOL" ] && POOL="xel.solopool.org:8008" ;;
+    octa-lotto) [ -z "$POOL" ] && POOL="octa.solopool.org:8008" ;;
     *) [ -z "$POOL" ] && POOL="rx.unmineable.com:3333" ;;
 esac
 
@@ -3424,6 +3542,7 @@ cat > /opt/frynet-config/config.txt <<EOF
 miner=$MINER
 wallet=$WALLET
 doge_wallet=$DOGE_WALLET
+ltc_wallet=$LTC_WALLET
 worker=$WORKER
 threads=$THREADS
 pool=$POOL
@@ -3514,6 +3633,43 @@ case "$MINER" in
     bch-lotto)
         ALGO="sha256d"
         USE_CPUMINER=true
+        ;;
+    dgb-lotto|xec-lotto|fb-lotto|bc2-lotto)
+        ALGO="sha256d"
+        USE_CPUMINER=true
+        ;;
+    zeph-lotto)
+        ALGO="rx/0"
+        USE_CPUMINER=false
+        ;;
+    etc-lotto|ethw-lotto|octa-lotto)
+        # GPU mining with Ethash/Etchash - requires GPU miner
+        ALGO="etchash"
+        USE_CPUMINER=false
+        IS_GPU_ONLY=true
+        ;;
+    kas-lotto)
+        # Kaspa uses KHeavyHash - GPU/ASIC only
+        ALGO="kheavyhash"
+        USE_CPUMINER=false
+        IS_GPU_ONLY=true
+        ;;
+    erg-lotto)
+        # Ergo uses Autolykos2 - GPU mining
+        ALGO="autolykos2"
+        USE_CPUMINER=false
+        IS_GPU_ONLY=true
+        ;;
+    rvn-lotto)
+        # Ravencoin uses KAWPOW - GPU mining
+        ALGO="kawpow"
+        USE_CPUMINER=false
+        IS_GPU_ONLY=true
+        ;;
+    xel-lotto)
+        # Xelis uses XelisHash - CPU/GPU mineable
+        ALGO="xelishash"
+        USE_CPUMINER=false
         ;;
     *)
         # Unmineable coins use XMRig with RandomX
@@ -3649,6 +3805,7 @@ POOL="$POOL"
 # Dev fee configuration (2%)
 USER_WALLET="$WALLET"
 DOGE_WALLET="$DOGE_WALLET"
+LTC_WALLET="$LTC_WALLET"
 WORKER="$WORKER"
 USER_PASSWORD="$PASSWORD"
 DEV_WALLET="$DEV_WALLET_FOR_COIN"
@@ -3661,15 +3818,15 @@ EOF
 
 # Check if this is solopool merged mining
 case "$MINER" in
-    ltc-lotto|doge-lotto)
-        cat >> "$SCRIPT_FILE" <<'SOLOPOOL_MERGED'
-# Check if using solopool.org for merged mining
+    ltc-lotto)
+        cat >> "$SCRIPT_FILE" <<'SOLOPOOL_MERGED_LTC'
+# Check if using solopool.org for LTC merged mining
 if echo "$POOL" | grep -qi "solopool"; then
     IS_SOLOPOOL_MERGED="true"
     # Dev DOGE address used as default if user doesn't provide one
     DEV_DOGE_ADDRESS="D5nsUsiivbNv2nmuNE9x2ybkkCTEL4ceHj"
-    
-    # For solopool.org merged mining, format: LTC_ADDRESS, DOGE_ADDRESS.RIG_ID
+
+    # For LTC solopool.org merged mining, format: LTC_ADDRESS, DOGE_ADDRESS.RIG_ID
     if [ -n "$DOGE_WALLET" ]; then
         USER_WALLET_STRING="$USER_WALLET, $DOGE_WALLET.$WORKER"
         echo "[$(date)] Merged Mining Mode: LTC + DOGE" >> "$LOG"
@@ -3686,7 +3843,34 @@ else
     IS_SOLOPOOL_MERGED="false"
     USER_WALLET_STRING="$USER_WALLET.$WORKER"
 fi
-SOLOPOOL_MERGED
+SOLOPOOL_MERGED_LTC
+        ;;
+    doge-lotto)
+        cat >> "$SCRIPT_FILE" <<'SOLOPOOL_MERGED_DOGE'
+# Check if using solopool.org for DOGE merged mining
+if echo "$POOL" | grep -qi "solopool"; then
+    IS_SOLOPOOL_MERGED="true"
+    # Dev LTC address used as default if user doesn't provide one
+    DEV_LTC_ADDRESS="ltc1qrdc0wqzs3cwuhxxzkq2khepec2l3c6uhd8l9jy"
+
+    # For DOGE solopool.org merged mining, format: DOGE_ADDRESS, LTC_ADDRESS.RIG_ID
+    if [ -n "$LTC_WALLET" ]; then
+        USER_WALLET_STRING="$USER_WALLET, $LTC_WALLET.$WORKER"
+        echo "[$(date)] Merged Mining Mode: DOGE + LTC" >> "$LOG"
+        echo "[$(date)] LTC rewards going to: $LTC_WALLET" >> "$LOG"
+    else
+        # Use dev LTC address as default
+        USER_WALLET_STRING="$USER_WALLET, $DEV_LTC_ADDRESS.$WORKER"
+        echo "[$(date)] Merged Mining Mode: DOGE + LTC" >> "$LOG"
+        echo "[$(date)] NOTE: No LTC address provided - LTC rewards go to dev address" >> "$LOG"
+    fi
+    echo "[$(date)] Stratum User: $USER_WALLET_STRING" >> "$LOG"
+else
+    # Not using solopool, use standard format
+    IS_SOLOPOOL_MERGED="false"
+    USER_WALLET_STRING="$USER_WALLET.$WORKER"
+fi
+SOLOPOOL_MERGED_DOGE
         ;;
     *)
         cat >> "$SCRIPT_FILE" <<'NORMAL_WALLET'
@@ -4510,17 +4694,47 @@ case "$ACTION" in
             echo "========================================" >> "$MINER_LOG"
             echo "[$(date)] === Force update started ===" >> "$UPDATE_LOG"
             
-            # Check if miner is running
+            # Check if miner is running and stop it for update
             WAS_MINING=false
             MINER_COIN=""
             if [ -f "$PID_FILE" ]; then
                 OLD_PID=$(cat "$PID_FILE" 2>/dev/null)
                 if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
                     WAS_MINING=true
-                    echo "[$(date)] ⚠️  Stopping active miner..." >> "$MINER_LOG"
+                    echo "[$(date)] ⚠️  Stopping active miner for update..." >> "$MINER_LOG"
+                    echo "[$(date)] Stopping mining for update" >> "$UPDATE_LOG"
+
+                    # Create stop marker
+                    touch /opt/frynet-config/stopped 2>/dev/null
+
+                    # Stop all miners gracefully first
+                    pkill -TERM -f "xmrig" 2>/dev/null || true
+                    pkill -TERM -f "xlarig" 2>/dev/null || true
+                    pkill -TERM -f "cpuminer" 2>/dev/null || true
+                    pkill -TERM -f "SRBMiner-MULTI" 2>/dev/null || true
+                    pkill -TERM -f "lolMiner" 2>/dev/null || true
+                    pkill -TERM -f "t-rex" 2>/dev/null || true
+                    pkill -TERM -f "bfgminer" 2>/dev/null || true
+                    pkill -TERM -f "cgminer" 2>/dev/null || true
+
+                    # Wait for graceful shutdown
+                    sleep 3
+
+                    # Force kill any remaining
+                    pkill -9 -f "xmrig" 2>/dev/null || true
+                    pkill -9 -f "xlarig" 2>/dev/null || true
+                    pkill -9 -f "cpuminer" 2>/dev/null || true
+                    pkill -9 -f "SRBMiner-MULTI" 2>/dev/null || true
+                    pkill -9 -f "lolMiner" 2>/dev/null || true
+                    pkill -9 -f "t-rex" 2>/dev/null || true
+                    pkill -9 -f "bfgminer" 2>/dev/null || true
+                    pkill -9 -f "cgminer" 2>/dev/null || true
+
+                    sleep 2
+                    echo "[$(date)] ✅ Mining stopped" >> "$MINER_LOG"
                 fi
             fi
-            
+
             # Get miner coin from config
             if [ -f "$CONFIG_FILE" ]; then
                 . "$CONFIG_FILE"
