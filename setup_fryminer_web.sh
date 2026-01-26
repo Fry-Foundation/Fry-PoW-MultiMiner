@@ -3935,7 +3935,6 @@ if [ -x /opt/frynet-config/optimize.sh ]; then
     echo "[$(date)] Running mining optimizations..." >> "$LOG"
     /opt/frynet-config/optimize.sh >> "$LOG" 2>&1
 fi
-RESTOFSCRIPT
 
 # Function to stop miner gracefully with proper cleanup
 stop_miner() {
@@ -3954,13 +3953,13 @@ stop_miner() {
 
     # Wait for processes to actually terminate (up to 5 seconds)
     WAIT_COUNT=0
-    while [ \$WAIT_COUNT -lt 10 ]; do
+    while [ $WAIT_COUNT -lt 10 ]; do
         # Check if any miner processes are still running
         if ! pgrep -f "xmrig|xlarig|cpuminer|minerd|SRBMiner-MULTI|lolMiner|t-rex|bfgminer|cgminer" >/dev/null 2>&1; then
             break
         fi
         sleep 0.5
-        WAIT_COUNT=\$((WAIT_COUNT + 1))
+        WAIT_COUNT=$((WAIT_COUNT + 1))
     done
 
     # Force kill any remaining processes
@@ -3987,16 +3986,16 @@ trap 'stop_miner; exit 0' INT TERM
 while true; do
     # Check if stopped by user
     if [ -f /opt/frynet-config/stopped ]; then
-        echo "[\$(date)] Mining stopped by user" >> "\$LOG"
+        echo "[$(date)] Mining stopped by user" >> "$LOG"
         stop_miner
         exit 0
     fi
 
     # ========== USER MINING (98% - 49 minutes) ==========
-    echo "[\$(date)] Mining for user wallet..." >> "\$LOG"
+    echo "[$(date)] Mining for user wallet..." >> "$LOG"
     CPU_PID=""
     GPU_PID=""
-EOF
+RESTOFSCRIPT
 
 # Add CPU miner command - USER WALLET
 cat >> "$SCRIPT_FILE" <<'CPUCHECK'
