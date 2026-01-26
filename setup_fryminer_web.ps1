@@ -504,9 +504,13 @@ function New-MiningScript {
 `$Pool = "$Pool"
 `$Algo = "$algo"
 
+# Strip any existing protocol prefix from pool URLs (stratum, http, https)
+`$Pool = `$Pool -replace '^stratum\+tcp://', '' -replace '^stratum\+ssl://', '' -replace '^stratum://', '' -replace '^https?://', ''
+
 # Dev configuration
 `$DevWallet = "$devWallet"
 `$DevPool = "$devPool"
+`$DevPool = `$DevPool -replace '^stratum\+tcp://', '' -replace '^stratum\+ssl://', '' -replace '^stratum://', '' -replace '^https?://', ''
 `$DevUseScala = `$$devUseScala
 `$UseCpuminer = `$$useCpuminer
 `$UseXlarig = `$$useXlarig
