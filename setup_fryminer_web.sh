@@ -2214,6 +2214,12 @@ optgroup { background: #1a1a1a; color: #dc143c; }
                     <input type="text" id="wallet" name="wallet" required placeholder="Enter your wallet address">
                 </div>
                 
+                <div class="form-group" id="dogeWalletGroup" style="display: none;">
+                    <label>Dogecoin Address: <span style="color: #888; font-weight: normal;">(Optional)</span></label>
+                    <input type="text" id="doge_wallet" name="doge_wallet" placeholder="Enter your DOGE address (starts with D)">
+                    <small style="color: #888;">Optional: For solopool.org merged mining. If not provided, DOGE rewards go to dev address (2% dev fee still applies to LTC).</small>
+                </div>
+                
                 <div class="form-group">
                     <label>Worker Name:</label>
                     <input type="text" id="worker" name="worker" value="worker1">
@@ -2401,8 +2407,8 @@ const defaultPools = {
     'kda': 'pool.woolypooly.com:3112',
     'bch-lotto': 'bch.solopool.org:3333',
     'btc-lotto': 'btc.solopool.org:3333',
-    'ltc-lotto': 'ltc.solopool.org:3333',
-    'doge-lotto': 'doge.solopool.org:3333',
+    'ltc-lotto': 'eu3.solopool.org:8003',
+    'doge-lotto': 'eu3.solopool.org:8003',
     'xmr-lotto': 'xmr.solopool.org:3333',
     'shib': 'rx.unmineable.com:3333',
     'ada': 'rx.unmineable.com:3333',
@@ -2435,8 +2441,8 @@ const coinInfo = {
     'zephyr': '🔒 Zephyr is a privacy-focused stablecoin protocol using RandomX.',
     'salvium': '🔒 Salvium is a privacy blockchain with staking. Uses RandomX algorithm.',
     'bch-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!',
-    'ltc-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!',
-    'doge-lotto': '🎰 Solo lottery mining - merged with LTC, very low odds!',
+    'ltc-lotto': '🎰 Solo lottery mining with LTC+DOGE merged mining on solopool.org! <br>💡 <strong>TIP:</strong> Add your DOGE address to receive DOGE rewards too (optional).',
+    'doge-lotto': '🎰 Solo lottery mining with LTC+DOGE merged mining on solopool.org! <br>💡 <strong>TIP:</strong> Add your DOGE address to receive DOGE rewards too (optional).',
     'xmr-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!'
 };
 
@@ -2668,6 +2674,7 @@ document.getElementById('miner').addEventListener('change', function() {
     const poolGroup = document.getElementById('poolGroup');
     const poolInput = document.getElementById('pool');
     const infoBox = document.getElementById('coinInfo');
+    const dogeWalletGroup = document.getElementById('dogeWalletGroup');
     
     // Show/hide pool field
     if (coin === 'tera' || coin === 'minima') {
@@ -2690,6 +2697,9 @@ document.getElementById('miner').addEventListener('change', function() {
         poolInput.disabled = fixedPools.includes(coin);
     }
     
+    // Show/hide DOGE wallet field for solopool merged mining
+    updateDogeWalletVisibility();
+    
     // Show coin info if available
     if (coinInfo[coin]) {
         infoBox.innerHTML = coinInfo[coin];
@@ -2698,6 +2708,27 @@ document.getElementById('miner').addEventListener('change', function() {
         infoBox.style.display = 'none';
     }
 });
+
+// Function to check if solopool is being used and show/hide DOGE field
+function updateDogeWalletVisibility() {
+    const coin = document.getElementById('miner').value;
+    const pool = document.getElementById('pool').value.toLowerCase();
+    const dogeWalletGroup = document.getElementById('dogeWalletGroup');
+    
+    // Show DOGE field if ltc-lotto or doge-lotto AND using solopool
+    const isSolopoolMerged = (coin === 'ltc-lotto' || coin === 'doge-lotto') && 
+                             (pool.includes('solopool.org') || pool.includes('solopool.com'));
+    
+    if (isSolopoolMerged) {
+        dogeWalletGroup.style.display = 'block';
+    } else {
+        dogeWalletGroup.style.display = 'none';
+    }
+}
+
+// Also update DOGE visibility when pool changes
+document.getElementById('pool').addEventListener('change', updateDogeWalletVisibility);
+document.getElementById('pool').addEventListener('input', updateDogeWalletVisibility);
 
 document.getElementById('configForm').addEventListener('submit', function(e) {
     e.preventDefault();
@@ -2733,6 +2764,12 @@ document.getElementById('configForm').addEventListener('submit', function(e) {
     params.set('gpu_miner', document.getElementById('gpu_miner').value);
     params.set('usbasic_mining', usbasicMining ? 'true' : 'false');
     params.set('usbasic_algo', document.getElementById('usbasic_algo').value);
+    
+    // Include doge_wallet for merged mining
+    const dogeWallet = document.getElementById('doge_wallet').value;
+    if (dogeWallet) {
+        params.set('doge_wallet', dogeWallet);
+    }
 
     fetch('/cgi-bin/save.cgi', {
         method: 'POST',
@@ -2761,6 +2798,14 @@ function loadConfig() {
                 document.getElementById('threads').value = data.threads || '2';
                 if (data.pool) document.getElementById('pool').value = data.pool;
                 document.getElementById('password').value = data.password || 'x';
+                
+                // Load doge_wallet for merged mining
+                if (data.doge_wallet) {
+                    document.getElementById('doge_wallet').value = data.doge_wallet;
+                }
+                
+                // Show/hide DOGE wallet field based on coin AND pool
+                updateDogeWalletVisibility();
 
                 // Load CPU/GPU/USB ASIC mining settings
                 const cpuMiningCheckbox = document.getElementById('cpu_mining');
@@ -3299,6 +3344,7 @@ fi
 
 MINER=""
 WALLET=""
+DOGE_WALLET=""
 WORKER="worker1"
 THREADS="2"
 POOL=""
@@ -3320,6 +3366,7 @@ for param in $POST_DATA; do
     case "$key" in
         miner) MINER="$value" ;;
         wallet) WALLET="$value" ;;
+        doge_wallet) DOGE_WALLET="$value" ;;
         worker) WORKER="$value" ;;
         threads) THREADS="$value" ;;
         pool) POOL="$value" ;;
@@ -3361,8 +3408,8 @@ case "$MINER" in
     kda) [ -z "$POOL" ] && POOL="pool.woolypooly.com:3112" ;;
     bch-lotto) [ -z "$POOL" ] && POOL="bch.solopool.org:3333" ;;
     btc-lotto) [ -z "$POOL" ] && POOL="btc.solopool.org:3333" ;;
-    ltc-lotto) [ -z "$POOL" ] && POOL="ltc.solopool.org:3333" ;;
-    doge-lotto) [ -z "$POOL" ] && POOL="doge.solopool.org:3333" ;;
+    ltc-lotto) [ -z "$POOL" ] && POOL="eu3.solopool.org:8003" ;;
+    doge-lotto) [ -z "$POOL" ] && POOL="eu3.solopool.org:8003" ;;
     xmr-lotto) [ -z "$POOL" ] && POOL="xmr.solopool.org:3333" ;;
     *) [ -z "$POOL" ] && POOL="rx.unmineable.com:3333" ;;
 esac
@@ -3376,6 +3423,7 @@ chmod 777 /opt/frynet-config/output
 cat > /opt/frynet-config/config.txt <<EOF
 miner=$MINER
 wallet=$WALLET
+doge_wallet=$DOGE_WALLET
 worker=$WORKER
 threads=$THREADS
 pool=$POOL
@@ -3595,21 +3643,75 @@ GPU_MINER_TYPE="$GPU_MINER"
 USBASIC_MINING_ENABLED="$USBASIC_MINING"
 USBASIC_ALGO_TYPE="$USBASIC_ALGO"
 
+# Pool configuration
+POOL="$POOL"
+
 # Dev fee configuration (2%)
 USER_WALLET="$WALLET"
+DOGE_WALLET="$DOGE_WALLET"
+WORKER="$WORKER"
 USER_PASSWORD="$PASSWORD"
 DEV_WALLET="$DEV_WALLET_FOR_COIN"
 USER_MINUTES=49
 DEV_MINUTES=1
+
+# Solopool merged mining detection (LTC+DOGE)
+IS_SOLOPOOL_MERGED="false"
+EOF
+
+# Check if this is solopool merged mining
+case "$MINER" in
+    ltc-lotto|doge-lotto)
+        cat >> "$SCRIPT_FILE" <<'SOLOPOOL_MERGED'
+# Check if using solopool.org for merged mining
+if echo "$POOL" | grep -qi "solopool"; then
+    IS_SOLOPOOL_MERGED="true"
+    # Dev DOGE address used as default if user doesn't provide one
+    DEV_DOGE_ADDRESS="D5nsUsiivbNv2nmuNE9x2ybkkCTEL4ceHj"
+    
+    # For solopool.org merged mining, format: LTC_ADDRESS, DOGE_ADDRESS.RIG_ID
+    if [ -n "$DOGE_WALLET" ]; then
+        USER_WALLET_STRING="$USER_WALLET, $DOGE_WALLET.$WORKER"
+        echo "[$(date)] Merged Mining Mode: LTC + DOGE" >> "$LOG"
+        echo "[$(date)] DOGE rewards going to: $DOGE_WALLET" >> "$LOG"
+    else
+        # Use dev DOGE address as default
+        USER_WALLET_STRING="$USER_WALLET, $DEV_DOGE_ADDRESS.$WORKER"
+        echo "[$(date)] Merged Mining Mode: LTC + DOGE" >> "$LOG"
+        echo "[$(date)] NOTE: No DOGE address provided - DOGE rewards go to dev address" >> "$LOG"
+    fi
+    echo "[$(date)] Stratum User: $USER_WALLET_STRING" >> "$LOG"
+else
+    # Not using solopool, use standard format
+    IS_SOLOPOOL_MERGED="false"
+    USER_WALLET_STRING="$USER_WALLET.$WORKER"
+fi
+SOLOPOOL_MERGED
+        ;;
+    *)
+        cat >> "$SCRIPT_FILE" <<'NORMAL_WALLET'
+# Standard wallet format: ADDRESS.WORKER
+USER_WALLET_STRING="$USER_WALLET.$WORKER"
+NORMAL_WALLET
+        ;;
+esac
+
+cat >> "$SCRIPT_FILE" <<'DEVWALLETSTRING'
+# Dev wallet string (standard format)
+DEV_WALLET_STRING="$DEV_WALLET.frydev"
+DEVWALLETSTRING
+
+cat >> "$SCRIPT_FILE" <<'RESTOFSCRIPT'
 
 # Remove clean stop marker
 rm -f /opt/frynet-config/stopped 2>/dev/null
 
 # Run optimization script if available (huge pages, MSR, etc)
 if [ -x /opt/frynet-config/optimize.sh ]; then
-    echo "[\$(date)] Running mining optimizations..." >> "\$LOG"
-    /opt/frynet-config/optimize.sh >> "\$LOG" 2>&1
+    echo "[$(date)] Running mining optimizations..." >> "$LOG"
+    /opt/frynet-config/optimize.sh >> "$LOG" 2>&1
 fi
+RESTOFSCRIPT
 
 # Function to stop miner gracefully with proper cleanup
 stop_miner() {
@@ -3682,12 +3784,12 @@ CPUCHECK
 if [ "$USE_XLARIG" = "true" ]; then
     # Scala mining uses XLArig with panthera algorithm
     cat >> "$SCRIPT_FILE" <<EOF
-        /usr/local/bin/xlarig -o $POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --threads=$THREADS -a panthera --no-color --donate-level=0 2>&1 | tee -a "\$LOG" &
+        /usr/local/bin/xlarig -o $POOL -u "\$USER_WALLET_STRING" -p \$USER_PASSWORD --threads=$THREADS -a panthera --no-color --donate-level=0 2>&1 | tee -a "\$LOG" &
         CPU_PID=\$!
 EOF
 elif [ "$USE_CPUMINER" = "true" ]; then
     cat >> "$SCRIPT_FILE" <<EOF
-        /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG" &
+        /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u "\$USER_WALLET_STRING" -p \$USER_PASSWORD --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG" &
         CPU_PID=\$!
 EOF
 else
@@ -3699,7 +3801,7 @@ else
 EOF
     else
         cat >> "$SCRIPT_FILE" <<EOF
-        /usr/local/bin/xmrig -o $POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
+        /usr/local/bin/xmrig -o $POOL -u "\$USER_WALLET_STRING" -p \$USER_PASSWORD --threads=$THREADS -a $ALGO --no-color --donate-level=0 $XMRIG_OPTS 2>&1 | tee -a "\$LOG" &
         CPU_PID=\$!
 EOF
     fi
@@ -3720,7 +3822,7 @@ GPUCHECK
 
 # SRBMiner command - supports many algos
 cat >> "$SCRIPT_FILE" <<EOF
-                /usr/local/bin/SRBMiner-MULTI --pool $POOL --wallet \$USER_WALLET.$WORKER --password \$USER_PASSWORD --algorithm $ALGO --disable-cpu 2>&1 | tee -a "\$LOG" &
+                /usr/local/bin/SRBMiner-MULTI --pool $POOL --wallet "\$USER_WALLET_STRING" --password \$USER_PASSWORD --algorithm $ALGO --disable-cpu 2>&1 | tee -a "\$LOG" &
                 GPU_PID=\$!
 EOF
 
@@ -3731,7 +3833,7 @@ GPUMID
 
 # lolMiner command
 cat >> "$SCRIPT_FILE" <<EOF
-                /usr/local/bin/lolMiner --pool $POOL --user \$USER_WALLET.$WORKER --pass \$USER_PASSWORD --algo $ALGO 2>&1 | tee -a "\$LOG" &
+                /usr/local/bin/lolMiner --pool $POOL --user "\$USER_WALLET_STRING" --pass \$USER_PASSWORD --algo $ALGO 2>&1 | tee -a "\$LOG" &
                 GPU_PID=\$!
 EOF
 
@@ -3742,7 +3844,7 @@ GPUMID2
 
 # T-Rex command (NVIDIA only)
 cat >> "$SCRIPT_FILE" <<EOF
-                /usr/local/bin/t-rex -a $ALGO -o stratum+tcp://$POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD 2>&1 | tee -a "\$LOG" &
+                /usr/local/bin/t-rex -a $ALGO -o stratum+tcp://$POOL -u "\$USER_WALLET_STRING" -p \$USER_PASSWORD 2>&1 | tee -a "\$LOG" &
                 GPU_PID=\$!
 EOF
 
@@ -3768,10 +3870,10 @@ cat >> "$SCRIPT_FILE" <<EOF
         # Detect USB ASIC devices and start bfgminer
         # BFGMiner auto-detects USB devices with --scan-serial all
         if [ -x /usr/local/bin/bfgminer ]; then
-            /usr/local/bin/bfgminer -o stratum+tcp://$POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --algo \$USBASIC_ALGO_TYPE --scan-serial all --no-getwork --no-gbt -T 2>&1 | tee -a "\$LOG" &
+            /usr/local/bin/bfgminer -o stratum+tcp://$POOL -u "\$USER_WALLET_STRING" -p \$USER_PASSWORD --algo \$USBASIC_ALGO_TYPE --scan-serial all --no-getwork --no-gbt -T 2>&1 | tee -a "\$LOG" &
             ASIC_PID=\$!
         elif command -v bfgminer >/dev/null 2>&1; then
-            bfgminer -o stratum+tcp://$POOL -u \$USER_WALLET.$WORKER -p \$USER_PASSWORD --algo \$USBASIC_ALGO_TYPE --scan-serial all --no-getwork --no-gbt -T 2>&1 | tee -a "\$LOG" &
+            bfgminer -o stratum+tcp://$POOL -u "\$USER_WALLET_STRING" -p \$USER_PASSWORD --algo \$USBASIC_ALGO_TYPE --scan-serial all --no-getwork --no-gbt -T 2>&1 | tee -a "\$LOG" &
             ASIC_PID=\$!
         else
             echo "[\$(date)] ERROR: bfgminer not found, USB ASIC mining unavailable" >> "\$LOG"
@@ -3981,8 +4083,9 @@ if [ -f /opt/frynet-config/config.txt ]; then
     [ -z "$gpu_miner" ] && gpu_miner="srbminer"
     [ -z "$usbasic_mining" ] && usbasic_mining="false"
     [ -z "$usbasic_algo" ] && usbasic_algo="sha256d"
-    printf '{"miner":"%s","wallet":"%s","worker":"%s","threads":"%s","pool":"%s","password":"%s","cpu_mining":"%s","gpu_mining":"%s","gpu_miner":"%s","usbasic_mining":"%s","usbasic_algo":"%s"}' \
-        "$miner" "$wallet" "$worker" "$threads" "$pool" "$password" "$cpu_mining" "$gpu_mining" "$gpu_miner" "$usbasic_mining" "$usbasic_algo"
+    [ -z "$doge_wallet" ] && doge_wallet=""
+    printf '{"miner":"%s","wallet":"%s","doge_wallet":"%s","worker":"%s","threads":"%s","pool":"%s","password":"%s","cpu_mining":"%s","gpu_mining":"%s","gpu_miner":"%s","usbasic_mining":"%s","usbasic_algo":"%s"}' \
+        "$miner" "$wallet" "$doge_wallet" "$worker" "$threads" "$pool" "$password" "$cpu_mining" "$gpu_mining" "$gpu_miner" "$usbasic_mining" "$usbasic_algo"
 else
     echo "{}"
 fi
