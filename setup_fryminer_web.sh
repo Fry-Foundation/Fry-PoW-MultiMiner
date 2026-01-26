@@ -2548,8 +2548,8 @@ const coinInfo = {
     'salvium': '🔒 Salvium is a privacy blockchain with staking. Uses RandomX algorithm.',
     'btc-lotto': '🎰 Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
     'bch-lotto': '🎰 Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
-    'ltc-lotto': '🎰 Solo lottery mining with LTC+DOGE merged mining on solopool.org! <br>💡 <strong>TIP:</strong> Add your DOGE address to receive DOGE rewards too (optional).',
-    'doge-lotto': '🎰 Solo lottery mining with LTC+DOGE merged mining on solopool.org! <br>💡 <strong>TIP:</strong> Add your LTC address to receive LTC rewards too (optional).',
+    'ltc-lotto': '🎰 Litecoin solo lottery mining - very low odds but winner takes full block reward!',
+    'doge-lotto': '🎰 Dogecoin solo lottery mining - very low odds but winner takes full block reward!',
     'xmr-lotto': '🎰 Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
     'etc-lotto': '🎰 Ethereum Classic solo lottery mining on solopool.org - GPU recommended (Etchash).',
     'ethw-lotto': '🎰 EthereumPoW solo lottery mining on solopool.org - GPU recommended (Ethash).',
@@ -2801,32 +2801,51 @@ document.getElementById('miner').addEventListener('change', function() {
     } else {
         poolGroup.style.display = 'block';
         
-        // Set pool value intelligently
+        // Always set pool to the default for the selected coin (unless loading saved config)
         if (defaultPools[coin] && !isLoadingConfig) {
-            // Fixed pools (Unmineable, lottery) ALWAYS update
-            if (fixedPools.includes(coin)) {
-                poolInput.value = defaultPools[coin];
-            }
-            // Non-fixed pools only update if field is empty (preserve custom values)
-            else if (!poolInput.value) {
-                poolInput.value = defaultPools[coin];
-            }
+            poolInput.value = defaultPools[coin];
         }
         
+        // Disable pool editing for Unmineable coins
         poolInput.disabled = fixedPools.includes(coin);
     }
     
     // Show/hide DOGE wallet field for solopool merged mining
     updateDogeWalletVisibility();
     
-    // Show coin info if available
-    if (coinInfo[coin]) {
+    // Show coin info if available (with dynamic merged mining info)
+    updateCoinInfo();
+});
+
+// Function to update coin info box, including dynamic merged mining tips
+function updateCoinInfo() {
+    const coin = document.getElementById('miner').value;
+    const pool = document.getElementById('pool').value.toLowerCase();
+    const infoBox = document.getElementById('coinInfo');
+    const isSolopool = pool.includes('solopool.org') || pool.includes('solopool.com');
+    
+    // Dynamic coin info for merged mining coins
+    if (coin === 'ltc-lotto') {
+        if (isSolopool) {
+            infoBox.innerHTML = '🎰 Solo lottery mining with LTC+DOGE merged mining on solopool.org! <br>💡 <strong>TIP:</strong> Add your DOGE address to receive DOGE rewards too (optional).';
+        } else {
+            infoBox.innerHTML = '🎰 Litecoin solo lottery mining - very low odds but winner takes full block reward!';
+        }
+        infoBox.style.display = 'block';
+    } else if (coin === 'doge-lotto') {
+        if (isSolopool) {
+            infoBox.innerHTML = '🎰 Solo lottery mining with LTC+DOGE merged mining on solopool.org! <br>💡 <strong>TIP:</strong> Add your LTC address to receive LTC rewards too (optional).';
+        } else {
+            infoBox.innerHTML = '🎰 Dogecoin solo lottery mining - very low odds but winner takes full block reward!';
+        }
+        infoBox.style.display = 'block';
+    } else if (coinInfo[coin]) {
         infoBox.innerHTML = coinInfo[coin];
         infoBox.style.display = 'block';
     } else {
         infoBox.style.display = 'none';
     }
-});
+}
 
 // Function to check if solopool is being used and show/hide DOGE/LTC fields
 function updateMergedMiningVisibility() {
@@ -2858,9 +2877,15 @@ function updateDogeWalletVisibility() {
     updateMergedMiningVisibility();
 }
 
-// Also update DOGE visibility when pool changes
-document.getElementById('pool').addEventListener('change', updateDogeWalletVisibility);
-document.getElementById('pool').addEventListener('input', updateDogeWalletVisibility);
+// Also update DOGE visibility and coin info when pool changes
+document.getElementById('pool').addEventListener('change', function() {
+    updateDogeWalletVisibility();
+    updateCoinInfo();
+});
+document.getElementById('pool').addEventListener('input', function() {
+    updateDogeWalletVisibility();
+    updateCoinInfo();
+});
 
 document.getElementById('configForm').addEventListener('submit', function(e) {
     e.preventDefault();
@@ -2949,6 +2974,9 @@ function loadConfig() {
 
                 // Show/hide DOGE/LTC wallet fields based on coin AND pool
                 updateMergedMiningVisibility();
+
+                // Update coin info based on pool (for merged mining tips)
+                updateCoinInfo();
 
                 // Load CPU/GPU/USB ASIC mining settings
                 const cpuMiningCheckbox = document.getElementById('cpu_mining');
