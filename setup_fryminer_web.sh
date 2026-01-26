@@ -2425,8 +2425,8 @@ const defaultPools = {
     'one': 'rx.unmineable.com:3333'
 };
 
-// Fixed pools (cannot be changed) - Unmineable coins only
-const fixedPools = ['shib', 'ada', 'sol', 'zec', 'etc', 'rvn', 'trx', 'vet', 'xrp', 'dot', 'matic', 'atom', 'link', 'xlm', 'algo', 'avax', 'near', 'ftm', 'one'];
+// Fixed pools (cannot be changed) - Unmineable coins and lottery coins
+const fixedPools = ['shib', 'ada', 'sol', 'zec', 'etc', 'rvn', 'trx', 'vet', 'xrp', 'dot', 'matic', 'atom', 'link', 'xlm', 'algo', 'avax', 'near', 'ftm', 'one', 'btc-lotto', 'ltc-lotto', 'doge-lotto', 'bch-lotto', 'xmr-lotto'];
 
 // Coin info messages
 const coinInfo = {
@@ -2434,10 +2434,11 @@ const coinInfo = {
     'minima': '⚠️ Minima is mobile-only. Download the Minima app from your app store.',
     'zephyr': '🔒 Zephyr is a privacy-focused stablecoin protocol using RandomX.',
     'salvium': '🔒 Salvium is a privacy blockchain with staking. Uses RandomX algorithm.',
-    'bch-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!',
-    'ltc-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!',
-    'doge-lotto': '🎰 Solo lottery mining - merged with LTC, very low odds!',
-    'xmr-lotto': '🎰 Solo lottery mining - very low odds but winner takes full block reward!'
+    'btc-lotto': '🎰 Solo lottery mining on solopool.org - very low odds but winner takes full block reward! Pool: btc.solopool.org:3333',
+    'bch-lotto': '🎰 Solo lottery mining on solopool.org - very low odds but winner takes full block reward! Pool: bch.solopool.org:3333',
+    'ltc-lotto': '🎰 Solo lottery mining on solopool.org - very low odds but winner takes full block reward! Pool: ltc.solopool.org:3333',
+    'doge-lotto': '🎰 Solo lottery mining on solopool.org - merged with LTC, very low odds! Pool: doge.solopool.org:3333',
+    'xmr-lotto': '🎰 Solo lottery mining on solopool.org - very low odds but winner takes full block reward! Pool: xmr.solopool.org:3333'
 };
 
 // GPU/CPU/USB ASIC mining toggle handlers
@@ -2674,19 +2675,20 @@ document.getElementById('miner').addEventListener('change', function() {
         poolGroup.style.display = 'none';
     } else {
         poolGroup.style.display = 'block';
-        
+
         // Set pool value intelligently
-        if (defaultPools[coin] && !isLoadingConfig) {
-            // Fixed pools (Unmineable, lottery) ALWAYS update
+        if (defaultPools[coin]) {
+            // Fixed pools (Unmineable, lottery) ALWAYS update - even when loading config
+            // This prevents users from using incorrect pool addresses for solo mining
             if (fixedPools.includes(coin)) {
                 poolInput.value = defaultPools[coin];
             }
-            // Non-fixed pools only update if field is empty (preserve custom values)
-            else if (!poolInput.value) {
+            // Non-fixed pools only update if field is empty (preserve custom values) and not loading
+            else if (!poolInput.value && !isLoadingConfig) {
                 poolInput.value = defaultPools[coin];
             }
         }
-        
+
         poolInput.disabled = fixedPools.includes(coin);
     }
     
