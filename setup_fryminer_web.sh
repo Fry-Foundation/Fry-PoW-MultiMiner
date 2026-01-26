@@ -2399,10 +2399,10 @@ const defaultPools = {
     'dash': 'dash.suprnova.cc:9989',
     'dcr': 'dcr.suprnova.cc:3252',
     'kda': 'pool.woolypooly.com:3112',
-    'bch-lotto': 'solo.ckpool.org:3333',
-    'btc-lotto': 'solo.ckpool.org:3333',
-    'ltc-lotto': 'litesolo.org:3333',
-    'doge-lotto': 'litesolo.org:3334',
+    'bch-lotto': 'bch.solopool.org:3333',
+    'btc-lotto': 'btc.solopool.org:3333',
+    'ltc-lotto': 'ltc.solopool.org:3333',
+    'doge-lotto': 'doge.solopool.org:3333',
     'xmr-lotto': 'xmr.solopool.org:3333',
     'shib': 'rx.unmineable.com:3333',
     'ada': 'rx.unmineable.com:3333',
@@ -2425,8 +2425,8 @@ const defaultPools = {
     'one': 'rx.unmineable.com:3333'
 };
 
-// Fixed pools (cannot be changed)
-const fixedPools = ['btc-lotto', 'bch-lotto', 'ltc-lotto', 'doge-lotto', 'xmr-lotto', 'shib', 'ada', 'sol', 'zec', 'etc', 'rvn', 'trx', 'vet', 'xrp', 'dot', 'matic', 'atom', 'link', 'xlm', 'algo', 'avax', 'near', 'ftm', 'one'];
+// Fixed pools (cannot be changed) - Unmineable coins only
+const fixedPools = ['shib', 'ada', 'sol', 'zec', 'etc', 'rvn', 'trx', 'vet', 'xrp', 'dot', 'matic', 'atom', 'link', 'xlm', 'algo', 'avax', 'near', 'ftm', 'one'];
 
 // Coin info messages
 const coinInfo = {
@@ -3359,11 +3359,11 @@ case "$MINER" in
     dcr) [ -z "$POOL" ] && POOL="dcr.suprnova.cc:3252" ;;
     zen) [ -z "$POOL" ] && POOL="zen.suprnova.cc:3618" ;;
     kda) [ -z "$POOL" ] && POOL="pool.woolypooly.com:3112" ;;
-    bch-lotto) POOL="solo.ckpool.org:3333" ;;
-    btc-lotto) POOL="solo.ckpool.org:3333" ;;
-    ltc-lotto) POOL="litesolo.org:3333" ;;
-    doge-lotto) POOL="litesolo.org:3334" ;;
-    xmr-lotto) POOL="xmr.solopool.org:3333" ;;
+    bch-lotto) [ -z "$POOL" ] && POOL="bch.solopool.org:3333" ;;
+    btc-lotto) [ -z "$POOL" ] && POOL="btc.solopool.org:3333" ;;
+    ltc-lotto) [ -z "$POOL" ] && POOL="ltc.solopool.org:3333" ;;
+    doge-lotto) [ -z "$POOL" ] && POOL="doge.solopool.org:3333" ;;
+    xmr-lotto) [ -z "$POOL" ] && POOL="xmr.solopool.org:3333" ;;
     *) [ -z "$POOL" ] && POOL="rx.unmineable.com:3333" ;;
 esac
 

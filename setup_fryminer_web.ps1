@@ -364,25 +364,46 @@ function Get-PoolForCoin {
     $pools = @{
         "xmr" = "pool.supportxmr.com:3333"
         "scala" = "pool.scalaproject.io:3333"
-        "aeon" = "pool.aeon.hashvault.pro:3333"
-        "dero" = "dero.herominers.com:1111"
-        "zephyr" = "pool.zephyrprotocol.com:3333"
-        "salvium" = "pool.salvium.io:3333"
+        "aeon" = "aeon.herominers.com:10650"
+        "dero" = "dero-node-sk.mysrv.cloud:10300"
+        "zephyr" = "de.zephyr.herominers.com:1123"
+        "salvium" = "de.salvium.herominers.com:1228"
         "yadacoin" = "pool.yadacoin.io:3333"
-        "verus" = "na.luckpool.net:3956"
-        "arionum" = "aropool.com:8000"
-        "btc" = "sha256.poolbinance.com:8888"
-        "ltc" = "scrypt.poolbinance.com:6666"
-        "doge" = "scrypt.poolbinance.com:6666"
-        "dash" = "x11.poolbinance.com:9999"
-        "dcr" = "dcr.coinmine.pl:2222"
+        "verus" = "pool.verus.io:9999"
+        "arionum" = "aropool.com:80"
+        "btc" = "pool.btc.com:3333"
+        "ltc" = "stratum.aikapool.com:7900"
+        "doge" = "prohashing.com:3332"
+        "dash" = "dash.suprnova.cc:9989"
+        "dcr" = "dcr.suprnova.cc:3252"
         "kda" = "pool.woolypooly.com:3112"
-        "bch" = "sha256.poolbinance.com:8888"
-        "btc-lotto" = "solo.ckpool.org:3333"
-        "ltc-lotto" = "litesolo.org:3333"
-        "doge-lotto" = "litesolo.org:3334"
+        "bch" = "pool.btc.com:3333"
+        # Solo/Lottery pools - using solopool.org public pools
+        "btc-lotto" = "btc.solopool.org:3333"
+        "ltc-lotto" = "ltc.solopool.org:3333"
+        "doge-lotto" = "doge.solopool.org:3333"
         "xmr-lotto" = "xmr.solopool.org:3333"
-        "bch-lotto" = "solo.ckpool.org:3333"
+        "bch-lotto" = "bch.solopool.org:3333"
+        # Unmineable coins
+        "shib" = "rx.unmineable.com:3333"
+        "ada" = "rx.unmineable.com:3333"
+        "sol" = "rx.unmineable.com:3333"
+        "zec" = "rx.unmineable.com:3333"
+        "etc" = "rx.unmineable.com:3333"
+        "rvn" = "rx.unmineable.com:3333"
+        "trx" = "rx.unmineable.com:3333"
+        "vet" = "rx.unmineable.com:3333"
+        "xrp" = "rx.unmineable.com:3333"
+        "dot" = "rx.unmineable.com:3333"
+        "matic" = "rx.unmineable.com:3333"
+        "atom" = "rx.unmineable.com:3333"
+        "link" = "rx.unmineable.com:3333"
+        "xlm" = "rx.unmineable.com:3333"
+        "algo" = "rx.unmineable.com:3333"
+        "avax" = "rx.unmineable.com:3333"
+        "near" = "rx.unmineable.com:3333"
+        "ftm" = "rx.unmineable.com:3333"
+        "one" = "rx.unmineable.com:3333"
     }
 
     if ($pools.ContainsKey($Coin.ToLower())) {
@@ -397,27 +418,34 @@ function Get-AlgorithmForCoin {
     param([string]$Coin)
 
     $algorithms = @{
+        # RandomX coins (XMRig)
         "xmr" = @{ Algo = "rx/0"; UseCpuminer = $false; UseXlarig = $false }
-        "scala" = @{ Algo = "panthera"; UseCpuminer = $false; UseXlarig = $true }
+        "xmr-lotto" = @{ Algo = "rx/0"; UseCpuminer = $false; UseXlarig = $false }
         "aeon" = @{ Algo = "rx/0"; UseCpuminer = $false; UseXlarig = $false }
-        "dero" = @{ Algo = "astrobwt"; UseCpuminer = $false; UseXlarig = $false }
         "zephyr" = @{ Algo = "rx/0"; UseCpuminer = $false; UseXlarig = $false }
         "salvium" = @{ Algo = "rx/0"; UseCpuminer = $false; UseXlarig = $false }
         "yadacoin" = @{ Algo = "rx/yada"; UseCpuminer = $false; UseXlarig = $false }
+        # Scala (XLArig with Panthera)
+        "scala" = @{ Algo = "panthera"; UseCpuminer = $false; UseXlarig = $true }
+        # Other XMRig coins
+        "dero" = @{ Algo = "astrobwt"; UseCpuminer = $false; UseXlarig = $false }
+        # cpuminer coins
         "verus" = @{ Algo = "verushash"; UseCpuminer = $true; UseXlarig = $false }
         "arionum" = @{ Algo = "argon2d4096"; UseCpuminer = $true; UseXlarig = $false }
+        # SHA256d coins
         "btc" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
+        "btc-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
+        "bch" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
+        "bch-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
+        # Scrypt coins
         "ltc" = @{ Algo = "scrypt"; UseCpuminer = $true; UseXlarig = $false }
+        "ltc-lotto" = @{ Algo = "scrypt"; UseCpuminer = $true; UseXlarig = $false }
         "doge" = @{ Algo = "scrypt"; UseCpuminer = $true; UseXlarig = $false }
+        "doge-lotto" = @{ Algo = "scrypt"; UseCpuminer = $true; UseXlarig = $false }
+        # Other cpuminer coins
         "dash" = @{ Algo = "x11"; UseCpuminer = $true; UseXlarig = $false }
         "dcr" = @{ Algo = "decred"; UseCpuminer = $true; UseXlarig = $false }
         "kda" = @{ Algo = "blake2s"; UseCpuminer = $true; UseXlarig = $false }
-        "bch" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
-        "btc-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
-        "ltc-lotto" = @{ Algo = "scrypt"; UseCpuminer = $true; UseXlarig = $false }
-        "doge-lotto" = @{ Algo = "scrypt"; UseCpuminer = $true; UseXlarig = $false }
-        "bch-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
-        "xmr-lotto" = @{ Algo = "rx/0"; UseCpuminer = $false; UseXlarig = $false }
     }
 
     if ($algorithms.ContainsKey($Coin.ToLower())) {
@@ -826,6 +854,7 @@ function New-WebInterface {
                 <button class="coin-btn" data-coin="verus">VRSC</button>
                 <button class="coin-btn" data-coin="aeon">AEON</button>
                 <button class="coin-btn" data-coin="yadacoin">YDA</button>
+                <button class="coin-btn" data-coin="arionum">ARO</button>
                 <!-- SHA256/Scrypt -->
                 <button class="coin-btn" data-coin="btc">BTC</button>
                 <button class="coin-btn" data-coin="ltc">LTC</button>
@@ -833,9 +862,12 @@ function New-WebInterface {
                 <button class="coin-btn" data-coin="bch">BCH</button>
                 <button class="coin-btn" data-coin="dash">DASH</button>
                 <button class="coin-btn" data-coin="dcr">DCR</button>
-                <!-- Solo/Lottery -->
+                <button class="coin-btn" data-coin="kda">KDA</button>
+                <!-- Solo/Lottery Mining -->
                 <button class="coin-btn" data-coin="btc-lotto">BTC Solo</button>
+                <button class="coin-btn" data-coin="bch-lotto">BCH Solo</button>
                 <button class="coin-btn" data-coin="ltc-lotto">LTC Solo</button>
+                <button class="coin-btn" data-coin="doge-lotto">DOGE Solo</button>
                 <button class="coin-btn" data-coin="xmr-lotto">XMR Solo</button>
                 <!-- Unmineable tokens -->
                 <button class="coin-btn" data-coin="shib">SHIB</button>
@@ -845,6 +877,7 @@ function New-WebInterface {
                 <button class="coin-btn" data-coin="dot">DOT</button>
                 <button class="coin-btn" data-coin="matic">MATIC</button>
             </div>
+            <div id="coinInfo" style="background: rgba(0, 212, 255, 0.1); border: 1px solid #00d4ff; padding: 10px; border-radius: 5px; margin-bottom: 15px; display: none;"></div>
 
             <form id="configForm">
                 <input type="hidden" id="selectedCoin" name="miner" value="">
@@ -914,6 +947,54 @@ function New-WebInterface {
 
     <script>
         let selectedCoin = '';
+        let isLoadingConfig = false;
+
+        // Default pools for each coin
+        const defaultPools = {
+            'xmr': 'pool.supportxmr.com:3333',
+            'scala': 'pool.scalaproject.io:3333',
+            'aeon': 'aeon.herominers.com:10650',
+            'dero': 'dero-node-sk.mysrv.cloud:10300',
+            'zephyr': 'de.zephyr.herominers.com:1123',
+            'salvium': 'de.salvium.herominers.com:1228',
+            'yadacoin': 'pool.yadacoin.io:3333',
+            'verus': 'pool.verus.io:9999',
+            'arionum': 'aropool.com:80',
+            'btc': 'pool.btc.com:3333',
+            'ltc': 'stratum.aikapool.com:7900',
+            'doge': 'prohashing.com:3332',
+            'bch': 'pool.btc.com:3333',
+            'dash': 'dash.suprnova.cc:9989',
+            'dcr': 'dcr.suprnova.cc:3252',
+            'kda': 'pool.woolypooly.com:3112',
+            // Solo/Lottery pools - using solopool.org public pools
+            'btc-lotto': 'btc.solopool.org:3333',
+            'bch-lotto': 'bch.solopool.org:3333',
+            'ltc-lotto': 'ltc.solopool.org:3333',
+            'doge-lotto': 'doge.solopool.org:3333',
+            'xmr-lotto': 'xmr.solopool.org:3333',
+            // Unmineable coins
+            'shib': 'rx.unmineable.com:3333',
+            'ada': 'rx.unmineable.com:3333',
+            'sol': 'rx.unmineable.com:3333',
+            'xrp': 'rx.unmineable.com:3333',
+            'dot': 'rx.unmineable.com:3333',
+            'matic': 'rx.unmineable.com:3333'
+        };
+
+        // Fixed pools (cannot be changed) - Unmineable coins only
+        const fixedPools = ['shib', 'ada', 'sol', 'xrp', 'dot', 'matic'];
+
+        // Coin info messages
+        const coinInfo = {
+            'btc-lotto': 'Solo lottery mining - very low odds but winner takes full block reward!',
+            'bch-lotto': 'Solo lottery mining - very low odds but winner takes full block reward!',
+            'ltc-lotto': 'Solo lottery mining - very low odds but winner takes full block reward!',
+            'doge-lotto': 'Solo lottery mining - merged with LTC, very low odds!',
+            'xmr-lotto': 'Solo lottery mining - very low odds but winner takes full block reward!',
+            'zephyr': 'Zephyr is a privacy-focused stablecoin protocol using RandomX.',
+            'salvium': 'Salvium is a privacy blockchain with staking. Uses RandomX algorithm.'
+        };
 
         // Tab switching
         function showTab(tabId) {
@@ -933,6 +1014,35 @@ function New-WebInterface {
                 this.classList.add('selected');
                 selectedCoin = this.dataset.coin;
                 document.getElementById('selectedCoin').value = selectedCoin;
+
+                const poolInput = document.getElementById('pool');
+                const infoBox = document.getElementById('coinInfo');
+
+                // Set pool value intelligently
+                if (defaultPools[selectedCoin] && !isLoadingConfig) {
+                    // Fixed pools (Unmineable) ALWAYS update and disable input
+                    if (fixedPools.includes(selectedCoin)) {
+                        poolInput.value = defaultPools[selectedCoin];
+                        poolInput.disabled = true;
+                    }
+                    // Non-fixed pools only update if field is empty (preserve custom values)
+                    else {
+                        if (!poolInput.value) {
+                            poolInput.value = defaultPools[selectedCoin];
+                        }
+                        poolInput.disabled = false;
+                    }
+                } else {
+                    poolInput.disabled = fixedPools.includes(selectedCoin);
+                }
+
+                // Show coin info if available
+                if (coinInfo[selectedCoin]) {
+                    infoBox.innerHTML = coinInfo[selectedCoin];
+                    infoBox.style.display = 'block';
+                } else {
+                    infoBox.style.display = 'none';
+                }
             });
         });
 
@@ -1014,21 +1124,34 @@ function New-WebInterface {
         // Load saved config
         async function loadConfig() {
             try {
+                isLoadingConfig = true;
                 const response = await fetch('/cgi-bin/load.cgi');
                 const config = await response.json();
                 if (config.wallet) document.getElementById('wallet').value = config.wallet;
                 if (config.worker) document.getElementById('worker').value = config.worker;
                 if (config.threads) document.getElementById('threads').value = config.threads;
                 if (config.pool) document.getElementById('pool').value = config.pool;
+                if (config.password) document.getElementById('password').value = config.password;
                 if (config.miner) {
                     selectedCoin = config.miner;
                     document.getElementById('selectedCoin').value = config.miner;
                     document.querySelectorAll('.coin-btn').forEach(btn => {
                         if (btn.dataset.coin === config.miner) btn.classList.add('selected');
                     });
+                    // Update pool input disabled state
+                    const poolInput = document.getElementById('pool');
+                    poolInput.disabled = fixedPools.includes(config.miner);
+                    // Show coin info if available
+                    const infoBox = document.getElementById('coinInfo');
+                    if (coinInfo[config.miner]) {
+                        infoBox.innerHTML = coinInfo[config.miner];
+                        infoBox.style.display = 'block';
+                    }
                 }
+                isLoadingConfig = false;
             } catch (error) {
                 console.error('Load config error:', error);
+                isLoadingConfig = false;
             }
         }
 
