@@ -1641,19 +1641,58 @@ install_gpu_miners() {
 install_bfgminer() {
     log "=== Starting BFGMiner installation (USB ASIC support) ==="
 
-    # Check if already installed
+    # Check if already installed at /usr/local/bin
     if [ -x /usr/local/bin/bfgminer ]; then
-        log "BFGMiner already installed at /usr/local/bin/bfgminer"
-        /usr/local/bin/bfgminer --version 2>&1 | head -1 || true
-        return 0
+        log "Testing existing BFGMiner at /usr/local/bin/bfgminer..."
+        if /usr/local/bin/bfgminer --version >/dev/null 2>&1 || /usr/local/bin/bfgminer --help >/dev/null 2>&1; then
+            log "BFGMiner already installed and working"
+            /usr/local/bin/bfgminer --version 2>&1 | head -1 || true
+            return 0
+        else
+            warn "Existing BFGMiner at /usr/local/bin is broken, will reinstall..."
+            rm -f /usr/local/bin/bfgminer 2>/dev/null
+        fi
     fi
 
     # Also check system paths
     if command -v bfgminer >/dev/null 2>&1; then
-        log "BFGMiner found in system path"
-        bfgminer --version 2>&1 | head -1 || true
-        return 0
+        EXISTING_BFG=$(which bfgminer)
+        log "Testing existing BFGMiner at $EXISTING_BFG..."
+        if bfgminer --version >/dev/null 2>&1 || bfgminer --help >/dev/null 2>&1; then
+            log "BFGMiner already installed and working in system path"
+            bfgminer --version 2>&1 | head -1 || true
+            # Create symlink to /usr/local/bin for consistency
+            ln -sf "$EXISTING_BFG" /usr/local/bin/bfgminer 2>/dev/null || true
+            return 0
+        else
+            warn "Existing BFGMiner in system path is broken, will reinstall..."
+        fi
     fi
+
+    # Also check for cgminer as alternative
+    if [ -x /usr/local/bin/cgminer ]; then
+        log "Testing existing CGMiner at /usr/local/bin/cgminer..."
+        if /usr/local/bin/cgminer --version >/dev/null 2>&1 || /usr/local/bin/cgminer --help >/dev/null 2>&1; then
+            log "CGMiner already installed and working (using as bfgminer alternative)"
+            /usr/local/bin/cgminer --version 2>&1 | head -1 || true
+            # Symlink cgminer as bfgminer for consistency
+            ln -sf /usr/local/bin/cgminer /usr/local/bin/bfgminer 2>/dev/null || true
+            return 0
+        fi
+    fi
+
+    if command -v cgminer >/dev/null 2>&1; then
+        EXISTING_CG=$(which cgminer)
+        log "Testing existing CGMiner at $EXISTING_CG..."
+        if cgminer --version >/dev/null 2>&1 || cgminer --help >/dev/null 2>&1; then
+            log "CGMiner already installed and working in system path"
+            cgminer --version 2>&1 | head -1 || true
+            ln -sf "$EXISTING_CG" /usr/local/bin/bfgminer 2>/dev/null || true
+            return 0
+        fi
+    fi
+
+    log "No working BFGMiner/CGMiner found, proceeding with installation..."
 
     mkdir -p "$MINERS_DIR"
     cd "$MINERS_DIR"
