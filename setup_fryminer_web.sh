@@ -3338,8 +3338,8 @@ if [ -z "$MINER" ] || [ -z "$WALLET" ]; then
     exit 0
 fi
 
-# STRIP any existing stratum protocol prefix from pool URL
-POOL=$(echo "$POOL" | sed 's|^stratum+tcp://||' | sed 's|^stratum+ssl://||' | sed 's|^stratum://||')
+# STRIP any existing protocol prefix from pool URL (stratum, http, https)
+POOL=$(echo "$POOL" | sed 's|^stratum+tcp://||' | sed 's|^stratum+ssl://||' | sed 's|^stratum://||' | sed 's|^https\?://||')
 
 # Set default pools if not provided
 case "$MINER" in
