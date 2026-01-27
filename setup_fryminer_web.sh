@@ -2034,6 +2034,222 @@ start_webserver() {
     fi
 }
 
+# Create systemd service for FryMiner web interface to start on boot
+create_systemd_service() {
+    log "Setting up FryMiner web interface to start on boot..."
+    
+    # Detect real user
+    REAL_USER="${SUDO_USER:-}"
+    if [ -z "$REAL_USER" ] || [ "$REAL_USER" = "root" ]; then
+        for user in fry pi ubuntu debian; do
+            if id "$user" >/dev/null 2>&1; then
+                REAL_USER="$user"
+                break
+            fi
+        done
+    fi
+    
+    # Default to root if no other user found
+    [ -z "$REAL_USER" ] && REAL_USER="root"
+    
+    # Kill any existing web server first
+    pkill -f "python3 -m http.server $PORT" 2>/dev/null || true
+    pkill -f "python3.*http.server.*$PORT" 2>/dev/null || true
+    sleep 1
+    
+    # Store the actual values for the service file (not variables)
+    SERVICE_USER="$REAL_USER"
+    SERVICE_BASE="$BASE"
+    SERVICE_PORT="$PORT"
+    
+    BOOT_METHOD_SET=false
+    
+    # Method 1: Try systemd (most modern Linux systems)
+    if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+        log "Creating systemd service..."
+        
+        # Stop and disable any existing service first
+        systemctl stop fryminer-web.service 2>/dev/null || true
+        systemctl disable fryminer-web.service 2>/dev/null || true
+        
+        # Create systemd service file with hardcoded values
+        cat > /etc/systemd/system/fryminer-web.service <<SERVICEEOF
+[Unit]
+Description=FryMiner Web Interface
+After=network.target network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=$SERVICE_USER
+WorkingDirectory=$SERVICE_BASE
+ExecStart=/usr/bin/python3 -m http.server $SERVICE_PORT --cgi
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+SERVICEEOF
+        
+        # Set permissions
+        chmod 644 /etc/systemd/system/fryminer-web.service
+        
+        # Reload systemd and enable service
+        systemctl daemon-reload
+        systemctl enable fryminer-web.service
+        systemctl start fryminer-web.service
+        
+        # Verify service is running
+        sleep 3
+        if systemctl is-active --quiet fryminer-web.service; then
+            log "✅ Systemd service enabled and running"
+            BOOT_METHOD_SET=true
+        else
+            warn "Systemd service failed to start, trying fallback methods..."
+            # Show why it failed
+            systemctl status fryminer-web.service 2>&1 | head -10 || true
+        fi
+    fi
+    
+    # Method 2: Try rc.local (older systems, some ARM devices)
+    if [ "$BOOT_METHOD_SET" = "false" ]; then
+        if [ -f /etc/rc.local ] || [ -d /etc/rc.d ]; then
+            log "Setting up rc.local fallback..."
+            
+            # Create rc.local if it doesn't exist
+            if [ ! -f /etc/rc.local ]; then
+                echo '#!/bin/sh -e' > /etc/rc.local
+                echo 'exit 0' >> /etc/rc.local
+            fi
+            
+            # Remove any existing fryminer entries
+            sed -i '/fryminer\|frynet-config.*http.server/d' /etc/rc.local 2>/dev/null || true
+            
+            # Add startup command before 'exit 0'
+            sed -i '/^exit 0/d' /etc/rc.local 2>/dev/null || true
+            cat >> /etc/rc.local <<RCLOCALEOF
+
+# FryMiner Web Interface - Start on boot
+cd $SERVICE_BASE && /usr/bin/python3 -m http.server $SERVICE_PORT --cgi &
+
+exit 0
+RCLOCALEOF
+            
+            chmod +x /etc/rc.local
+            
+            # Enable rc.local service if systemd is present
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl enable rc-local.service 2>/dev/null || true
+                systemctl start rc-local.service 2>/dev/null || true
+            fi
+            
+            log "✅ rc.local fallback configured"
+            BOOT_METHOD_SET=true
+        fi
+    fi
+    
+    # Method 3: Try cron @reboot (universal fallback)
+    if command -v crontab >/dev/null 2>&1; then
+        log "Setting up cron @reboot fallback..."
+        
+        # Get current crontab, remove old fryminer web entries
+        (crontab -l 2>/dev/null || echo "") | grep -v "fryminer-web\|frynet-config.*http.server\|python3.*http.server.*$SERVICE_PORT" > /tmp/crontab_web.tmp 2>/dev/null || true
+        
+        # Add @reboot entry
+        echo "@reboot cd $SERVICE_BASE && /usr/bin/python3 -m http.server $SERVICE_PORT --cgi > /dev/null 2>&1 &  # fryminer-web" >> /tmp/crontab_web.tmp
+        
+        crontab /tmp/crontab_web.tmp 2>/dev/null && log "✅ Cron @reboot fallback configured" || warn "Could not set up cron fallback"
+        rm -f /tmp/crontab_web.tmp
+        BOOT_METHOD_SET=true
+    fi
+    
+    # Method 4: Create a startup script in /etc/init.d (SysV init fallback)
+    if [ "$BOOT_METHOD_SET" = "false" ] || [ ! -f /etc/systemd/system/fryminer-web.service ]; then
+        if [ -d /etc/init.d ]; then
+            log "Creating init.d startup script..."
+            
+            cat > /etc/init.d/fryminer-web <<INITEOF
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          fryminer-web
+# Required-Start:    \$network \$remote_fs
+# Required-Stop:     \$network \$remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: FryMiner Web Interface
+### END INIT INFO
+
+case "\$1" in
+    start)
+        echo "Starting FryMiner Web Interface..."
+        cd $SERVICE_BASE
+        /usr/bin/python3 -m http.server $SERVICE_PORT --cgi > /dev/null 2>&1 &
+        ;;
+    stop)
+        echo "Stopping FryMiner Web Interface..."
+        pkill -f "python3.*http.server.*$SERVICE_PORT" 2>/dev/null || true
+        ;;
+    restart)
+        \$0 stop
+        sleep 1
+        \$0 start
+        ;;
+    *)
+        echo "Usage: \$0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+exit 0
+INITEOF
+            
+            chmod +x /etc/init.d/fryminer-web
+            
+            # Enable with update-rc.d if available
+            if command -v update-rc.d >/dev/null 2>&1; then
+                update-rc.d fryminer-web defaults 2>/dev/null || true
+                log "✅ init.d script enabled"
+            elif command -v chkconfig >/dev/null 2>&1; then
+                chkconfig --add fryminer-web 2>/dev/null || true
+                chkconfig fryminer-web on 2>/dev/null || true
+                log "✅ init.d script enabled via chkconfig"
+            fi
+            BOOT_METHOD_SET=true
+        fi
+    fi
+    
+    # Now start the web server if not already running
+    sleep 1
+    if ! pgrep -f "python3.*http.server.*$SERVICE_PORT" >/dev/null 2>&1; then
+        log "Starting web server now..."
+        cd "$SERVICE_BASE"
+        if [ "$SERVICE_USER" != "root" ] && command -v su >/dev/null 2>&1; then
+            su - "$SERVICE_USER" -c "cd $SERVICE_BASE && nohup /usr/bin/python3 -m http.server $SERVICE_PORT --cgi > /dev/null 2>&1 &" 2>/dev/null || \
+            nohup /usr/bin/python3 -m http.server $SERVICE_PORT --cgi > /dev/null 2>&1 &
+        else
+            nohup /usr/bin/python3 -m http.server $SERVICE_PORT --cgi > /dev/null 2>&1 &
+        fi
+        sleep 2
+    fi
+    
+    # Final verification
+    if pgrep -f "python3.*http.server.*$SERVICE_PORT" >/dev/null 2>&1; then
+        WEB_PID=$(pgrep -f "python3.*http.server.*$SERVICE_PORT" | head -1)
+        log "✅ Web server running (PID: $WEB_PID)"
+    else
+        warn "⚠️  Web server may not have started - check manually"
+        warn "Manual start: cd $SERVICE_BASE && python3 -m http.server $SERVICE_PORT --cgi &"
+    fi
+    
+    if [ "$BOOT_METHOD_SET" = "true" ]; then
+        log "✅ Web interface configured to start automatically on boot"
+    else
+        warn "⚠️  Could not configure automatic boot startup"
+    fi
+}
+
 # Main installation
 main() {
     log "================================================"
@@ -5082,20 +5298,8 @@ SCRIPT
     # Final permissions
     chmod -R 777 "$BASE"
     
-    # Start web server
-    log "Starting web server..."
-    cd "$BASE"
-    nohup python3 -m http.server $PORT --cgi > /dev/null 2>&1 &
-    SERVER_PID=$!
-    
-    sleep 2
-    
-    # Verify server started
-    if kill -0 $SERVER_PID 2>/dev/null; then
-        log "Web server started successfully (PID: $SERVER_PID)"
-    else
-        warn "Web server may not have started properly"
-    fi
+    # Create and start systemd service for web interface (survives reboot)
+    create_systemd_service
     
     # Get IP
     IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
@@ -5135,12 +5339,8 @@ SCRIPT
     log "Your miner is ready to use!"
     log "================================================"
     
-    # Start web server automatically (skip if running as update)
-    if [ "$UPDATE_MODE" != "true" ]; then
-        start_webserver
-    else
-        log "Skipping web server restart (UPDATE_MODE)"
-    fi
+    # Note: Web server is already running via systemd service (fryminer-web.service)
+    # It will automatically start on boot
     
     log ""
     log "================================================"
