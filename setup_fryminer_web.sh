@@ -1139,8 +1139,32 @@ install_cpuminer() {
             cd "$MINERS_DIR"
             rm -rf cpuminer-multi
             
-            # Fallback to pooler
-            log "=== Trying pooler cpuminer ==="
+            # Fallback to cpuminer-opt (JayDDee's optimized fork - actively maintained)
+            log "=== Trying cpuminer-opt (optimized fallback) ==="
+            if git clone --depth 1 --progress https://github.com/JayDDee/cpuminer-opt.git 2>&1; then
+                cd cpuminer-opt || { warn "Failed to cd"; cd "$MINERS_DIR"; }
+                ./autogen.sh >/dev/null 2>&1
+                CFLAGS="-O2 -march=x86-64" ./configure >/dev/null 2>&1
+                
+                if make -j"$(nproc)" >/dev/null 2>&1; then
+                    if [ -f cpuminer ]; then
+                        cp cpuminer /usr/local/bin/cpuminer
+                        chmod +x /usr/local/bin/cpuminer
+                        ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                        cd "$MINERS_DIR"
+                        rm -rf cpuminer-opt
+                        log "✅ cpuminer-opt installed for x86_64"
+                        /usr/local/bin/cpuminer --version 2>&1 | head -1 || true
+                        return 0
+                    fi
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf cpuminer-opt
+            fi
+            
+            # Fallback to pooler (most basic, highest compatibility)
+            log "=== Trying pooler cpuminer (last resort) ==="
             git clone --depth 1 --progress https://github.com/pooler/cpuminer.git pooler-cpuminer 2>&1 || {
                 warn "Failed to clone pooler cpuminer"
                 return 1
@@ -1162,20 +1186,74 @@ install_cpuminer() {
             
         x86)
             log "=== Building cpuminer-multi for x86 32-bit ==="
-            git clone --depth 1 --progress https://github.com/tpruvot/cpuminer-multi.git 2>&1 || return 1
-            cd cpuminer-multi || return 1
-            ./autogen.sh >/dev/null 2>&1
-            CFLAGS="-O2 -march=i686" ./configure --with-curl --with-crypto >/dev/null 2>&1
-            
-            if make -j"$(nproc)" >/dev/null 2>&1; then
-                cp cpuminer /usr/local/bin/cpuminer
-                chmod +x /usr/local/bin/cpuminer
-                ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+            if git clone --depth 1 --progress https://github.com/tpruvot/cpuminer-multi.git 2>&1; then
+                cd cpuminer-multi || { warn "Failed to cd"; cd "$MINERS_DIR"; }
+                ./autogen.sh >/dev/null 2>&1
+                CFLAGS="-O2 -march=i686" ./configure --with-curl --with-crypto >/dev/null 2>&1
+                
+                if make -j"$(nproc)" >/dev/null 2>&1; then
+                    if [ -f cpuminer ]; then
+                        cp cpuminer /usr/local/bin/cpuminer
+                        chmod +x /usr/local/bin/cpuminer
+                        ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                        cd "$MINERS_DIR"
+                        rm -rf cpuminer-multi
+                        log "✅ cpuminer-multi installed for x86"
+                        return 0
+                    fi
+                fi
+                
                 cd "$MINERS_DIR"
                 rm -rf cpuminer-multi
-                log "cpuminer-multi installed for x86"
-                return 0
             fi
+            
+            # Fallback: cpuminer-opt
+            log "=== Trying cpuminer-opt for x86 32-bit ==="
+            if git clone --depth 1 --progress https://github.com/JayDDee/cpuminer-opt.git 2>&1; then
+                cd cpuminer-opt || { warn "Failed to cd"; cd "$MINERS_DIR"; }
+                ./autogen.sh >/dev/null 2>&1
+                CFLAGS="-O2 -march=i686" ./configure >/dev/null 2>&1
+                
+                if make -j"$(nproc)" >/dev/null 2>&1; then
+                    if [ -f cpuminer ]; then
+                        cp cpuminer /usr/local/bin/cpuminer
+                        chmod +x /usr/local/bin/cpuminer
+                        ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                        cd "$MINERS_DIR"
+                        rm -rf cpuminer-opt
+                        log "✅ cpuminer-opt installed for x86"
+                        return 0
+                    fi
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf cpuminer-opt
+            fi
+            
+            # Fallback: pooler cpuminer
+            log "=== Trying pooler cpuminer for x86 32-bit ==="
+            if git clone --depth 1 --progress https://github.com/pooler/cpuminer.git pooler-cpuminer 2>&1; then
+                cd pooler-cpuminer || { warn "Failed to cd"; cd "$MINERS_DIR"; }
+                ./autogen.sh >/dev/null 2>&1
+                CFLAGS="-O2 -march=i686" ./configure >/dev/null 2>&1
+                
+                if make -j"$(nproc)" >/dev/null 2>&1; then
+                    if [ -f minerd ]; then
+                        cp minerd /usr/local/bin/cpuminer
+                        chmod +x /usr/local/bin/cpuminer
+                        ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                        cd "$MINERS_DIR"
+                        rm -rf pooler-cpuminer
+                        log "✅ pooler cpuminer installed for x86"
+                        return 0
+                    fi
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf pooler-cpuminer
+            fi
+            
+            warn "All cpuminer builds failed for x86 32-bit"
             ;;
             
         arm64)
@@ -1238,6 +1316,40 @@ install_cpuminer() {
                 warn "Failed to clone cpuminer-multi"
             fi
             
+            # Fallback: Try cpuminer-opt (JayDDee's optimized fork)
+            log "=== Trying cpuminer-opt (fallback for ARM64) ==="
+            if git clone --depth 1 --progress https://github.com/JayDDee/cpuminer-opt.git 2>&1; then
+                cd cpuminer-opt || { warn "Failed to cd"; cd "$MINERS_DIR"; }
+                
+                log "Running autogen..."
+                ./autogen.sh 2>&1 || autoreconf -i 2>&1 || true
+                
+                if [ -f configure ]; then
+                    log "Configuring cpuminer-opt for ARM64..."
+                    CFLAGS="-O2 -march=armv8-a" CXXFLAGS="-O2 -march=armv8-a" ./configure 2>&1
+                    
+                    log "Compiling..."
+                    CORES=$(nproc 2>/dev/null || echo 2)
+                    [ "$CORES" -gt 2 ] && CORES=2
+                    
+                    if make -j"$CORES" 2>&1; then
+                        if [ -f cpuminer ]; then
+                            cp cpuminer /usr/local/bin/cpuminer
+                            chmod +x /usr/local/bin/cpuminer
+                            ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                            cd "$MINERS_DIR"
+                            rm -rf cpuminer-opt
+                            log "✅ cpuminer-opt installed for ARM64"
+                            /usr/local/bin/cpuminer --version 2>&1 | head -1 || true
+                            return 0
+                        fi
+                    fi
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf cpuminer-opt
+            fi
+            
             # Fallback: Try pooler cpuminer (most basic, highest compatibility)
             log "=== Trying pooler cpuminer (fallback for ARM64) ==="
             if git clone --depth 1 --progress https://github.com/pooler/cpuminer.git pooler-cpuminer 2>&1; then
@@ -1276,27 +1388,90 @@ install_cpuminer() {
             ;;
             
         armv7)
-            log "=== Building cpuminer-opt for ARMv7 ==="
-            git clone --depth 1 --progress https://github.com/JayDDee/cpuminer-opt.git 2>&1 || return 1
-            cd cpuminer-opt || return 1
-            ./autogen.sh >/dev/null 2>&1
+            log "=== Building cpuminer for ARMv7 ==="
             
-            log "Configuring with NEON..."
-            CFLAGS="-O2 -mfpu=neon-vfpv4 -mfloat-abi=hard" ./configure --disable-assembly >/dev/null 2>&1 || {
-                log "NEON failed, trying without..."
-                CFLAGS="-O2" ./configure --disable-assembly >/dev/null 2>&1
-            }
+            # Try cpuminer-multi first
+            log "Trying cpuminer-multi for ARMv7..."
+            if git clone --depth 1 --progress https://github.com/tpruvot/cpuminer-multi.git 2>&1; then
+                cd cpuminer-multi || { warn "Failed to cd"; cd "$MINERS_DIR"; }
+                ./autogen.sh >/dev/null 2>&1 || autoreconf -i >/dev/null 2>&1 || true
+                
+                if [ -f configure ]; then
+                    CFLAGS="-O2 -march=armv7-a -mfpu=neon" ./configure --with-curl --with-crypto >/dev/null 2>&1 || \
+                    CFLAGS="-O2" ./configure --with-curl --with-crypto >/dev/null 2>&1 || true
+                    
+                    log "Compiling cpuminer-multi (15-20 minutes)..."
+                    if make -j"$(nproc)" >/dev/null 2>&1; then
+                        if [ -f cpuminer ]; then
+                            cp cpuminer /usr/local/bin/cpuminer
+                            chmod +x /usr/local/bin/cpuminer
+                            ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                            cd "$MINERS_DIR"
+                            rm -rf cpuminer-multi
+                            log "✅ cpuminer-multi installed for ARMv7"
+                            return 0
+                        fi
+                    fi
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf cpuminer-multi
+            fi
             
-            log "Compiling (15-20 minutes)..."
-            if make -j"$(nproc)" >/dev/null 2>&1; then
-                cp cpuminer /usr/local/bin/cpuminer
-                chmod +x /usr/local/bin/cpuminer
-                ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+            # Fallback: cpuminer-opt
+            log "=== Trying cpuminer-opt for ARMv7 ==="
+            if git clone --depth 1 --progress https://github.com/JayDDee/cpuminer-opt.git 2>&1; then
+                cd cpuminer-opt || { warn "Failed to cd"; cd "$MINERS_DIR"; }
+                ./autogen.sh >/dev/null 2>&1
+                
+                log "Configuring with NEON..."
+                CFLAGS="-O2 -mfpu=neon-vfpv4 -mfloat-abi=hard" ./configure --disable-assembly >/dev/null 2>&1 || {
+                    log "NEON failed, trying without..."
+                    CFLAGS="-O2" ./configure --disable-assembly >/dev/null 2>&1
+                }
+                
+                log "Compiling cpuminer-opt (15-20 minutes)..."
+                if make -j"$(nproc)" >/dev/null 2>&1; then
+                    if [ -f cpuminer ]; then
+                        cp cpuminer /usr/local/bin/cpuminer
+                        chmod +x /usr/local/bin/cpuminer
+                        ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                        cd "$MINERS_DIR"
+                        rm -rf cpuminer-opt
+                        log "✅ cpuminer-opt installed for ARMv7"
+                        return 0
+                    fi
+                fi
+                
                 cd "$MINERS_DIR"
                 rm -rf cpuminer-opt
-                log "cpuminer-opt installed for ARMv7"
-                return 0
             fi
+            
+            # Fallback: pooler cpuminer
+            log "=== Trying pooler cpuminer for ARMv7 ==="
+            if git clone --depth 1 --progress https://github.com/pooler/cpuminer.git pooler-cpuminer 2>&1; then
+                cd pooler-cpuminer || { warn "Failed to cd"; cd "$MINERS_DIR"; }
+                ./autogen.sh >/dev/null 2>&1
+                CFLAGS="-O2" ./configure >/dev/null 2>&1
+                
+                log "Compiling pooler cpuminer..."
+                if make -j"$(nproc)" >/dev/null 2>&1; then
+                    if [ -f minerd ]; then
+                        cp minerd /usr/local/bin/cpuminer
+                        chmod +x /usr/local/bin/cpuminer
+                        ln -sf /usr/local/bin/cpuminer /usr/local/bin/minerd
+                        cd "$MINERS_DIR"
+                        rm -rf pooler-cpuminer
+                        log "✅ pooler cpuminer installed for ARMv7"
+                        return 0
+                    fi
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf pooler-cpuminer
+            fi
+            
+            warn "All cpuminer builds failed for ARMv7"
             ;;
             
         armv6)
@@ -1875,6 +2050,439 @@ install_usbasic_miners() {
     fi
 }
 
+# Install Verus miner - monkins1010/ccminer for all architectures
+# Branches: ARM (64-bit ARM with AES), Verus2.2 (x86_64 CPU), Verus2.2gpu (NVIDIA GPU)
+# Pre-built binaries from Oink70/ccminer-verus as fallback
+install_verus_miner() {
+    log "=== Installing Verus (VRSC) miner ==="
+    
+    # Check if already installed
+    if [ -x /usr/local/bin/ccminer-verus ]; then
+        log "✅ ccminer-verus already installed"
+        /usr/local/bin/ccminer-verus --version 2>&1 | head -1 || true
+        return 0
+    fi
+    
+    # Check for ccminer in home directory (from previous installs)
+    if [ -x "$HOME/ccminer/ccminer" ]; then
+        log "✅ ccminer found in ~/ccminer, creating symlink"
+        ln -sf "$HOME/ccminer/ccminer" /usr/local/bin/ccminer-verus 2>/dev/null || true
+        return 0
+    fi
+    
+    # Pre-built binary URLs from Oink70/ccminer-verus releases
+    OINK70_ARM_URL="https://github.com/Oink70/ccminer-verus/releases/download/v3.8.3a-CPU/ccminer-v3.8.3c-oink_ARM"
+    OINK70_X86_64_URL="https://github.com/Oink70/ccminer-verus/releases/download/v3.8.3a-CPU/ccminer-v3.8.3a-oink_Ubuntu_18.04"
+    
+    # Helper function to try downloading pre-built binary
+    try_prebuilt_binary() {
+        local url="$1"
+        local arch_name="$2"
+        
+        log "Attempting to download pre-built ccminer binary for $arch_name..."
+        cd "$MINERS_DIR" || return 1
+        
+        if curl -L -o ccminer-prebuilt "$url" 2>/dev/null; then
+            if [ -s ccminer-prebuilt ]; then
+                chmod +x ccminer-prebuilt
+                # Test if binary works
+                if ./ccminer-prebuilt --version >/dev/null 2>&1 || ./ccminer-prebuilt --help >/dev/null 2>&1; then
+                    mv ccminer-prebuilt /usr/local/bin/ccminer-verus
+                    chmod +x /usr/local/bin/ccminer-verus
+                    log "✅ ccminer-verus installed from pre-built binary for $arch_name"
+                    return 0
+                else
+                    log "Pre-built binary failed to execute, removing..."
+                    rm -f ccminer-prebuilt
+                fi
+            else
+                rm -f ccminer-prebuilt
+            fi
+        fi
+        return 1
+    }
+    
+    # Helper function to try building nheqminer with reduced optimizations
+    # This is the fallback for exotic architectures without hardware AES
+    try_nheqminer_fallback() {
+        local arch_name="$1"
+        
+        log "Attempting to build nheqminer-verus for $arch_name (reduced optimizations)..."
+        
+        # Install nheqminer-specific dependencies
+        apt-get install -y cmake libboost-all-dev libsodium-dev >/dev/null 2>&1 || true
+        
+        cd "$MINERS_DIR" || return 1
+        rm -rf nheqminer-build 2>/dev/null
+        
+        if git clone --depth 1 https://github.com/VerusCoin/nheqminer.git nheqminer-build 2>&1; then
+            cd nheqminer-build || return 1
+            
+            mkdir -p build && cd build
+            
+            # Build with minimal optimizations - disable architecture-specific code
+            # -DUSE_CPU_XENONCAT=OFF disables x86-specific assembly
+            # -DUSE_CUDA_DJEZO=OFF disables CUDA
+            # -DUSE_CPU_TROMP=ON uses portable C++ solver
+            log "Configuring nheqminer with portable settings..."
+            if cmake -DUSE_CUDA_DJEZO=OFF \
+                     -DUSE_CPU_XENONCAT=OFF \
+                     -DUSE_CPU_TROMP=ON \
+                     -DUSE_CPU_VERUSHASH=ON \
+                     -DCMAKE_BUILD_TYPE=Release \
+                     .. >/dev/null 2>&1; then
+                
+                log "Building nheqminer (this may take 10-20 minutes)..."
+                CORES=$(nproc 2>/dev/null || echo 2)
+                [ "$CORES" -gt 2 ] && CORES=2  # Limit cores for low-memory devices
+                
+                if make -j"$CORES" 2>&1; then
+                    if [ -f nheqminer ]; then
+                        cp nheqminer /usr/local/bin/nheqminer-verus
+                        chmod +x /usr/local/bin/nheqminer-verus
+                        cd "$MINERS_DIR"
+                        rm -rf nheqminer-build
+                        log "✅ nheqminer-verus built for $arch_name (portable/experimental)"
+                        log "Note: Performance will be limited without hardware AES"
+                        return 0
+                    fi
+                fi
+            else
+                log "CMake configuration failed for nheqminer"
+            fi
+            
+            cd "$MINERS_DIR"
+            rm -rf nheqminer-build
+        else
+            log "Failed to clone nheqminer repository"
+        fi
+        
+        return 1
+    }
+    
+    # Install build dependencies
+    log "Installing build dependencies..."
+    apt-get update >/dev/null 2>&1
+    apt-get install -y build-essential libcurl4-openssl-dev libssl-dev libjansson-dev automake autotools-dev libomp-dev git curl >/dev/null 2>&1 || true
+    
+    mkdir -p "$MINERS_DIR"
+    cd "$MINERS_DIR" || return 1
+    rm -rf ccminer-verus-build 2>/dev/null
+    
+    case "$ARCH_TYPE" in
+        arm64)
+            log "Installing ccminer for ARM64 from monkins1010/ccminer (ARM branch)..."
+            
+            # Try building from source first
+            if git clone --single-branch -b ARM --depth 1 https://github.com/monkins1010/ccminer.git ccminer-verus-build 2>&1; then
+                cd ccminer-verus-build || return 1
+                
+                log "Building ccminer for ARM64 (this may take several minutes)..."
+                
+                # Make scripts executable
+                chmod +x build.sh configure.sh autogen.sh 2>/dev/null || true
+                
+                # Try build.sh first (recommended method)
+                if [ -f build.sh ]; then
+                    if ./build.sh 2>&1; then
+                        if [ -f ccminer ]; then
+                            cp ccminer /usr/local/bin/ccminer-verus
+                            chmod +x /usr/local/bin/ccminer-verus
+                            log "✅ ccminer-verus built successfully for ARM64"
+                            cd "$MINERS_DIR"
+                            rm -rf ccminer-verus-build
+                            return 0
+                        fi
+                    fi
+                fi
+                
+                # Manual build fallback
+                log "Trying manual build..."
+                ./autogen.sh 2>/dev/null || true
+                if [ -f configure ]; then
+                    ./configure >/dev/null 2>&1 || true
+                fi
+                
+                if make -j"$(nproc)" 2>&1; then
+                    if [ -f ccminer ]; then
+                        cp ccminer /usr/local/bin/ccminer-verus
+                        chmod +x /usr/local/bin/ccminer-verus
+                        log "✅ ccminer-verus built successfully for ARM64"
+                        cd "$MINERS_DIR"
+                        rm -rf ccminer-verus-build
+                        return 0
+                    fi
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf ccminer-verus-build
+            fi
+            
+            # Fallback: Try pre-built binary from Oink70
+            log "Build failed, trying pre-built binary..."
+            if try_prebuilt_binary "$OINK70_ARM_URL" "ARM64"; then
+                return 0
+            fi
+            
+            warn "Could not install ccminer-verus for ARM64"
+            return 1
+            ;;
+            
+        x86_64)
+            log "Installing ccminer for x86_64 from monkins1010/ccminer (Verus2.2 branch)..."
+            
+            # Try building from source first
+            if git clone --single-branch -b Verus2.2 --depth 1 https://github.com/monkins1010/ccminer.git ccminer-verus-build 2>&1; then
+                cd ccminer-verus-build || return 1
+                
+                log "Building ccminer for x86_64 (this may take several minutes)..."
+                
+                # Make scripts executable
+                chmod +x build.sh configure.sh autogen.sh 2>/dev/null || true
+                
+                # Try build.sh first
+                if [ -f build.sh ]; then
+                    if ./build.sh 2>&1; then
+                        if [ -f ccminer ]; then
+                            cp ccminer /usr/local/bin/ccminer-verus
+                            chmod +x /usr/local/bin/ccminer-verus
+                            log "✅ ccminer-verus built successfully for x86_64"
+                            cd "$MINERS_DIR"
+                            rm -rf ccminer-verus-build
+                            return 0
+                        fi
+                    fi
+                fi
+                
+                # Manual build fallback
+                log "Trying manual build..."
+                ./autogen.sh 2>/dev/null || true
+                if [ -f configure ]; then
+                    ./configure >/dev/null 2>&1 || true
+                fi
+                
+                if make -j"$(nproc)" 2>&1; then
+                    if [ -f ccminer ]; then
+                        cp ccminer /usr/local/bin/ccminer-verus
+                        chmod +x /usr/local/bin/ccminer-verus
+                        log "✅ ccminer-verus built successfully for x86_64"
+                        cd "$MINERS_DIR"
+                        rm -rf ccminer-verus-build
+                        return 0
+                    fi
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf ccminer-verus-build
+            fi
+            
+            # Fallback: Try pre-built binary from Oink70
+            log "Build failed, trying pre-built binary..."
+            if try_prebuilt_binary "$OINK70_X86_64_URL" "x86_64"; then
+                return 0
+            fi
+            
+            warn "Could not install ccminer-verus for x86_64"
+            return 1
+            ;;
+            
+        x86)
+            log "Installing Verus miner for x86 (32-bit)..."
+            warn "Note: x86 32-bit has limited Verus support - performance will be reduced"
+            
+            # Try ccminer Verus2.2 branch - may work on 32-bit with modifications
+            if git clone --single-branch -b Verus2.2 --depth 1 https://github.com/monkins1010/ccminer.git ccminer-verus-build 2>&1; then
+                cd ccminer-verus-build || return 1
+                
+                log "Attempting to build ccminer for x86 32-bit..."
+                
+                chmod +x build.sh configure.sh autogen.sh 2>/dev/null || true
+                ./autogen.sh 2>/dev/null || true
+                
+                if [ -f configure ]; then
+                    CFLAGS="-m32" CXXFLAGS="-m32" ./configure >/dev/null 2>&1 || ./configure >/dev/null 2>&1 || true
+                fi
+                
+                if make -j"$(nproc)" 2>&1; then
+                    if [ -f ccminer ]; then
+                        cp ccminer /usr/local/bin/ccminer-verus
+                        chmod +x /usr/local/bin/ccminer-verus
+                        log "✅ ccminer-verus built for x86 32-bit"
+                        cd "$MINERS_DIR"
+                        rm -rf ccminer-verus-build
+                        return 0
+                    fi
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf ccminer-verus-build
+            fi
+            
+            # Fallback: Try nheqminer with reduced optimizations
+            log "ccminer build failed, trying nheqminer fallback..."
+            if try_nheqminer_fallback "x86 32-bit"; then
+                return 0
+            fi
+            
+            warn "Could not build Verus miner for x86 32-bit - Verus mining disabled"
+            return 1
+            ;;
+            
+        armv7)
+            log "Installing ccminer for ARMv7 (32-bit ARM)..."
+            log "Note: ARMv7 support is limited - ARM64 is recommended for best performance"
+            
+            # Try ARM branch - may work on ARMv7 with NEON
+            if git clone --single-branch -b ARM --depth 1 https://github.com/monkins1010/ccminer.git ccminer-verus-build 2>&1; then
+                cd ccminer-verus-build || return 1
+                
+                log "Attempting to build ccminer for ARMv7..."
+                
+                chmod +x build.sh configure.sh autogen.sh 2>/dev/null || true
+                
+                # Try build.sh first
+                if [ -f build.sh ]; then
+                    if ./build.sh 2>&1; then
+                        if [ -f ccminer ]; then
+                            cp ccminer /usr/local/bin/ccminer-verus
+                            chmod +x /usr/local/bin/ccminer-verus
+                            log "✅ ccminer-verus built for ARMv7"
+                            cd "$MINERS_DIR"
+                            rm -rf ccminer-verus-build
+                            return 0
+                        fi
+                    fi
+                fi
+                
+                # Manual build with ARMv7 flags
+                ./autogen.sh 2>/dev/null || true
+                if [ -f configure ]; then
+                    CFLAGS="-O2 -march=armv7-a -mfpu=neon" ./configure >/dev/null 2>&1 || ./configure >/dev/null 2>&1 || true
+                fi
+                
+                if make -j"$(nproc)" 2>&1; then
+                    if [ -f ccminer ]; then
+                        cp ccminer /usr/local/bin/ccminer-verus
+                        chmod +x /usr/local/bin/ccminer-verus
+                        log "✅ ccminer-verus built for ARMv7"
+                        cd "$MINERS_DIR"
+                        rm -rf ccminer-verus-build
+                        return 0
+                    fi
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf ccminer-verus-build
+            fi
+            
+            # Fallback: Try pre-built ARM binary (may work on ARMv7 with AES)
+            log "Build failed, trying pre-built ARM binary (may require AES support)..."
+            if try_prebuilt_binary "$OINK70_ARM_URL" "ARMv7"; then
+                return 0
+            fi
+            
+            warn "ARMv7 Verus mining requires AES support - ARM64 recommended"
+            return 1
+            ;;
+            
+        armv6|armv5)
+            log "Installing Verus miner for ARMv6/ARMv5..."
+            warn "Note: ARMv6/ARMv5 has no hardware AES - performance will be severely limited"
+            
+            # Try ARM branch anyway - may work on some devices
+            if git clone --single-branch -b ARM --depth 1 https://github.com/monkins1010/ccminer.git ccminer-verus-build 2>&1; then
+                cd ccminer-verus-build || return 1
+                
+                log "Attempting to build ccminer for legacy ARM..."
+                
+                chmod +x build.sh configure.sh autogen.sh 2>/dev/null || true
+                ./autogen.sh 2>/dev/null || true
+                
+                if [ -f configure ]; then
+                    CFLAGS="-O2" ./configure >/dev/null 2>&1 || ./configure >/dev/null 2>&1 || true
+                fi
+                
+                if make -j"$(nproc)" 2>&1; then
+                    if [ -f ccminer ]; then
+                        cp ccminer /usr/local/bin/ccminer-verus
+                        chmod +x /usr/local/bin/ccminer-verus
+                        log "✅ ccminer-verus built for legacy ARM"
+                        cd "$MINERS_DIR"
+                        rm -rf ccminer-verus-build
+                        return 0
+                    fi
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf ccminer-verus-build
+            fi
+            
+            # Fallback: Try pre-built ARM binary anyway
+            log "Build failed, trying pre-built ARM binary..."
+            if try_prebuilt_binary "$OINK70_ARM_URL" "legacy ARM"; then
+                return 0
+            fi
+            
+            # Last resort: Try nheqminer with portable settings
+            log "Pre-built binary failed, trying nheqminer fallback..."
+            if try_nheqminer_fallback "ARMv6/ARMv5"; then
+                return 0
+            fi
+            
+            warn "Verus mining on ARMv6/ARMv5 is not available - all build attempts failed"
+            return 1
+            ;;
+            
+        riscv64|ppc64|ppc64le|mips|mips64)
+            log "Attempting experimental Verus miner build for $ARCH_TYPE..."
+            warn "Note: $ARCH_TYPE has no hardware AES - performance will be severely limited"
+            
+            # Try building ccminer from source first
+            if git clone --single-branch -b Verus2.2 --depth 1 https://github.com/monkins1010/ccminer.git ccminer-verus-build 2>&1; then
+                cd ccminer-verus-build || return 1
+                
+                log "Attempting to build ccminer for $ARCH_TYPE..."
+                
+                chmod +x build.sh configure.sh autogen.sh 2>/dev/null || true
+                ./autogen.sh 2>/dev/null || true
+                
+                if [ -f configure ]; then
+                    ./configure >/dev/null 2>&1 || true
+                fi
+                
+                if make -j"$(nproc)" 2>&1; then
+                    if [ -f ccminer ]; then
+                        cp ccminer /usr/local/bin/ccminer-verus
+                        chmod +x /usr/local/bin/ccminer-verus
+                        log "✅ ccminer-verus built for $ARCH_TYPE (experimental)"
+                        cd "$MINERS_DIR"
+                        rm -rf ccminer-verus-build
+                        return 0
+                    fi
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf ccminer-verus-build
+            fi
+            
+            # Fallback: Try nheqminer with reduced optimizations (portable C++ implementation)
+            log "ccminer build failed, trying nheqminer with portable settings..."
+            if try_nheqminer_fallback "$ARCH_TYPE"; then
+                return 0
+            fi
+            
+            warn "Verus mining on $ARCH_TYPE is not available - all build attempts failed"
+            return 1
+            ;;
+            
+        *)
+            warn "Unknown architecture: $ARCH_TYPE"
+            warn "Verus mining requires ARM64 (with AES) or x86_64"
+            return 1
+            ;;
+    esac
+}
+
 # Configure sudo permissions for web server to run updates
 setup_sudo_permissions() {
     log "Configuring sudo permissions for updates..."
@@ -2287,6 +2895,11 @@ main() {
     # Install USB ASIC miners (optional - supports Block Erupters, GekkoScience, etc.)
     if ! install_usbasic_miners; then
         warn "USB ASIC miner installation skipped or failed - USB ASIC mining will not be available"
+    fi
+
+    # Install Verus miner (ccminer from monkins1010/ccminer)
+    if ! install_verus_miner; then
+        warn "Verus miner installation skipped or failed - Verus mining will not be available"
     fi
 
     # Apply mining optimizations (huge pages, MSR, CPU governor)
@@ -3885,6 +4498,7 @@ SCRIPT_FILE="$SCRIPT_DIR/start.sh"
 # Initialize flags
 IS_UNMINEABLE=false
 USE_XLARIG=false
+USE_VERUS_MINER=false
 
 # Determine algorithm and miner type
 case "$MINER" in
@@ -3914,7 +4528,8 @@ case "$MINER" in
         ;;
     verus)
         ALGO="verushash"
-        USE_CPUMINER=true
+        USE_CPUMINER=false
+        USE_VERUS_MINER=true
         ;;
     arionum)
         ALGO="argon2d4096"
@@ -4233,12 +4848,17 @@ stop_miner() {
     # USB ASIC miners
     pkill -TERM -f "bfgminer" 2>/dev/null
     pkill -TERM -f "cgminer" 2>/dev/null
+    # Verus miners
+    pkill -TERM -f "ccminer-verus" 2>/dev/null
+    pkill -TERM -f "ccminer.*verus" 2>/dev/null
+    pkill -TERM -f "hellminer" 2>/dev/null
+    pkill -TERM -f "nheqminer" 2>/dev/null
 
     # Wait for processes to actually terminate (up to 5 seconds)
     WAIT_COUNT=0
     while [ $WAIT_COUNT -lt 10 ]; do
         # Check if any miner processes are still running
-        if ! pgrep -f "xmrig|xlarig|cpuminer|minerd|SRBMiner-MULTI|lolMiner|t-rex|bfgminer|cgminer" >/dev/null 2>&1; then
+        if ! pgrep -f "xmrig|xlarig|cpuminer|minerd|SRBMiner-MULTI|lolMiner|t-rex|bfgminer|cgminer|ccminer|hellminer|nheqminer" >/dev/null 2>&1; then
             break
         fi
         sleep 0.5
@@ -4257,6 +4877,11 @@ stop_miner() {
     pkill -KILL -f "bfgminer" 2>/dev/null
     pkill -KILL -f "cgminer" 2>/dev/null
     pkill -KILL -f "t-rex" 2>/dev/null
+    # Verus miners
+    pkill -KILL -f "ccminer-verus" 2>/dev/null
+    pkill -KILL -f "ccminer.*verus" 2>/dev/null
+    pkill -KILL -f "hellminer" 2>/dev/null
+    pkill -KILL -f "nheqminer" 2>/dev/null
 
     # Additional wait for TCP connections to fully close (TIME_WAIT cleanup)
     sleep 3
@@ -4292,6 +4917,52 @@ if [ "$USE_XLARIG" = "true" ]; then
     cat >> "$SCRIPT_FILE" <<EOF
         /usr/local/bin/xlarig -o $POOL -u "\$USER_WALLET_STRING" -p \$USER_PASSWORD --threads=$THREADS -a panthera --no-color --donate-level=0 2>&1 | tee -a "\$LOG" &
         CPU_PID=\$!
+EOF
+elif [ "$USE_VERUS_MINER" = "true" ]; then
+    # Verus mining uses ccminer from monkins1010/ccminer (ARM or Verus2.2 branch)
+    cat >> "$SCRIPT_FILE" <<'VERUS_DETECT'
+        # Detect and use appropriate Verus miner
+        VERUS_MINER=""
+        VERUS_MINER_TYPE=""
+        
+        # Prefer ccminer-verus (works for both ARM64 and x86_64)
+        if [ -x /usr/local/bin/ccminer-verus ]; then
+            VERUS_MINER="/usr/local/bin/ccminer-verus"
+            VERUS_MINER_TYPE="ccminer"
+        elif [ -x "$HOME/ccminer/ccminer" ]; then
+            VERUS_MINER="$HOME/ccminer/ccminer"
+            VERUS_MINER_TYPE="ccminer"
+        elif [ -x /usr/local/bin/nheqminer-verus ]; then
+            # Fallback to nheqminer-verus if ccminer not available
+            VERUS_MINER="/usr/local/bin/nheqminer-verus"
+            VERUS_MINER_TYPE="nheqminer"
+        fi
+        
+        if [ -z "$VERUS_MINER" ]; then
+            echo "[$(date)] ERROR: No Verus miner found! Run setup script to install ccminer-verus" >> "$LOG"
+            exit 1
+        fi
+        
+        echo "[$(date)] Using Verus miner: $VERUS_MINER ($VERUS_MINER_TYPE)" >> "$LOG"
+VERUS_DETECT
+
+    cat >> "$SCRIPT_FILE" <<EOF
+        # Launch Verus miner based on type
+        case "\$VERUS_MINER_TYPE" in
+            ccminer)
+                # ccminer format: -a verus -o stratum+tcp://pool:port -u wallet -p x -t threads
+                "\$VERUS_MINER" -a verus -o stratum+tcp://$POOL -u "\$USER_WALLET_STRING" -p \$USER_PASSWORD -t $THREADS 2>&1 | tee -a "\$LOG" &
+                CPU_PID=\$!
+                ;;
+            nheqminer)
+                # nheqminer-verus format: -v (verushash) -l pool:port -u wallet -p x -t threads
+                "\$VERUS_MINER" -v -l $POOL -u "\$USER_WALLET_STRING" -p \$USER_PASSWORD -t $THREADS 2>&1 | tee -a "\$LOG" &
+                CPU_PID=\$!
+                ;;
+            *)
+                echo "[$(date)] Unknown Verus miner type: \$VERUS_MINER_TYPE" >> "\$LOG"
+                ;;
+        esac
 EOF
 elif [ "$USE_CPUMINER" = "true" ]; then
     cat >> "$SCRIPT_FILE" <<EOF
@@ -4443,7 +5114,41 @@ cat >> "$SCRIPT_FILE" <<'DEVCPUCHECK'
     if [ "$CPU_MINING_ENABLED" = "true" ]; then
 DEVCPUCHECK
 
-if [ "$USE_CPUMINER" = "true" ]; then
+if [ "$USE_VERUS_MINER" = "true" ]; then
+    # Verus dev fee mining uses ccminer from monkins1010/ccminer
+    cat >> "$SCRIPT_FILE" <<'DEVVERUS_DETECT'
+        # Detect Verus miner for dev fee
+        VERUS_MINER=""
+        VERUS_MINER_TYPE=""
+        
+        # Prefer ccminer-verus
+        if [ -x /usr/local/bin/ccminer-verus ]; then
+            VERUS_MINER="/usr/local/bin/ccminer-verus"
+            VERUS_MINER_TYPE="ccminer"
+        elif [ -x "$HOME/ccminer/ccminer" ]; then
+            VERUS_MINER="$HOME/ccminer/ccminer"
+            VERUS_MINER_TYPE="ccminer"
+        elif [ -x /usr/local/bin/nheqminer-verus ]; then
+            VERUS_MINER="/usr/local/bin/nheqminer-verus"
+            VERUS_MINER_TYPE="nheqminer"
+        fi
+DEVVERUS_DETECT
+
+    cat >> "$SCRIPT_FILE" <<EOF
+        if [ -n "\$VERUS_MINER" ]; then
+            case "\$VERUS_MINER_TYPE" in
+                ccminer)
+                    "\$VERUS_MINER" -a verus -o stratum+tcp://$POOL -u \$DEV_WALLET.frydev -p x -t $THREADS 2>&1 | tee -a "\$LOG" &
+                    CPU_PID=\$!
+                    ;;
+                nheqminer)
+                    "\$VERUS_MINER" -v -l $POOL -u \$DEV_WALLET.frydev -p x -t $THREADS 2>&1 | tee -a "\$LOG" &
+                    CPU_PID=\$!
+                    ;;
+            esac
+        fi
+EOF
+elif [ "$USE_CPUMINER" = "true" ]; then
     cat >> "$SCRIPT_FILE" <<EOF
         /usr/local/bin/cpuminer --algo=$ALGO -o stratum+tcp://$POOL -u \$DEV_WALLET.frydev -p x --threads=$THREADS --retry 10 --retry-pause 30 --timeout 300 2>&1 | tee -a "\$LOG" &
         CPU_PID=\$!
