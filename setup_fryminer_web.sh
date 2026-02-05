@@ -363,6 +363,47 @@ else
     # Restore backup config on failure
     if [ -f "$CONFIG_BACKUP" ]; then
         cp "$CONFIG_BACKUP" "$CONFIG_FILE"
+        log_msg "Config restored from backup"
+    fi
+
+    # CRITICAL: Restart mining even if update failed!
+    # The update killed the miner, so we must restart it regardless of update outcome
+    if [ "$WAS_MINING" = "true" ] && [ -f "$CONFIG_FILE" ]; then
+        log_msg "Update failed but miner was running - restarting mining..."
+        sleep 3
+
+        # Remove stop marker so mining can start
+        rm -f /opt/frynet-config/stopped 2>/dev/null
+
+        # Source config and find start script
+        . "$CONFIG_FILE"
+        SCRIPT_FILE="/opt/frynet-config/output/\$miner/start.sh"
+
+        if [ -f "\$SCRIPT_FILE" ]; then
+            # Kill any existing miners (just in case)
+            pkill -9 -f "xmrig" 2>/dev/null || true
+            pkill -9 -f "xlarig" 2>/dev/null || true
+            pkill -9 -f "cpuminer" 2>/dev/null || true
+            pkill -9 -f "ccminer" 2>/dev/null || true
+            pkill -9 -f "nheqminer" 2>/dev/null || true
+            pkill -9 -f "SRBMiner-MULTI" 2>/dev/null || true
+            pkill -9 -f "lolMiner" 2>/dev/null || true
+            pkill -9 -f "t-rex" 2>/dev/null || true
+            pkill -9 -f "bfgminer" 2>/dev/null || true
+            pkill -9 -f "cgminer" 2>/dev/null || true
+            sleep 2
+
+            nohup sh "\$SCRIPT_FILE" >/dev/null 2>&1 &
+            NEW_PID=\$!
+            echo "\$NEW_PID" > "\$PID_FILE"
+            log_msg "Mining restarted with PID \$NEW_PID (using previous version)"
+        else
+            log_msg "WARNING: Start script not found at \$SCRIPT_FILE"
+            log_msg "Please re-save configuration via web interface to restart mining."
+            MINER_LOG="/opt/frynet-config/logs/miner.log"
+            echo "[\$(date)] WARNING: Auto-update failed and could not restart mining" >> "\$MINER_LOG"
+            echo "[\$(date)] Please click 'Save' in web interface to restart mining" >> "\$MINER_LOG"
+        fi
     fi
 fi
 
@@ -2873,34 +2914,68 @@ main() {
     install_dependencies
     remove_docker_if_present
 
-    # Install miners - CRITICAL: Exit if these fail
-    if ! install_xmrig; then
-        die "CRITICAL: XMRig installation failed - cannot continue"
+    # Install miners - track what succeeds
+    XMRIG_OK=false
+    XLARIG_OK=false
+    CPUMINER_OK=false
+    GPU_OK=false
+    USBASIC_OK=false
+    VERUS_OK=false
+
+    if install_xmrig; then
+        XMRIG_OK=true
+    else
+        warn "XMRig installation failed - RandomX mining will not be available"
     fi
     
     # Install XLArig for Scala mining (optional)
-    if ! install_xlarig; then
+    if install_xlarig; then
+        XLARIG_OK=true
+    else
         warn "XLArig installation failed - Scala mining will not be available"
     fi
     
-    if ! install_cpuminer; then
-        die "CRITICAL: cpuminer installation failed - cannot continue"
+    if install_cpuminer; then
+        CPUMINER_OK=true
+    else
+        warn "cpuminer installation failed - Scrypt/SHA256d/X11 mining will not be available"
     fi
 
     # Install GPU miners (optional - x86_64 only)
-    if ! install_gpu_miners; then
+    if install_gpu_miners; then
+        GPU_OK=true
+    else
         warn "GPU miner installation skipped or failed - GPU mining will not be available"
     fi
 
     # Install USB ASIC miners (optional - supports Block Erupters, GekkoScience, etc.)
-    if ! install_usbasic_miners; then
+    if install_usbasic_miners; then
+        USBASIC_OK=true
+    else
         warn "USB ASIC miner installation skipped or failed - USB ASIC mining will not be available"
     fi
 
     # Install Verus miner (ccminer from monkins1010/ccminer)
-    if ! install_verus_miner; then
+    if install_verus_miner; then
+        VERUS_OK=true
+    else
         warn "Verus miner installation skipped or failed - Verus mining will not be available"
     fi
+
+    # Only fail if NO miners installed at all
+    if [ "$XMRIG_OK" = "false" ] && [ "$XLARIG_OK" = "false" ] && [ "$CPUMINER_OK" = "false" ] && [ "$VERUS_OK" = "false" ]; then
+        die "CRITICAL: No CPU miners could be installed - cannot continue"
+    fi
+
+    # Log what's available
+    log "=== Miner Installation Summary ==="
+    [ "$XMRIG_OK" = "true" ]    && log "  ✅ XMRig (RandomX, etc.)" || log "  ❌ XMRig"
+    [ "$XLARIG_OK" = "true" ]   && log "  ✅ XLArig (Scala/Panthera)" || log "  ❌ XLArig"
+    [ "$CPUMINER_OK" = "true" ] && log "  ✅ cpuminer (Scrypt, SHA256d, X11, etc.)" || log "  ❌ cpuminer"
+    [ "$VERUS_OK" = "true" ]    && log "  ✅ ccminer-verus (VerusHash)" || log "  ❌ ccminer-verus"
+    [ "$GPU_OK" = "true" ]      && log "  ✅ GPU miners" || log "  ⬚ GPU miners (skipped/failed)"
+    [ "$USBASIC_OK" = "true" ]  && log "  ✅ USB ASIC miners" || log "  ⬚ USB ASIC miners (skipped/failed)"
+    log "==================================="
 
     # Apply mining optimizations (huge pages, MSR, CPU governor)
     optimize_for_mining
@@ -5922,6 +5997,47 @@ case "$ACTION" in
                 fi
                 
                 echo "failed" > "$UPDATE_STATUS_FILE"
+                
+                # CRITICAL: Restart mining even if update failed!
+                # The update killed the miner, so we must restart it regardless
+                if [ "$WAS_MINING" = "true" ] && [ -n "$MINER_COIN" ]; then
+                    SCRIPT_FILE="/opt/frynet-config/output/$MINER_COIN/start.sh"
+                    if [ -f "$SCRIPT_FILE" ]; then
+                        echo "[$(date)] 🔄 Update failed but miner was running - restarting $MINER_COIN mining..." >> "$MINER_LOG"
+                        echo "[$(date)] Restarting mining after failed update..." >> "$UPDATE_LOG"
+                        
+                        rm -f /opt/frynet-config/stopped 2>/dev/null
+                        
+                        if [ "$CAN_SUDO" = "true" ]; then
+                            sudo pkill -9 -f "xmrig" 2>/dev/null || true
+                            sudo pkill -9 -f "xlarig" 2>/dev/null || true
+                            sudo pkill -9 -f "cpuminer" 2>/dev/null || true
+                            sudo pkill -9 -f "ccminer" 2>/dev/null || true
+                            sudo pkill -9 -f "nheqminer" 2>/dev/null || true
+                            sudo pkill -9 -f "bfgminer" 2>/dev/null || true
+                            sudo pkill -9 -f "cgminer" 2>/dev/null || true
+                        else
+                            pkill -9 -f "xmrig" 2>/dev/null || true
+                            pkill -9 -f "xlarig" 2>/dev/null || true
+                            pkill -9 -f "cpuminer" 2>/dev/null || true
+                            pkill -9 -f "ccminer" 2>/dev/null || true
+                            pkill -9 -f "nheqminer" 2>/dev/null || true
+                            pkill -9 -f "bfgminer" 2>/dev/null || true
+                            pkill -9 -f "cgminer" 2>/dev/null || true
+                        fi
+                        
+                        sleep 2
+                        nohup sh "$SCRIPT_FILE" >/dev/null 2>&1 &
+                        RESTART_PID=$!
+                        echo "$RESTART_PID" > "$PID_FILE"
+                        echo "[$(date)] ✅ Mining restarted PID $RESTART_PID (using previous version)" >> "$MINER_LOG"
+                        echo "[$(date)] Mining restarted PID $RESTART_PID (previous version)" >> "$UPDATE_LOG"
+                    else
+                        echo "[$(date)] ⚠️  Cannot restart mining - start script missing: $SCRIPT_FILE" >> "$MINER_LOG"
+                        echo "[$(date)] Please click 'Save' in Settings to regenerate and restart" >> "$MINER_LOG"
+                    fi
+                fi
+                
                 rm -f "$TEMP_SCRIPT"
                 exit 1
             fi
