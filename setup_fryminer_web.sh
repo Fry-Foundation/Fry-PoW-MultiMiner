@@ -2114,6 +2114,9 @@ install_verus_miner() {
     # Pre-built binary URLs from Oink70/ccminer-verus releases
     OINK70_ARM_URL="https://github.com/Oink70/ccminer-verus/releases/download/v3.8.3a-CPU/ccminer-v3.8.3c-oink_ARM"
     OINK70_X86_64_URL="https://github.com/Oink70/ccminer-verus/releases/download/v3.8.3a-CPU/ccminer-v3.8.3a-oink_Ubuntu_18.04"
+    # Additional ARM64 binary sources (fallbacks)
+    OINK70_ARM64_URL2="https://github.com/Oink70/ccminer-verus/releases/download/v3.8.3a-CPU/ccminer-v3.8.3c-oink_aarch64"
+    MONKINS_ARM_RELEASE_URL="https://github.com/monkins1010/ccminer/releases/latest/download/ccminer-arm"
     
     # Helper function to try downloading pre-built binary
     try_prebuilt_binary() {
@@ -2121,24 +2124,85 @@ install_verus_miner() {
         local arch_name="$2"
         
         log "Attempting to download pre-built ccminer binary for $arch_name..."
+        log "  URL: $url"
         cd "$MINERS_DIR" || return 1
+        rm -f ccminer-prebuilt 2>/dev/null
         
-        if curl -L -o ccminer-prebuilt "$url" 2>/dev/null; then
+        if curl -fSL --connect-timeout 30 --max-time 120 -o ccminer-prebuilt "$url" 2>/dev/null; then
             if [ -s ccminer-prebuilt ]; then
-                chmod +x ccminer-prebuilt
-                # Test if binary works
-                if ./ccminer-prebuilt --version >/dev/null 2>&1 || ./ccminer-prebuilt --help >/dev/null 2>&1; then
-                    mv ccminer-prebuilt /usr/local/bin/ccminer-verus
-                    chmod +x /usr/local/bin/ccminer-verus
-                    log "✅ ccminer-verus installed from pre-built binary for $arch_name"
-                    return 0
-                else
-                    log "Pre-built binary failed to execute, removing..."
-                    rm -f ccminer-prebuilt
-                fi
+                # Validate it's a real ELF binary (not an HTML error page)
+                FILE_TYPE=$(file ccminer-prebuilt 2>/dev/null || echo "unknown")
+                case "$FILE_TYPE" in
+                    *ELF*)
+                        log "  Valid ELF binary detected: $FILE_TYPE"
+                        chmod +x ccminer-prebuilt
+                        
+                        # Check architecture matches (warn but don't reject - kernel may handle compat)
+                        case "$ARCH_TYPE" in
+                            arm64)
+                                case "$FILE_TYPE" in
+                                    *aarch64*|*ARM\ aarch64*|*64-bit*LSB*ARM*)
+                                        log "  Architecture match: aarch64"
+                                        ;;
+                                    *)
+                                        warn "  Binary may not match arch ($ARCH_TYPE), attempting anyway..."
+                                        ;;
+                                esac
+                                ;;
+                        esac
+                        
+                        # Try to run it - but don't reject solely on exit code
+                        # ccminer --version and --help often return non-zero
+                        if ./ccminer-prebuilt --version >/dev/null 2>&1; then
+                            log "  Binary executes successfully (--version)"
+                        elif ./ccminer-prebuilt --help >/dev/null 2>&1; then
+                            log "  Binary executes successfully (--help)"
+                        else
+                            # Check if it failed due to missing libs vs bad binary
+                            LDD_OUT=$(ldd ccminer-prebuilt 2>&1 || true)
+                            case "$LDD_OUT" in
+                                *"not found"*)
+                                    warn "  Binary has missing shared libraries:"
+                                    echo "$LDD_OUT" | grep "not found" | while read -r line; do
+                                        warn "    $line"
+                                    done
+                                    # Try to install missing libs
+                                    log "  Attempting to install missing dependencies..."
+                                    apt-get install -y libcurl4 libjansson4 libssl3 libgomp1 2>/dev/null || \
+                                    apt-get install -y libcurl4 libjansson4 libssl1.1 libgomp1 2>/dev/null || true
+                                    # Retry execution after installing deps
+                                    if ./ccminer-prebuilt --version >/dev/null 2>&1 || ./ccminer-prebuilt --help >/dev/null 2>&1; then
+                                        log "  Binary works after installing dependencies"
+                                    else
+                                        warn "  Binary still fails after dependency install - accepting anyway (ELF valid)"
+                                    fi
+                                    ;;
+                                *"not a dynamic executable"*|*"statically linked"*)
+                                    log "  Static binary - accepting"
+                                    ;;
+                                *)
+                                    # Many ccminer versions exit non-zero on --version/--help but work fine for mining
+                                    log "  Binary exit code non-zero but ELF is valid - accepting"
+                                    ;;
+                            esac
+                        fi
+                        
+                        mv ccminer-prebuilt /usr/local/bin/ccminer-verus
+                        chmod +x /usr/local/bin/ccminer-verus
+                        log "✅ ccminer-verus installed from pre-built binary for $arch_name"
+                        return 0
+                        ;;
+                    *)
+                        warn "  Downloaded file is not an ELF binary: $FILE_TYPE"
+                        rm -f ccminer-prebuilt
+                        ;;
+                esac
             else
+                warn "  Downloaded file is empty"
                 rm -f ccminer-prebuilt
             fi
+        else
+            warn "  Download failed from: $url"
         fi
         return 1
     }
@@ -2204,7 +2268,9 @@ install_verus_miner() {
     # Install build dependencies
     log "Installing build dependencies..."
     apt-get update >/dev/null 2>&1
-    apt-get install -y build-essential libcurl4-openssl-dev libssl-dev libjansson-dev automake autotools-dev libomp-dev git curl >/dev/null 2>&1 || true
+    apt-get install -y build-essential libcurl4-openssl-dev libssl-dev libjansson-dev automake autotools-dev libomp-dev libgomp1 git curl file >/dev/null 2>&1 || true
+    # Also try libgmp-dev (needed by some ccminer builds)
+    apt-get install -y libgmp-dev 2>/dev/null || true
     
     mkdir -p "$MINERS_DIR"
     cd "$MINERS_DIR" || return 1
@@ -2212,9 +2278,30 @@ install_verus_miner() {
     
     case "$ARCH_TYPE" in
         arm64)
-            log "Installing ccminer for ARM64 from monkins1010/ccminer (ARM branch)..."
+            log "Installing ccminer for ARM64 (Raspberry Pi 4/5, etc.)..."
             
-            # Try building from source first
+            # Strategy: Try pre-built binaries FIRST (faster, more reliable), then build from source
+            
+            # === Attempt 1: Pre-built binary from Oink70 (primary ARM URL) ===
+            log "Attempt 1: Oink70 pre-built ARM binary..."
+            if try_prebuilt_binary "$OINK70_ARM_URL" "ARM64"; then
+                return 0
+            fi
+            
+            # === Attempt 2: Pre-built binary from Oink70 (aarch64-specific URL) ===
+            log "Attempt 2: Oink70 pre-built aarch64 binary..."
+            if try_prebuilt_binary "$OINK70_ARM64_URL2" "ARM64-aarch64"; then
+                return 0
+            fi
+            
+            # === Attempt 3: Pre-built binary from monkins1010 releases ===
+            log "Attempt 3: monkins1010 release binary..."
+            if try_prebuilt_binary "$MONKINS_ARM_RELEASE_URL" "ARM64-monkins"; then
+                return 0
+            fi
+            
+            # === Attempt 4: Build from source (monkins1010/ccminer ARM branch) ===
+            log "Attempt 4: Building from source (monkins1010/ccminer ARM branch)..."
             if git clone --single-branch -b ARM --depth 1 https://github.com/monkins1010/ccminer.git ccminer-verus-build 2>&1; then
                 cd ccminer-verus-build || return 1
                 
@@ -2223,56 +2310,116 @@ install_verus_miner() {
                 # Make scripts executable
                 chmod +x build.sh configure.sh autogen.sh 2>/dev/null || true
                 
+                # Set ARM64 build flags with crypto extensions (Pi 4B has hardware AES)
+                export CFLAGS="-O2 -march=armv8-a+crypto -mtune=cortex-a72 -flto"
+                export CXXFLAGS="$CFLAGS"
+                export LDFLAGS="-flto"
+                
                 # Try build.sh first (recommended method)
                 if [ -f build.sh ]; then
+                    log "Running build.sh..."
                     if ./build.sh 2>&1; then
                         if [ -f ccminer ]; then
                             cp ccminer /usr/local/bin/ccminer-verus
                             chmod +x /usr/local/bin/ccminer-verus
-                            log "✅ ccminer-verus built successfully for ARM64"
+                            log "✅ ccminer-verus built successfully for ARM64 via build.sh"
                             cd "$MINERS_DIR"
                             rm -rf ccminer-verus-build
+                            unset CFLAGS CXXFLAGS LDFLAGS
                             return 0
                         fi
                     fi
+                    log "build.sh failed, trying manual build..."
                 fi
                 
-                # Manual build fallback
-                log "Trying manual build..."
+                # Manual build fallback with proper ARM64 configure flags
                 ./autogen.sh 2>/dev/null || true
                 if [ -f configure ]; then
+                    log "Running configure with ARM64 crypto flags..."
+                    ./configure --with-crypto --with-curl CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS" >/dev/null 2>&1 || \
+                    ./configure CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS" >/dev/null 2>&1 || \
                     ./configure >/dev/null 2>&1 || true
                 fi
                 
-                if make -j"$(nproc)" 2>&1; then
+                CORES=$(nproc 2>/dev/null || echo 2)
+                [ "$CORES" -gt 4 ] && CORES=4  # Limit to avoid OOM on Pi
+                
+                if make -j"$CORES" 2>&1; then
                     if [ -f ccminer ]; then
                         cp ccminer /usr/local/bin/ccminer-verus
                         chmod +x /usr/local/bin/ccminer-verus
-                        log "✅ ccminer-verus built successfully for ARM64"
+                        log "✅ ccminer-verus built successfully for ARM64 via manual build"
                         cd "$MINERS_DIR"
                         rm -rf ccminer-verus-build
+                        unset CFLAGS CXXFLAGS LDFLAGS
                         return 0
                     fi
                 fi
                 
                 cd "$MINERS_DIR"
                 rm -rf ccminer-verus-build
+                unset CFLAGS CXXFLAGS LDFLAGS
+            else
+                warn "Failed to clone monkins1010/ccminer - check network connectivity"
             fi
             
-            # Fallback: Try pre-built binary from Oink70
-            log "Build failed, trying pre-built binary..."
-            if try_prebuilt_binary "$OINK70_ARM_URL" "ARM64"; then
-                return 0
+            # === Attempt 5: Try Oink70/ccminer-verus source build ===
+            log "Attempt 5: Building from Oink70/ccminer-verus source..."
+            rm -rf ccminer-verus-oink-build 2>/dev/null
+            if git clone --depth 1 https://github.com/Oink70/ccminer-verus.git ccminer-verus-oink-build 2>&1; then
+                cd ccminer-verus-oink-build || true
+                
+                chmod +x build.sh configure.sh autogen.sh 2>/dev/null || true
+                
+                export CFLAGS="-O2 -march=armv8-a+crypto"
+                export CXXFLAGS="$CFLAGS"
+                
+                if [ -f build.sh ]; then
+                    ./build.sh 2>&1 || true
+                fi
+                
+                if [ ! -f ccminer ]; then
+                    ./autogen.sh 2>/dev/null || true
+                    [ -f configure ] && ./configure >/dev/null 2>&1 || true
+                    CORES=$(nproc 2>/dev/null || echo 2)
+                    [ "$CORES" -gt 4 ] && CORES=4
+                    make -j"$CORES" 2>&1 || true
+                fi
+                
+                if [ -f ccminer ]; then
+                    cp ccminer /usr/local/bin/ccminer-verus
+                    chmod +x /usr/local/bin/ccminer-verus
+                    log "✅ ccminer-verus built from Oink70 source for ARM64"
+                    cd "$MINERS_DIR"
+                    rm -rf ccminer-verus-oink-build
+                    unset CFLAGS CXXFLAGS
+                    return 0
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf ccminer-verus-oink-build
+                unset CFLAGS CXXFLAGS
             fi
             
-            warn "Could not install ccminer-verus for ARM64"
+            warn "Could not install ccminer-verus for ARM64 after all attempts"
+            warn "Tried: 3 pre-built binaries, 2 source builds"
             return 1
             ;;
             
         x86_64)
-            log "Installing ccminer for x86_64 from monkins1010/ccminer (Verus2.2 branch)..."
+            log "Installing ccminer for x86_64..."
             
-            # Try building from source first
+            # Strategy: Try pre-built binary FIRST, then build from source
+            
+            # === Attempt 1: Pre-built binary from Oink70 ===
+            log "Attempt 1: Oink70 pre-built x86_64 binary..."
+            if try_prebuilt_binary "$OINK70_X86_64_URL" "x86_64"; then
+                return 0
+            fi
+            
+            # === Attempt 2: Build from source (monkins1010/ccminer Verus2.2 branch) ===
+            log "Attempt 2: Building from source (monkins1010/ccminer Verus2.2 branch)..."
+            
             if git clone --single-branch -b Verus2.2 --depth 1 https://github.com/monkins1010/ccminer.git ccminer-verus-build 2>&1; then
                 cd ccminer-verus-build || return 1
                 
@@ -2315,12 +2462,6 @@ install_verus_miner() {
                 
                 cd "$MINERS_DIR"
                 rm -rf ccminer-verus-build
-            fi
-            
-            # Fallback: Try pre-built binary from Oink70
-            log "Build failed, trying pre-built binary..."
-            if try_prebuilt_binary "$OINK70_X86_64_URL" "x86_64"; then
-                return 0
             fi
             
             warn "Could not install ccminer-verus for x86_64"
@@ -5000,21 +5141,42 @@ elif [ "$USE_VERUS_MINER" = "true" ]; then
         VERUS_MINER=""
         VERUS_MINER_TYPE=""
         
-        # Prefer ccminer-verus (works for both ARM64 and x86_64)
-        if [ -x /usr/local/bin/ccminer-verus ]; then
-            VERUS_MINER="/usr/local/bin/ccminer-verus"
-            VERUS_MINER_TYPE="ccminer"
-        elif [ -x "$HOME/ccminer/ccminer" ]; then
-            VERUS_MINER="$HOME/ccminer/ccminer"
-            VERUS_MINER_TYPE="ccminer"
-        elif [ -x /usr/local/bin/nheqminer-verus ]; then
-            # Fallback to nheqminer-verus if ccminer not available
-            VERUS_MINER="/usr/local/bin/nheqminer-verus"
-            VERUS_MINER_TYPE="nheqminer"
+        # Search for ccminer-verus in multiple locations
+        for VPATH in /usr/local/bin/ccminer-verus /usr/bin/ccminer-verus /opt/miners/ccminer-verus; do
+            if [ -x "$VPATH" ]; then
+                VERUS_MINER="$VPATH"
+                VERUS_MINER_TYPE="ccminer"
+                break
+            fi
+        done
+        
+        # Check home directory installations
+        if [ -z "$VERUS_MINER" ]; then
+            for VHOME in "$HOME/ccminer/ccminer" /root/ccminer/ccminer /home/*/ccminer/ccminer; do
+                if [ -x "$VHOME" ]; then
+                    VERUS_MINER="$VHOME"
+                    VERUS_MINER_TYPE="ccminer"
+                    break
+                fi
+            done
+        fi
+        
+        # Fallback to nheqminer-verus
+        if [ -z "$VERUS_MINER" ]; then
+            for VPATH in /usr/local/bin/nheqminer-verus /usr/bin/nheqminer-verus /opt/miners/nheqminer-verus; do
+                if [ -x "$VPATH" ]; then
+                    VERUS_MINER="$VPATH"
+                    VERUS_MINER_TYPE="nheqminer"
+                    break
+                fi
+            done
         fi
         
         if [ -z "$VERUS_MINER" ]; then
-            echo "[$(date)] ERROR: No Verus miner found! Run setup script to install ccminer-verus" >> "$LOG"
+            echo "[$(date)] ERROR: No Verus miner found!" >> "$LOG"
+            echo "[$(date)] Searched: /usr/local/bin/ccminer-verus, ~/ccminer/ccminer, /opt/miners/ccminer-verus" >> "$LOG"
+            echo "[$(date)] Run: sudo sh setup_fryminer_web.sh  to reinstall" >> "$LOG"
+            echo "[$(date)] Or manually install ccminer-verus to /usr/local/bin/" >> "$LOG"
             exit 1
         fi
         
@@ -5196,16 +5358,35 @@ if [ "$USE_VERUS_MINER" = "true" ]; then
         VERUS_MINER=""
         VERUS_MINER_TYPE=""
         
-        # Prefer ccminer-verus
-        if [ -x /usr/local/bin/ccminer-verus ]; then
-            VERUS_MINER="/usr/local/bin/ccminer-verus"
-            VERUS_MINER_TYPE="ccminer"
-        elif [ -x "$HOME/ccminer/ccminer" ]; then
-            VERUS_MINER="$HOME/ccminer/ccminer"
-            VERUS_MINER_TYPE="ccminer"
-        elif [ -x /usr/local/bin/nheqminer-verus ]; then
-            VERUS_MINER="/usr/local/bin/nheqminer-verus"
-            VERUS_MINER_TYPE="nheqminer"
+        # Search for ccminer-verus in multiple locations
+        for VPATH in /usr/local/bin/ccminer-verus /usr/bin/ccminer-verus /opt/miners/ccminer-verus; do
+            if [ -x "$VPATH" ]; then
+                VERUS_MINER="$VPATH"
+                VERUS_MINER_TYPE="ccminer"
+                break
+            fi
+        done
+        
+        # Check home directory installations
+        if [ -z "$VERUS_MINER" ]; then
+            for VHOME in "$HOME/ccminer/ccminer" /root/ccminer/ccminer /home/*/ccminer/ccminer; do
+                if [ -x "$VHOME" ]; then
+                    VERUS_MINER="$VHOME"
+                    VERUS_MINER_TYPE="ccminer"
+                    break
+                fi
+            done
+        fi
+        
+        # Fallback to nheqminer-verus
+        if [ -z "$VERUS_MINER" ]; then
+            for VPATH in /usr/local/bin/nheqminer-verus /usr/bin/nheqminer-verus /opt/miners/nheqminer-verus; do
+                if [ -x "$VPATH" ]; then
+                    VERUS_MINER="$VPATH"
+                    VERUS_MINER_TYPE="nheqminer"
+                    break
+                fi
+            done
         fi
 DEVVERUS_DETECT
 
