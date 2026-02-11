@@ -935,7 +935,7 @@ install_xlarig() {
         fi
     fi
     
-    ARCH_TYPE=$(uname -m)
+    XLARIG_ARCH=$(uname -m)
     XLARIG_VERSION="5.2.4"
     MINERS_DIR="/opt/miners"
     mkdir -p "$MINERS_DIR"
@@ -944,7 +944,7 @@ install_xlarig() {
     # Clean up any old attempts
     rm -rf XLArig* xlarig* 2>/dev/null
     
-    case "$ARCH_TYPE" in
+    case "$XLARIG_ARCH" in
         x86_64|amd64)
             log "Installing XLArig for x86_64..."
             DOWNLOAD_URL="https://github.com/scala-network/XLArig/releases/download/v${XLARIG_VERSION}/XLArig-v${XLARIG_VERSION}-linux-x86_64.zip"
@@ -1021,7 +1021,7 @@ install_xlarig() {
             ;;
             
         *)
-            warn "Unknown architecture $ARCH_TYPE for XLArig"
+            warn "Unknown architecture $XLARIG_ARCH for XLArig"
             ;;
     esac
     
@@ -2096,6 +2096,17 @@ install_usbasic_miners() {
 # Pre-built binaries from Oink70/ccminer-verus as fallback
 install_verus_miner() {
     log "=== Installing Verus (VRSC) miner ==="
+    
+    # Re-normalize ARCH_TYPE in case another function clobbered it with raw uname output
+    case "$ARCH_TYPE" in
+        aarch64|arm64) ARCH_TYPE="arm64" ;;
+        x86_64|amd64) ARCH_TYPE="x86_64" ;;
+        armv7*|armhf|armv7l) ARCH_TYPE="armv7" ;;
+        armv6*|armv6l) ARCH_TYPE="armv6" ;;
+        armv5*|armv4*|arm) ARCH_TYPE="armv5" ;;
+        i686|i386|i586) ARCH_TYPE="x86" ;;
+    esac
+    log "Verus installer: architecture=$ARCH_TYPE (raw: $(uname -m))"
     
     # Check if already installed
     if [ -x /usr/local/bin/ccminer-verus ]; then
