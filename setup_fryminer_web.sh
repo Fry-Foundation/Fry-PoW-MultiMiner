@@ -2097,29 +2097,41 @@ install_usbasic_miners() {
 install_verus_miner() {
     log "=== Installing Verus (VRSC) miner ==="
     
-    # Re-normalize ARCH_TYPE in case another function clobbered it with raw uname output
-    case "$ARCH_TYPE" in
-        aarch64|arm64) ARCH_TYPE="arm64" ;;
-        x86_64|amd64) ARCH_TYPE="x86_64" ;;
-        armv7*|armhf|armv7l) ARCH_TYPE="armv7" ;;
-        armv6*|armv6l) ARCH_TYPE="armv6" ;;
-        armv5*|armv4*|arm) ARCH_TYPE="armv5" ;;
-        i686|i386|i586) ARCH_TYPE="x86" ;;
-    esac
-    log "Verus installer: architecture=$ARCH_TYPE (raw: $(uname -m))"
-    
-    # Check if already installed
+    # Check if already installed AND working
     if [ -x /usr/local/bin/ccminer-verus ]; then
-        log "✅ ccminer-verus already installed"
-        /usr/local/bin/ccminer-verus --version 2>&1 | head -1 || true
-        return 0
+        # Verify the binary actually runs (not just exists)
+        if /usr/local/bin/ccminer-verus --version >/dev/null 2>&1 || /usr/local/bin/ccminer-verus --help >/dev/null 2>&1; then
+            log "✅ ccminer-verus already installed and working"
+            /usr/local/bin/ccminer-verus --version 2>&1 | head -1 || true
+            return 0
+        else
+            # Check for missing shared libraries
+            LDD_CHECK=$(ldd /usr/local/bin/ccminer-verus 2>&1 || true)
+            case "$LDD_CHECK" in
+                *"not found"*)
+                    warn "Existing ccminer-verus has missing libraries, will reinstall..."
+                    echo "$LDD_CHECK" | grep "not found" | while read -r line; do
+                        warn "  $line"
+                    done
+                    rm -f /usr/local/bin/ccminer-verus 2>/dev/null
+                    ;;
+                *)
+                    warn "Existing ccminer-verus is broken, will reinstall..."
+                    rm -f /usr/local/bin/ccminer-verus 2>/dev/null
+                    ;;
+            esac
+        fi
     fi
     
     # Check for ccminer in home directory (from previous installs)
     if [ -x "$HOME/ccminer/ccminer" ]; then
-        log "✅ ccminer found in ~/ccminer, creating symlink"
-        ln -sf "$HOME/ccminer/ccminer" /usr/local/bin/ccminer-verus 2>/dev/null || true
-        return 0
+        if "$HOME/ccminer/ccminer" --version >/dev/null 2>&1 || "$HOME/ccminer/ccminer" --help >/dev/null 2>&1; then
+            log "✅ ccminer found in ~/ccminer and working, creating symlink"
+            ln -sf "$HOME/ccminer/ccminer" /usr/local/bin/ccminer-verus 2>/dev/null || true
+            return 0
+        else
+            warn "ccminer in ~/ccminer exists but is broken, will install fresh"
+        fi
     fi
     
     # Pre-built binary URLs from Oink70/ccminer-verus releases
@@ -2128,6 +2140,102 @@ install_verus_miner() {
     # Additional ARM64 binary sources (fallbacks)
     OINK70_ARM64_URL2="https://github.com/Oink70/ccminer-verus/releases/download/v3.8.3a-CPU/ccminer-v3.8.3c-oink_aarch64"
     MONKINS_ARM_RELEASE_URL="https://github.com/monkins1010/ccminer/releases/latest/download/ccminer-arm"
+    
+    # Helper function to install OpenSSL 1.1 compatibility libraries
+    # Many pre-built ccminer binaries were compiled against OpenSSL 1.1
+    # but modern distros (Ubuntu 22.04+) ship OpenSSL 3.x
+    install_openssl_11_compat() {
+        # Already have it?
+        if [ -f /usr/lib/aarch64-linux-gnu/libssl.so.1.1 ] || [ -f /usr/lib/x86_64-linux-gnu/libssl.so.1.1 ] || [ -f /usr/lib/libssl.so.1.1 ]; then
+            log "  OpenSSL 1.1 already present"
+            return 0
+        fi
+        
+        # Method 1: Try package manager (works on some distros)
+        log "  Method 1: Trying libssl1.1 from package manager..."
+        if apt-get install -y libssl1.1 2>/dev/null; then
+            log "  ✅ libssl1.1 installed from package manager"
+            return 0
+        fi
+        
+        # Method 2: Download libssl1.1 .deb from Ubuntu 20.04 archive
+        log "  Method 2: Downloading libssl1.1 from Ubuntu archive..."
+        OPENSSL11_DIR="/tmp/openssl11_compat"
+        rm -rf "$OPENSSL11_DIR" 2>/dev/null
+        mkdir -p "$OPENSSL11_DIR"
+        cd "$OPENSSL11_DIR" || return 1
+        
+        case "$(uname -m)" in
+            aarch64|arm64)
+                OPENSSL_DEB_URL="http://ports.ubuntu.com/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.23_arm64.deb"
+                ;;
+            x86_64|amd64)
+                OPENSSL_DEB_URL="http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.23_amd64.deb"
+                ;;
+            armv7*|armhf)
+                OPENSSL_DEB_URL="http://ports.ubuntu.com/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.23_armhf.deb"
+                ;;
+            *)
+                warn "  No OpenSSL 1.1 .deb available for $(uname -m)"
+                cd "$MINERS_DIR" || true
+                rm -rf "$OPENSSL11_DIR" 2>/dev/null
+                return 1
+                ;;
+        esac
+        
+        if curl -fSL --connect-timeout 15 --max-time 60 -o libssl11.deb "$OPENSSL_DEB_URL" 2>/dev/null; then
+            if dpkg -i libssl11.deb 2>/dev/null; then
+                log "  ✅ libssl1.1 installed from Ubuntu 20.04 archive"
+                cd "$MINERS_DIR" || true
+                rm -rf "$OPENSSL11_DIR" 2>/dev/null
+                return 0
+            else
+                # dpkg failed, try extracting manually
+                log "  dpkg install failed, extracting manually..."
+                mkdir -p extract && cd extract
+                if ar x ../libssl11.deb 2>/dev/null && tar xf data.tar.* 2>/dev/null; then
+                    # Copy the .so files to the system lib directory
+                    find . -name "libssl.so.1.1" -exec cp {} /usr/lib/ \; 2>/dev/null
+                    find . -name "libcrypto.so.1.1" -exec cp {} /usr/lib/ \; 2>/dev/null
+                    ldconfig 2>/dev/null || true
+                    if [ -f /usr/lib/libssl.so.1.1 ]; then
+                        log "  ✅ OpenSSL 1.1 libs manually extracted and installed"
+                        cd "$MINERS_DIR" || true
+                        rm -rf "$OPENSSL11_DIR" 2>/dev/null
+                        return 0
+                    fi
+                fi
+            fi
+        else
+            warn "  Failed to download OpenSSL 1.1 .deb"
+        fi
+        
+        cd "$MINERS_DIR" || true
+        rm -rf "$OPENSSL11_DIR" 2>/dev/null
+        
+        # Method 3: Create symlinks from OpenSSL 3.x as last resort
+        # This is fragile but works for many binaries that only use basic SSL functions
+        log "  Method 3: Creating OpenSSL 1.1 symlinks from system OpenSSL..."
+        
+        # Find the actual system libssl
+        SYS_LIBSSL=$(find /usr/lib -name "libssl.so.3*" -o -name "libssl.so" 2>/dev/null | head -1)
+        SYS_LIBCRYPTO=$(find /usr/lib -name "libcrypto.so.3*" -o -name "libcrypto.so" 2>/dev/null | head -1)
+        
+        if [ -n "$SYS_LIBSSL" ] && [ -n "$SYS_LIBCRYPTO" ]; then
+            LIB_DIR=$(dirname "$SYS_LIBSSL")
+            ln -sf "$SYS_LIBSSL" "$LIB_DIR/libssl.so.1.1" 2>/dev/null || true
+            ln -sf "$SYS_LIBCRYPTO" "$LIB_DIR/libcrypto.so.1.1" 2>/dev/null || true
+            ldconfig 2>/dev/null || true
+            
+            if [ -f "$LIB_DIR/libssl.so.1.1" ]; then
+                warn "  ⚠️  Created OpenSSL 1.1 symlinks (may have limited compatibility)"
+                return 0
+            fi
+        fi
+        
+        warn "  Could not install OpenSSL 1.1 compatibility libraries"
+        return 1
+    }
     
     # Helper function to try downloading pre-built binary
     try_prebuilt_binary() {
@@ -2148,7 +2256,7 @@ install_verus_miner() {
                         log "  Valid ELF binary detected: $FILE_TYPE"
                         chmod +x ccminer-prebuilt
                         
-                        # Check architecture matches (warn but don't reject - kernel may handle compat)
+                        # Check architecture matches
                         case "$ARCH_TYPE" in
                             arm64)
                                 case "$FILE_TYPE" in
@@ -2156,52 +2264,85 @@ install_verus_miner() {
                                         log "  Architecture match: aarch64"
                                         ;;
                                     *)
-                                        warn "  Binary may not match arch ($ARCH_TYPE), attempting anyway..."
+                                        warn "  Binary architecture mismatch for $ARCH_TYPE, skipping"
+                                        rm -f ccminer-prebuilt
+                                        return 1
                                         ;;
                                 esac
                                 ;;
                         esac
                         
-                        # Try to run it - but don't reject solely on exit code
-                        # ccminer --version and --help often return non-zero
-                        if ./ccminer-prebuilt --version >/dev/null 2>&1; then
-                            log "  Binary executes successfully (--version)"
-                        elif ./ccminer-prebuilt --help >/dev/null 2>&1; then
-                            log "  Binary executes successfully (--help)"
-                        else
-                            # Check if it failed due to missing libs vs bad binary
-                            LDD_OUT=$(ldd ccminer-prebuilt 2>&1 || true)
-                            case "$LDD_OUT" in
-                                *"not found"*)
-                                    warn "  Binary has missing shared libraries:"
-                                    echo "$LDD_OUT" | grep "not found" | while read -r line; do
-                                        warn "    $line"
-                                    done
-                                    # Try to install missing libs
-                                    log "  Attempting to install missing dependencies..."
-                                    apt-get install -y libcurl4 libjansson4 libssl3 libgomp1 2>/dev/null || \
-                                    apt-get install -y libcurl4 libjansson4 libssl1.1 libgomp1 2>/dev/null || true
-                                    # Retry execution after installing deps
-                                    if ./ccminer-prebuilt --version >/dev/null 2>&1 || ./ccminer-prebuilt --help >/dev/null 2>&1; then
-                                        log "  Binary works after installing dependencies"
-                                    else
-                                        warn "  Binary still fails after dependency install - accepting anyway (ELF valid)"
-                                    fi
-                                    ;;
-                                *"not a dynamic executable"*|*"statically linked"*)
-                                    log "  Static binary - accepting"
-                                    ;;
-                                *)
-                                    # Many ccminer versions exit non-zero on --version/--help but work fine for mining
-                                    log "  Binary exit code non-zero but ELF is valid - accepting"
-                                    ;;
-                            esac
+                        # Test execution
+                        if ./ccminer-prebuilt --version >/dev/null 2>&1 || ./ccminer-prebuilt --help >/dev/null 2>&1; then
+                            log "  Binary executes successfully"
+                            mv ccminer-prebuilt /usr/local/bin/ccminer-verus
+                            chmod +x /usr/local/bin/ccminer-verus
+                            log "✅ ccminer-verus installed from pre-built binary for $arch_name"
+                            return 0
                         fi
                         
-                        mv ccminer-prebuilt /usr/local/bin/ccminer-verus
-                        chmod +x /usr/local/bin/ccminer-verus
-                        log "✅ ccminer-verus installed from pre-built binary for $arch_name"
-                        return 0
+                        # Binary failed to execute - check why
+                        LDD_OUT=$(ldd ccminer-prebuilt 2>&1 || true)
+                        case "$LDD_OUT" in
+                            *"not found"*)
+                                warn "  Binary has missing shared libraries:"
+                                echo "$LDD_OUT" | grep "not found" | while read -r line; do
+                                    warn "    $line"
+                                done
+                                
+                                # Try installing common missing deps
+                                log "  Attempting to install missing dependencies..."
+                                apt-get install -y libcurl4 libjansson4 libgomp1 2>/dev/null || true
+                                
+                                # Handle OpenSSL 1.1 specifically (needed by older pre-built binaries)
+                                case "$LDD_OUT" in
+                                    *libssl.so.1.1*|*libcrypto.so.1.1*)
+                                        log "  Binary needs OpenSSL 1.1 - attempting compat install..."
+                                        install_openssl_11_compat
+                                        ;;
+                                esac
+                                
+                                # Retry after dependency install
+                                if ./ccminer-prebuilt --version >/dev/null 2>&1 || ./ccminer-prebuilt --help >/dev/null 2>&1; then
+                                    log "  Binary works after installing dependencies"
+                                    mv ccminer-prebuilt /usr/local/bin/ccminer-verus
+                                    chmod +x /usr/local/bin/ccminer-verus
+                                    log "✅ ccminer-verus installed from pre-built binary for $arch_name"
+                                    return 0
+                                else
+                                    warn "  Binary still fails after dependency install - REJECTING"
+                                    rm -f ccminer-prebuilt
+                                    return 1
+                                fi
+                                ;;
+                            *"not a dynamic executable"*|*"statically linked"*)
+                                # Static binary that exits non-zero on --version is OK
+                                log "  Static binary - accepting despite non-zero exit code"
+                                mv ccminer-prebuilt /usr/local/bin/ccminer-verus
+                                chmod +x /usr/local/bin/ccminer-verus
+                                log "✅ ccminer-verus installed from pre-built binary for $arch_name"
+                                return 0
+                                ;;
+                            *)
+                                # No missing libs but still fails - try running with -a verus as a final test
+                                # Many ccminer versions exit non-zero on --version but work for mining
+                                EXEC_ERR=$(./ccminer-prebuilt --version 2>&1 || true)
+                                case "$EXEC_ERR" in
+                                    *"error while loading"*|*"GLIBC"*|*"Illegal instruction"*|*"Segmentation fault"*)
+                                        warn "  Binary has fatal runtime error: $EXEC_ERR"
+                                        rm -f ccminer-prebuilt
+                                        return 1
+                                        ;;
+                                    *)
+                                        log "  Binary exits non-zero but no fatal errors detected - accepting"
+                                        mv ccminer-prebuilt /usr/local/bin/ccminer-verus
+                                        chmod +x /usr/local/bin/ccminer-verus
+                                        log "✅ ccminer-verus installed from pre-built binary for $arch_name"
+                                        return 0
+                                        ;;
+                                esac
+                                ;;
+                        esac
                         ;;
                     *)
                         warn "  Downloaded file is not an ELF binary: $FILE_TYPE"
