@@ -40,7 +40,7 @@ $Script:DEV_FEE_DEV_MINUTES = 1
 
 # Dev wallet addresses by coin/algorithm type
 $Script:DevWallets = @{
-    XMR = "482R7WT5xYVKa2SYHaDtSGWQPv82sgwfSVBGfjV5wez2hbnVTiywf61bvYjvPosXzaBcaft9RSvaNNKsFRkcKbaWjMotjATkSbSmeSdX2DAxc1XxpcdxUBGd41oCwwfetG"
+    XMR = "482R7WT5xYVKa2SYHaDtSGWQPv82sgwfSVBGfjV5wez2hbnVTiDRGHb7AEsP5NLGDrBNfFgacPkNSEToGYissp2GRRiSUyo"
     LTC = "ltc1qrdc0wqzs3cwuhxxzkq2khepec2l3c6uhd8l9jy"
     BTC = "bc1qr6ldduupwn4dtqq4dwthv4vp3cg2dx7u3mcgva"
     DOGE = "D5nsUsiivbNv2nmuNE9x2ybkkCTEL4ceHj"
@@ -355,6 +355,196 @@ function Install-CPUMiner {
 }
 
 # =============================================================================
+# MINER INSTALLATION - CCMINER (VERUS)
+# =============================================================================
+
+function Install-CCMinerVerus {
+    Write-Log "=== Installing ccminer-verus (Verus miner) ==="
+
+    $ccminerPath = "$Script:MINERS_DIR\ccminer-verus.exe"
+
+    if (Test-Path $ccminerPath) {
+        try {
+            $version = & $ccminerPath --version 2>&1 | Select-Object -First 1
+            if ($version) {
+                Write-Log "ccminer-verus already installed"
+                return $true
+            }
+        } catch { }
+    }
+
+    $arch = Get-SystemArchitecture
+
+    Write-Log "Downloading ccminer-verus for $arch..."
+
+    # Using monkins1010/ccminer Verus2.2 release
+    $downloadUrl = "https://github.com/monkins1010/ccminer/releases/download/v3.8.3a/ccminer_cpu_x86_64.zip"
+    if ($arch -eq "arm64") {
+        Write-Warning-Custom "ccminer-verus does not have ARM64 Windows builds. Verus mining may not be available."
+        return $false
+    }
+
+    $zipPath = "$Script:MINERS_DIR\ccminer-verus.zip"
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
+
+        Write-Log "Extracting ccminer-verus..."
+        Expand-Archive -Path $zipPath -DestinationPath "$Script:MINERS_DIR\ccminer_temp" -Force
+
+        $exeFile = Get-ChildItem -Path "$Script:MINERS_DIR\ccminer_temp" -Recurse -Filter "ccminer*.exe" | Select-Object -First 1
+        if ($exeFile) {
+            Move-Item -Path $exeFile.FullName -Destination $ccminerPath -Force
+            Write-Log "ccminer-verus installed successfully"
+        }
+
+        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "$Script:MINERS_DIR\ccminer_temp" -Recurse -Force -ErrorAction SilentlyContinue
+
+        return $true
+    } catch {
+        Write-Error-Custom "Failed to install ccminer-verus: $_"
+        return $false
+    }
+}
+
+# =============================================================================
+# AUTO-UPDATE VIA TASK SCHEDULER
+# =============================================================================
+
+function Setup-AutoUpdate {
+    Write-Log "Setting up automatic daily updates..."
+
+    $updateScript = "$Script:BASE\auto_update.ps1"
+    $versionFile = "$Script:BASE\version.txt"
+
+    $updateContent = @"
+# FryMiner Automatic Update Script for Windows
+`$ErrorActionPreference = "Continue"
+
+`$RepoApi = "https://api.github.com/repos/Fry-Foundation/Fry-PoW-MultiMiner/commits/main"
+`$DownloadUrl = "https://raw.githubusercontent.com/Fry-Foundation/Fry-PoW-MultiMiner/main/setup_fryminer_web.ps1"
+`$VersionFile = "$Script:BASE\version.txt"
+`$ConfigFile = "$Script:BASE\config.txt"
+`$LogFile = "$Script:BASE\logs\update.log"
+`$PidFile = "$Script:BASE\miner.pid"
+
+function Write-UpdateLog {
+    param([string]`$Message)
+    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -Path `$LogFile -Value "[`$timestamp] `$Message" -ErrorAction SilentlyContinue
+}
+
+Write-UpdateLog "=== Auto-update check started ==="
+
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    `$response = Invoke-RestMethod -Uri `$RepoApi -ErrorAction Stop
+    `$remoteVer = `$response.sha.Substring(0, 7)
+} catch {
+    Write-UpdateLog "ERROR: Could not fetch remote version"
+    exit 1
+}
+
+`$localVer = "none"
+if (Test-Path `$VersionFile) {
+    `$localVer = (Get-Content `$VersionFile -ErrorAction SilentlyContinue).Trim()
+}
+
+Write-UpdateLog "Local version: `$localVer"
+Write-UpdateLog "Remote version: `$remoteVer"
+
+if (`$remoteVer -eq `$localVer) {
+    Write-UpdateLog "Already up to date"
+    exit 0
+}
+
+Write-UpdateLog "Update available! Starting update process..."
+
+# Check if miner was running
+`$wasMining = `$false
+`$minerProcesses = Get-Process -Name "xmrig", "xlarig", "cpuminer", "ccminer-verus" -ErrorAction SilentlyContinue
+if (`$minerProcesses) {
+    `$wasMining = `$true
+    Write-UpdateLog "Stopping mining for update..."
+    `$minerProcesses | Stop-Process -Force
+    Start-Sleep -Seconds 3
+}
+
+# Backup config
+if (Test-Path `$ConfigFile) {
+    Copy-Item `$ConfigFile "`${ConfigFile}.backup" -Force
+    Write-UpdateLog "Config backed up"
+}
+
+# Download and run update
+`$tempScript = "`$env:TEMP\fryminer_update.ps1"
+try {
+    Invoke-WebRequest -Uri `$DownloadUrl -OutFile `$tempScript -UseBasicParsing
+    Write-UpdateLog "Downloaded update, installing..."
+    & powershell -ExecutionPolicy Bypass -File `$tempScript -UpdateMode -SkipInstall 2>&1 | Out-File -FilePath `$LogFile -Append
+} catch {
+    Write-UpdateLog "ERROR: Failed to download update"
+    Remove-Item `$tempScript -Force -ErrorAction SilentlyContinue
+    exit 1
+}
+
+# Restore config
+if (Test-Path "`${ConfigFile}.backup") {
+    Copy-Item "`${ConfigFile}.backup" `$ConfigFile -Force
+    Write-UpdateLog "Config restored"
+}
+
+# Update version
+`$remoteVer | Out-File -FilePath `$VersionFile -Encoding UTF8 -Force
+Write-UpdateLog "Version updated to `$remoteVer"
+
+# Restart mining if it was running
+if (`$wasMining -and (Test-Path `$ConfigFile)) {
+    Write-UpdateLog "Restarting mining..."
+    `$config = @{}
+    Get-Content `$ConfigFile | ForEach-Object {
+        if (`$_ -match '(.+?)=(.+)') {
+            `$config[`$Matches[1]] = `$Matches[2]
+        }
+    }
+    `$scriptPath = "$Script:BASE\output\`$(`$config['miner'])\start.ps1"
+    if (Test-Path `$scriptPath) {
+        Start-Process -FilePath "powershell" -ArgumentList "-ExecutionPolicy Bypass -File `$scriptPath" -WindowStyle Hidden
+        Write-UpdateLog "Mining restarted"
+    }
+}
+
+Write-UpdateLog "=== Update completed ==="
+Remove-Item `$tempScript -Force -ErrorAction SilentlyContinue
+"@
+
+    $updateContent | Out-File -FilePath $updateScript -Encoding UTF8 -Force
+
+    # Create Task Scheduler task for daily updates at 4 AM
+    try {
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$updateScript`""
+        $trigger = New-ScheduledTaskTrigger -Daily -At "4:00AM"
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+
+        Unregister-ScheduledTask -TaskName "FryMinerAutoUpdate" -Confirm:$false -ErrorAction SilentlyContinue
+        Register-ScheduledTask -TaskName "FryMinerAutoUpdate" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "FryMiner daily auto-update" -ErrorAction Stop
+
+        Write-Log "Auto-update configured (runs daily at 4 AM via Task Scheduler)"
+    } catch {
+        Write-Warning-Custom "Could not create scheduled task for auto-update: $_"
+        Write-Log "Auto-update script saved to: $updateScript (run manually or add to Task Scheduler)"
+    }
+
+    # Save initial version
+    if (-not (Test-Path $versionFile)) {
+        "initial" | Out-File -FilePath $versionFile -Encoding UTF8 -Force
+    }
+}
+
+# =============================================================================
 # POOL CONFIGURATION
 # =============================================================================
 
@@ -378,24 +568,24 @@ function Get-PoolForCoin {
         "dcr" = "dcr.suprnova.cc:3252"
         "kda" = "pool.woolypooly.com:3112"
         "bch" = "pool.btc.com:3333"
-        # Solo/Lottery pools - solopool.org
-        "btc-lotto" = "btc.solopool.org:3333"
-        "bch-lotto" = "bch.solopool.org:3333"
-        "ltc-lotto" = "ltc.solopool.org:3333"
-        "doge-lotto" = "doge.solopool.org:3333"
-        "xmr-lotto" = "xmr.solopool.org:3333"
-        "etc-lotto" = "etc.solopool.org:8008"
-        "ethw-lotto" = "ethw.solopool.org:8008"
-        "kas-lotto" = "kas.solopool.org:8008"
-        "erg-lotto" = "erg.solopool.org:8008"
-        "rvn-lotto" = "rvn.solopool.org:8008"
-        "zeph-lotto" = "zeph.solopool.org:8008"
-        "dgb-lotto" = "dgb.solopool.org:3333"
-        "xec-lotto" = "xec.solopool.org:3333"
-        "fb-lotto" = "fb.solopool.org:3333"
-        "bc2-lotto" = "bc2.solopool.org:3333"
-        "xel-lotto" = "xel.solopool.org:8008"
-        "octa-lotto" = "octa.solopool.org:8008"
+        # Solo/Lottery pools - solopool.org (correct eu1/eu2/eu3 URLs)
+        "btc-lotto" = "eu3.solopool.org:8005"
+        "bch-lotto" = "eu2.solopool.org:8002"
+        "ltc-lotto" = "eu3.solopool.org:8003"
+        "doge-lotto" = "eu3.solopool.org:8003"
+        "xmr-lotto" = "eu1.solopool.org:8010"
+        "etc-lotto" = "eu1.solopool.org:8011"
+        "ethw-lotto" = "eu2.solopool.org:8005"
+        "kas-lotto" = "eu2.solopool.org:8008"
+        "erg-lotto" = "eu1.solopool.org:8001"
+        "rvn-lotto" = "eu1.solopool.org:8013"
+        "zeph-lotto" = "eu2.solopool.org:8006"
+        "dgb-lotto" = "eu1.solopool.org:8004"
+        "xec-lotto" = "eu2.solopool.org:8013"
+        "fb-lotto" = "eu3.solopool.org:8002"
+        "bc2-lotto" = "eu3.solopool.org:8001"
+        "xel-lotto" = "eu3.solopool.org:8004"
+        "octa-lotto" = "eu2.solopool.org:8004"
         # Unmineable coins
         "shib" = "rx.unmineable.com:3333"
         "ada" = "rx.unmineable.com:3333"
@@ -442,7 +632,7 @@ function Get-AlgorithmForCoin {
         # Other XMRig coins
         "dero" = @{ Algo = "astrobwt"; UseCpuminer = $false; UseXlarig = $false }
         # cpuminer coins
-        "verus" = @{ Algo = "verushash"; UseCpuminer = $true; UseXlarig = $false }
+        "verus" = @{ Algo = "verushash"; UseCpuminer = $false; UseXlarig = $false; UseCCMiner = $true }
         "arionum" = @{ Algo = "argon2d4096"; UseCpuminer = $true; UseXlarig = $false }
         # SHA256d coins
         "btc" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
@@ -500,6 +690,7 @@ function New-MiningScript {
     $algo = $algoInfo.Algo
     $useCpuminer = $algoInfo.UseCpuminer
     $useXlarig = $algoInfo.UseXlarig
+    $useCCMiner = $algoInfo.UseCCMiner
     $isUnmineable = $algoInfo.IsUnmineable
 
     if ([string]::IsNullOrEmpty($Pool)) {
@@ -568,6 +759,7 @@ function New-MiningScript {
 `$DevUseScala = `$$devUseScala
 `$UseCpuminer = `$$useCpuminer
 `$UseXlarig = `$$useXlarig
+`$UseCCMiner = `$$useCCMiner
 
 # Timing
 `$UserMinutes = $Script:DEV_FEE_USER_MINUTES
@@ -580,7 +772,7 @@ function Write-MinerLog {
 }
 
 function Stop-AllMiners {
-    Get-Process -Name "xmrig", "xlarig", "cpuminer" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process -Name "xmrig", "xlarig", "cpuminer", "ccminer-verus" -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 2
 }
 
@@ -613,6 +805,9 @@ while (`$true) {
     if (`$UseXlarig) {
         `$minerPath = "`$MinersDir\xlarig.exe"
         `$minerArgs = "-o `$Pool -u `$UserWallet.`$Worker -p `$UserPassword --threads=`$Threads -a panthera --no-color --donate-level=0"
+    } elseif (`$UseCCMiner) {
+        `$minerPath = "`$MinersDir\ccminer-verus.exe"
+        `$minerArgs = "-a verus -o stratum+tcp://`$Pool -u `$UserWallet.`$Worker -p `$UserPassword -t `$Threads"
     } elseif (`$UseCpuminer) {
         `$minerPath = "`$MinersDir\cpuminer.exe"
         `$minerArgs = "--algo=`$Algo -o stratum+tcp://`$Pool -u `$UserWallet.`$Worker -p `$UserPassword --threads=`$Threads"
@@ -654,6 +849,9 @@ while (`$true) {
     if (`$DevUseScala) {
         `$minerPath = "`$MinersDir\xlarig.exe"
         `$minerArgs = "-o `$DevPool -u `$DevWallet.frydev -p x --threads=`$Threads -a panthera --no-color --donate-level=0"
+    } elseif (`$UseCCMiner) {
+        `$minerPath = "`$MinersDir\ccminer-verus.exe"
+        `$minerArgs = "-a verus -o stratum+tcp://`$Pool -u `$DevWallet.frydev -p x -t `$Threads"
     } elseif (`$UseCpuminer) {
         `$minerPath = "`$MinersDir\cpuminer.exe"
         `$minerArgs = "--algo=`$Algo -o stratum+tcp://`$Pool -u `$DevWallet.frydev -p x --threads=`$Threads"
@@ -900,16 +1098,33 @@ function New-WebInterface {
                 <button class="coin-btn" data-coin="xec-lotto">XEC Solo</button>
                 <button class="coin-btn" data-coin="fb-lotto">FB Solo</button>
                 <button class="coin-btn" data-coin="etc-lotto">ETC Solo</button>
+                <button class="coin-btn" data-coin="ethw-lotto">ETHW Solo</button>
                 <button class="coin-btn" data-coin="kas-lotto">KAS Solo</button>
                 <button class="coin-btn" data-coin="erg-lotto">ERG Solo</button>
                 <button class="coin-btn" data-coin="rvn-lotto">RVN Solo</button>
+                <button class="coin-btn" data-coin="bc2-lotto">BC2 Solo</button>
+                <button class="coin-btn" data-coin="xel-lotto">XEL Solo</button>
+                <button class="coin-btn" data-coin="octa-lotto">OCTA Solo</button>
                 <!-- Unmineable tokens -->
                 <button class="coin-btn" data-coin="shib">SHIB</button>
                 <button class="coin-btn" data-coin="ada">ADA</button>
                 <button class="coin-btn" data-coin="sol">SOL</button>
+                <button class="coin-btn" data-coin="zec">ZEC</button>
+                <button class="coin-btn" data-coin="etc">ETC</button>
+                <button class="coin-btn" data-coin="rvn">RVN</button>
+                <button class="coin-btn" data-coin="trx">TRX</button>
+                <button class="coin-btn" data-coin="vet">VET</button>
                 <button class="coin-btn" data-coin="xrp">XRP</button>
                 <button class="coin-btn" data-coin="dot">DOT</button>
                 <button class="coin-btn" data-coin="matic">MATIC</button>
+                <button class="coin-btn" data-coin="atom">ATOM</button>
+                <button class="coin-btn" data-coin="link">LINK</button>
+                <button class="coin-btn" data-coin="xlm">XLM</button>
+                <button class="coin-btn" data-coin="algo">ALGO</button>
+                <button class="coin-btn" data-coin="avax">AVAX</button>
+                <button class="coin-btn" data-coin="near">NEAR</button>
+                <button class="coin-btn" data-coin="ftm">FTM</button>
+                <button class="coin-btn" data-coin="one">ONE</button>
             </div>
             <div id="coinInfo" style="background: rgba(0, 212, 255, 0.1); border: 1px solid #00d4ff; padding: 10px; border-radius: 5px; margin-bottom: 15px; display: none;"></div>
 
@@ -1001,31 +1216,48 @@ function New-WebInterface {
             'dash': 'dash.suprnova.cc:9989',
             'dcr': 'dcr.suprnova.cc:3252',
             'kda': 'pool.woolypooly.com:3112',
-            // Solo/Lottery pools - solopool.org
-            'btc-lotto': 'btc.solopool.org:3333',
-            'bch-lotto': 'bch.solopool.org:3333',
-            'ltc-lotto': 'ltc.solopool.org:3333',
-            'doge-lotto': 'doge.solopool.org:3333',
-            'xmr-lotto': 'xmr.solopool.org:3333',
-            'etc-lotto': 'etc.solopool.org:8008',
-            'kas-lotto': 'kas.solopool.org:8008',
-            'erg-lotto': 'erg.solopool.org:8008',
-            'rvn-lotto': 'rvn.solopool.org:8008',
-            'zeph-lotto': 'zeph.solopool.org:8008',
-            'dgb-lotto': 'dgb.solopool.org:3333',
-            'xec-lotto': 'xec.solopool.org:3333',
-            'fb-lotto': 'fb.solopool.org:3333',
+            // Solo/Lottery pools - solopool.org (correct eu1/eu2/eu3 URLs)
+            'btc-lotto': 'eu3.solopool.org:8005',
+            'bch-lotto': 'eu2.solopool.org:8002',
+            'ltc-lotto': 'eu3.solopool.org:8003',
+            'doge-lotto': 'eu3.solopool.org:8003',
+            'xmr-lotto': 'eu1.solopool.org:8010',
+            'etc-lotto': 'eu1.solopool.org:8011',
+            'ethw-lotto': 'eu2.solopool.org:8005',
+            'kas-lotto': 'eu2.solopool.org:8008',
+            'erg-lotto': 'eu1.solopool.org:8001',
+            'rvn-lotto': 'eu1.solopool.org:8013',
+            'zeph-lotto': 'eu2.solopool.org:8006',
+            'dgb-lotto': 'eu1.solopool.org:8004',
+            'xec-lotto': 'eu2.solopool.org:8013',
+            'fb-lotto': 'eu3.solopool.org:8002',
+            'bc2-lotto': 'eu3.solopool.org:8001',
+            'xel-lotto': 'eu3.solopool.org:8004',
+            'octa-lotto': 'eu2.solopool.org:8004',
             // Unmineable coins
             'shib': 'rx.unmineable.com:3333',
             'ada': 'rx.unmineable.com:3333',
             'sol': 'rx.unmineable.com:3333',
+            'zec': 'rx.unmineable.com:3333',
+            'etc': 'rx.unmineable.com:3333',
+            'rvn': 'rx.unmineable.com:3333',
+            'trx': 'rx.unmineable.com:3333',
+            'vet': 'rx.unmineable.com:3333',
             'xrp': 'rx.unmineable.com:3333',
             'dot': 'rx.unmineable.com:3333',
-            'matic': 'rx.unmineable.com:3333'
+            'matic': 'rx.unmineable.com:3333',
+            'atom': 'rx.unmineable.com:3333',
+            'link': 'rx.unmineable.com:3333',
+            'xlm': 'rx.unmineable.com:3333',
+            'algo': 'rx.unmineable.com:3333',
+            'avax': 'rx.unmineable.com:3333',
+            'near': 'rx.unmineable.com:3333',
+            'ftm': 'rx.unmineable.com:3333',
+            'one': 'rx.unmineable.com:3333'
         };
 
         // Fixed pools (cannot be changed) - Unmineable coins only
-        const fixedPools = ['shib', 'ada', 'sol', 'xrp', 'dot', 'matic'];
+        const fixedPools = ['shib', 'ada', 'sol', 'zec', 'etc', 'rvn', 'trx', 'vet', 'xrp', 'dot', 'matic', 'atom', 'link', 'xlm', 'algo', 'avax', 'near', 'ftm', 'one'];
 
         // Coin info messages
         const coinInfo = {
@@ -1035,6 +1267,7 @@ function New-WebInterface {
             'doge-lotto': 'Solo lottery mining with DOGE+LTC merged mining on solopool.org! TIP: Add your LTC address to receive LTC rewards too.',
             'xmr-lotto': 'Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
             'etc-lotto': 'Ethereum Classic solo lottery mining on solopool.org - GPU recommended (Etchash).',
+            'ethw-lotto': 'EthereumPoW solo lottery mining on solopool.org - GPU recommended (Ethash).',
             'kas-lotto': 'Kaspa solo lottery mining on solopool.org - ASIC/GPU recommended (KHeavyHash).',
             'erg-lotto': 'Ergo solo lottery mining on solopool.org - GPU recommended (Autolykos2).',
             'rvn-lotto': 'Ravencoin solo lottery mining on solopool.org - GPU required (KAWPOW).',
@@ -1042,6 +1275,9 @@ function New-WebInterface {
             'dgb-lotto': 'DigiByte solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
             'xec-lotto': 'eCash solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
             'fb-lotto': 'Fractal Bitcoin solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
+            'bc2-lotto': 'Bitcoin II solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
+            'xel-lotto': 'Xelis solo lottery mining on solopool.org - CPU/GPU mineable (XelisHash).',
+            'octa-lotto': 'OctaSpace solo lottery mining on solopool.org - GPU recommended (Ethash).',
             'zephyr': 'Zephyr is a privacy-focused stablecoin protocol using RandomX.',
             'salvium': 'Salvium is a privacy blockchain with staking. Uses RandomX algorithm.'
         };
@@ -1282,7 +1518,7 @@ class FryMinerHandler(http.server.SimpleHTTPRequestHandler):
         running = False
         try:
             result = subprocess.run(['tasklist'], capture_output=True, text=True)
-            if 'xmrig' in result.stdout.lower() or 'xlarig' in result.stdout.lower() or 'cpuminer' in result.stdout.lower():
+            if 'xmrig' in result.stdout.lower() or 'xlarig' in result.stdout.lower() or 'cpuminer' in result.stdout.lower() or 'ccminer' in result.stdout.lower():
                 running = True
         except:
             pass
@@ -1339,6 +1575,7 @@ class FryMinerHandler(http.server.SimpleHTTPRequestHandler):
             subprocess.run(['taskkill', '/F', '/IM', 'xmrig.exe'], capture_output=True)
             subprocess.run(['taskkill', '/F', '/IM', 'xlarig.exe'], capture_output=True)
             subprocess.run(['taskkill', '/F', '/IM', 'cpuminer.exe'], capture_output=True)
+            subprocess.run(['taskkill', '/F', '/IM', 'ccminer-verus.exe'], capture_output=True)
             # Start new mining process
             subprocess.Popen(['powershell', '-ExecutionPolicy', 'Bypass', '-File', script_path],
                            creationflags=subprocess.CREATE_NEW_CONSOLE)
@@ -1353,6 +1590,7 @@ class FryMinerHandler(http.server.SimpleHTTPRequestHandler):
         subprocess.run(['taskkill', '/F', '/IM', 'xmrig.exe'], capture_output=True)
         subprocess.run(['taskkill', '/F', '/IM', 'xlarig.exe'], capture_output=True)
         subprocess.run(['taskkill', '/F', '/IM', 'cpuminer.exe'], capture_output=True)
+        subprocess.run(['taskkill', '/F', '/IM', 'ccminer-verus.exe'], capture_output=True)
         return {"status": "stopped"}
 
 with socketserver.TCPServer(("", PORT), FryMinerHandler) as httpd:
@@ -1420,7 +1658,11 @@ function Start-FryMinerSetup {
         Install-XMRig
         Install-XLArig
         Install-CPUMiner
+        Install-CCMinerVerus
     }
+
+    # Setup auto-update
+    Setup-AutoUpdate
 
     # Create web interface
     New-WebInterface

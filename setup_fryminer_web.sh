@@ -543,79 +543,6 @@ install_dependencies() {
     fi
 }
 
-# Remove Docker if installed (no longer needed after PacketCrypt removal)
-remove_docker_if_present() {
-    # Check if Docker is installed
-    if ! command -v docker >/dev/null 2>&1; then
-        log "Docker not installed - skipping removal"
-        return 0
-    fi
-
-    log "Docker detected - removing..."
-
-    # Stop any running Docker containers
-    if docker ps -q 2>/dev/null | grep -q .; then
-        log "Stopping running Docker containers..."
-        docker stop $(docker ps -q) 2>/dev/null || true
-    fi
-
-    # Stop Docker service
-    if command -v systemctl >/dev/null 2>&1; then
-        log "Stopping Docker service..."
-        systemctl stop docker.socket 2>/dev/null || true
-        systemctl stop docker 2>/dev/null || true
-        systemctl stop containerd 2>/dev/null || true
-
-        log "Disabling Docker service..."
-        systemctl disable docker.socket 2>/dev/null || true
-        systemctl disable docker 2>/dev/null || true
-        systemctl disable containerd 2>/dev/null || true
-
-        log "Masking Docker service..."
-        systemctl mask docker.socket 2>/dev/null || true
-        systemctl mask docker 2>/dev/null || true
-        systemctl mask containerd 2>/dev/null || true
-    elif command -v service >/dev/null 2>&1; then
-        service docker stop 2>/dev/null || true
-    elif command -v rc-service >/dev/null 2>&1; then
-        rc-service docker stop 2>/dev/null || true
-        rc-update del docker 2>/dev/null || true
-    fi
-
-    # Remove Docker packages based on package manager
-    log "Removing Docker packages..."
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-compose docker-doc podman-docker 2>/dev/null || true
-        apt-get autoremove -y 2>/dev/null || true
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine docker-ce docker-ce-cli containerd.io docker-compose-plugin docker-buildx-plugin 2>/dev/null || true
-    elif command -v yum >/dev/null 2>&1; then
-        yum remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine docker-ce docker-ce-cli containerd.io docker-compose-plugin 2>/dev/null || true
-    elif command -v pacman >/dev/null 2>&1; then
-        pacman -Rns --noconfirm docker docker-compose containerd 2>/dev/null || true
-    elif command -v apk >/dev/null 2>&1; then
-        apk del docker docker-compose docker-cli containerd 2>/dev/null || true
-    fi
-
-    # Remove Docker data directories
-    log "Removing Docker data directories..."
-    rm -rf /var/lib/docker 2>/dev/null || true
-    rm -rf /var/lib/containerd 2>/dev/null || true
-    rm -rf /etc/docker 2>/dev/null || true
-    rm -rf ~/.docker 2>/dev/null || true
-
-    # Remove Docker group (optional - users may still be in it)
-    # groupdel docker 2>/dev/null || true
-
-    # Remove any packetcrypt wrapper that used Docker
-    if [ -f /usr/local/bin/packetcrypt ]; then
-        log "Removing old packetcrypt wrapper..."
-        rm -f /usr/local/bin/packetcrypt 2>/dev/null || true
-    fi
-
-    log "✅ Docker removed successfully"
-}
-
 # Optimize system for mining (huge pages, MSR, CPU governor)
 optimize_for_mining() {
     log "Applying mining optimizations..."
@@ -3679,7 +3606,6 @@ main() {
     detect_architecture
     set_hostname
     install_dependencies
-    remove_docker_if_present
 
     # Install miners - track what succeeds
     XMRIG_OK=false
