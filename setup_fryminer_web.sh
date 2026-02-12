@@ -2144,9 +2144,19 @@ install_verus_miner() {
                     log "  ✅ Mining verification passed (timeout)"
                     return 0
                     ;;
+                1)
+                    # Exit code 1 = binary doesn't exist, immediate startup failure, or missing libs
+                    warn "  ❌ Binary failed immediately (exit code 1) - rejecting"
+                    return 1
+                    ;;
                 *)
                     # Could be network failure (can't reach pool) - not a binary problem
-                    # Accept it since we can't verify without network
+                    # Only accept if exit code suggests network issue (not crash)
+                    if [ "$EXIT_CODE" -gt 128 ] 2>/dev/null; then
+                        # Signal-killed (128+N) = crash, reject
+                        warn "  ❌ Binary crashed with signal $((EXIT_CODE - 128)) (exit code $EXIT_CODE)"
+                        return 1
+                    fi
                     warn "  ⚠️  Could not verify mining (exit code $EXIT_CODE, possibly no network)"
                     warn "  Accepting binary - will be tested when mining starts"
                     return 0
@@ -2210,9 +2220,31 @@ install_verus_miner() {
     # Many pre-built ccminer binaries were compiled against OpenSSL 1.1
     # but modern distros (Ubuntu 22.04+) ship OpenSSL 3.x
     install_openssl_11_compat() {
-        # Already have it?
-        if [ -f /usr/lib/aarch64-linux-gnu/libssl.so.1.1 ] || [ -f /usr/lib/x86_64-linux-gnu/libssl.so.1.1 ] || [ -f /usr/lib/libssl.so.1.1 ]; then
-            log "  OpenSSL 1.1 already present"
+        # Check for REAL OpenSSL 1.1 (not symlinks to 3.x, which lack OPENSSL_1_1_0 symbols)
+        local found_real=false
+        for libpath in /usr/lib/aarch64-linux-gnu/libssl.so.1.1 /usr/lib/x86_64-linux-gnu/libssl.so.1.1 /usr/lib/libssl.so.1.1; do
+            if [ -f "$libpath" ] && ! [ -L "$libpath" ]; then
+                # Real file, not a symlink — check if it has OPENSSL_1_1_0 symbol version
+                if strings "$libpath" 2>/dev/null | grep -q "OPENSSL_1_1_0"; then
+                    found_real=true
+                    break
+                fi
+            elif [ -L "$libpath" ]; then
+                # It's a symlink — check if target is actually OpenSSL 1.1
+                local target
+                target=$(readlink -f "$libpath" 2>/dev/null || true)
+                if [ -n "$target" ] && strings "$target" 2>/dev/null | grep -q "OPENSSL_1_1_0"; then
+                    found_real=true
+                    break
+                else
+                    log "  Removing stale OpenSSL 1.1 symlink: $libpath → $target"
+                    rm -f "$libpath" 2>/dev/null || true
+                fi
+            fi
+        done
+        
+        if [ "$found_real" = "true" ]; then
+            log "  OpenSSL 1.1 already present (with OPENSSL_1_1_0 symbols)"
             return 0
         fi
         
@@ -2279,8 +2311,9 @@ install_verus_miner() {
         rm -rf "$OPENSSL11_DIR" 2>/dev/null
         
         # Method 3: Create symlinks from OpenSSL 3.x as last resort
-        # This is fragile but works for many binaries that only use basic SSL functions
-        log "  Method 3: Creating OpenSSL 1.1 symlinks from system OpenSSL..."
+        # WARNING: This usually does NOT work for binaries requiring OPENSSL_1_1_0 versioned
+        # symbols. The linker will fail at runtime. But some binaries only need the .so name.
+        log "  Method 3: Creating OpenSSL 1.1 symlinks from system OpenSSL (unlikely to work)..."
         
         # Find the actual system libssl
         SYS_LIBSSL=$(find /usr/lib -name "libssl.so.3*" -o -name "libssl.so" 2>/dev/null | head -1)
@@ -2485,7 +2518,7 @@ install_verus_miner() {
     # Install build dependencies
     log "Installing build dependencies..."
     apt-get update >/dev/null 2>&1
-    apt-get install -y build-essential libcurl4-openssl-dev libssl-dev libjansson-dev automake autotools-dev libomp-dev libgomp1 git curl file >/dev/null 2>&1 || true
+    apt-get install -y build-essential libcurl4-openssl-dev libssl-dev libjansson-dev automake autotools-dev libtool libomp-dev libgomp1 git curl file python3 >/dev/null 2>&1 || true
     # Also try libgmp-dev (needed by some ccminer builds)
     apt-get install -y libgmp-dev 2>/dev/null || true
     
@@ -2531,7 +2564,24 @@ install_verus_miner() {
             fi
             
             # === Attempt 4: Build from source (monkins1010/ccminer ARM branch) ===
+            # Key insight: Many ARM64 boards (including Pi 4B with Armbian) don't expose
+            # hardware AES/SHA/PMULL crypto extensions in /proc/cpuinfo even though the
+            # silicon supports them. Building with -march=armv8-a+crypto will SIGILL.
+            # Solution: Detect actual CPU features and patch source for software AES if needed.
             log "Attempt 4: Building from source (monkins1010/ccminer ARM branch)..."
+            
+            # Detect if CPU actually exposes crypto extensions
+            HAS_HW_CRYPTO=false
+            if grep -q "aes" /proc/cpuinfo 2>/dev/null && grep -q "sha" /proc/cpuinfo 2>/dev/null && grep -q "pmull" /proc/cpuinfo 2>/dev/null; then
+                HAS_HW_CRYPTO=true
+                ARM64_MARCH="-march=armv8-a+crypto+crc"
+                log "  CPU exposes hardware crypto extensions (aes/sha/pmull) - using +crypto"
+            else
+                ARM64_MARCH="-march=armv8-a+crc+simd"
+                log "  CPU does NOT expose hardware crypto extensions - will patch for software AES"
+                log "  CPU features: $(grep -m1 'Features' /proc/cpuinfo 2>/dev/null | cut -d: -f2 || echo 'unknown')"
+            fi
+            
             if git clone --single-branch -b ARM --depth 1 https://github.com/monkins1010/ccminer.git ccminer-verus-build 2>&1; then
                 cd ccminer-verus-build || return 1
                 
@@ -2540,26 +2590,205 @@ install_verus_miner() {
                 # Make scripts executable
                 chmod +x build.sh configure.sh autogen.sh 2>/dev/null || true
                 
-                # Set ARM64 build flags - ONLY use crypto extensions available on Cortex-A72 (ARMv8.0-a)
-                # Do NOT use -march=native (may detect features that cause Illegal instruction)
-                ARM64_SAFE_FLAGS="-O2 -march=armv8-a+crypto+crc -mtune=cortex-a72"
+                if [ "$HAS_HW_CRYPTO" = "false" ]; then
+                    log "  Applying software AES patches for non-crypto ARM64..."
+                    
+                    # PATCH 1: Makefile.am — change -march=armv8-a+crypto to +crc+simd
+                    # This prevents __ARM_FEATURE_CRYPTO from being defined, activating
+                    # SSE2NEON.h's software AES path instead of hardware intrinsics
+                    sed -i 's/-march=armv8-a+crypto/-march=armv8-a+crc+simd/g' Makefile.am 2>/dev/null || true
+                    log "    Patch 1: Makefile.am march flags → +crc+simd"
+                    
+                    # PATCH 2: haraka_portable.c — replace hardware AES aesenc() with software S-box
+                    # The "portable" aesenc() uses vaeseq_u8/vaesmcq_u8 which need +crypto
+                    # Replace with pure software S-box/ShiftRows/MixColumns implementation
+                    if [ -f verus/haraka_portable.c ]; then
+                        # Check if the hardware aesenc function exists (uses vaeseq_u8)
+                        if grep -q "vaeseq_u8\|vaesmcq_u8" verus/haraka_portable.c 2>/dev/null; then
+                            cat > /tmp/aesenc_patch.py << 'PYEOF'
+import re, sys
+with open(sys.argv[1], 'r') as f:
+    content = f.read()
+
+# S-box table needed for software AES
+sbox_table = """
+/* AES S-box for software AES implementation */
+static const unsigned char sbox[256] = {
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+};
+#define XT(x) ((((x) << 1) ^ ((((x) >> 7) & 1) * 0x1b)) & 0xFF)
+"""
+
+# Software AES function
+sw_aesenc = """void aesenc(unsigned char *s, const unsigned char *rk)
+{
+    unsigned char i, t, u, v[4][4];
+    /* SubBytes + ShiftRows */
+    for (i = 0; i < 16; ++i) {
+        v[((i / 4) + 4 - (i%4) ) % 4][i % 4] = sbox[s[i]];
+    }
+    /* MixColumns */
+    for (i = 0; i < 4; ++i) {
+        t = v[i][0];
+        u = v[i][0] ^ v[i][1] ^ v[i][2] ^ v[i][3];
+        v[i][0] ^= u ^ XT(v[i][0] ^ v[i][1]);
+        v[i][1] ^= u ^ XT(v[i][1] ^ v[i][2]);
+        v[i][2] ^= u ^ XT(v[i][2] ^ v[i][3]);
+        v[i][3] ^= u ^ XT(v[i][3] ^ t);
+    }
+    /* AddRoundKey */
+    for (i = 0; i < 16; ++i) {
+        s[i] = v[i / 4][i % 4] ^ rk[i];
+    }
+}"""
+
+# Find and replace the aesenc function
+# Match: void aesenc(...) { ... } (the function using vaeseq_u8)
+pattern = r'void\s+aesenc\s*\([^)]*\)\s*\{[^}]*(?:vaeseq_u8|vaesmcq_u8)[^}]*\}'
+match = re.search(pattern, content, re.DOTALL)
+if match:
+    # Insert sbox table before the function if not already present
+    if 'static const unsigned char sbox[256]' not in content:
+        content = content[:match.start()] + sbox_table + '\n' + sw_aesenc + content[match.end():]
+    else:
+        content = content[:match.start()] + sw_aesenc + content[match.end():]
+    with open(sys.argv[1], 'w') as f:
+        f.write(content)
+    print("PATCHED: haraka_portable.c aesenc -> software AES")
+else:
+    print("WARNING: Could not find hardware aesenc function to patch")
+PYEOF
+                            python3 /tmp/aesenc_patch.py verus/haraka_portable.c 2>&1 || {
+                                warn "    Python patch failed, trying sed fallback..."
+                                # Sed fallback: comment out the hardware intrinsics and add software version
+                                sed -i '/vaeseq_u8/s/^/\/\/DISABLED: /' verus/haraka_portable.c 2>/dev/null || true
+                                sed -i '/vaesmcq_u8/s/^/\/\/DISABLED: /' verus/haraka_portable.c 2>/dev/null || true
+                            }
+                            rm -f /tmp/aesenc_patch.py
+                            log "    Patch 2: haraka_portable.c → software AES S-box"
+                        else
+                            log "    Patch 2: haraka_portable.c already uses software AES (no vaeseq_u8 found)"
+                        fi
+                    fi
+                    
+                    # PATCH 3: verus_clhash_portable.cpp — remove duplicate hardware _mm_aesenc_si128
+                    # When +crypto is removed, SSE2NEON.h provides a software _mm_aesenc_si128
+                    # but this file defines its own hardware version using vaeseq_u8/vaesmcq_u8
+                    # which conflicts. Comment out the hardware version so SSE2NEON's software one is used.
+                    if [ -f verus/verus_clhash_portable.cpp ]; then
+                        if grep -q "vaesmcq_u8\|vaeseq_u8" verus/verus_clhash_portable.cpp 2>/dev/null; then
+                            cat > /tmp/clhash_patch.py << 'PYEOF'
+import re, sys
+with open(sys.argv[1], 'r') as f:
+    content = f.read()
+
+patched = False
+
+# Remove the hardware _mm_aesenc_si128 function that uses vaesmcq_u8(vaeseq_u8(...))
+# Pattern: uint8x16_t _mm_aesenc_si128(...) { return vaesmcq_u8(vaeseq_u8(...)); }
+pattern = r'uint8x16_t\s+_mm_aesenc_si128\s*\([^)]*\)\s*\{[^}]*vaesmcq_u8[^}]*\}'
+match = re.search(pattern, content, re.DOTALL)
+if match:
+    content = content[:match.start()] + '/* PATCHED: hardware _mm_aesenc_si128 removed - using SSE2NEON software version */\n' + content[match.end():]
+    patched = True
+    print("PATCHED: Removed hardware _mm_aesenc_si128")
+
+# Replace vmull_p64 calls with software polyfill
+# The _mm_clmulepi64_si128_emu function uses vmull_p64 which needs +crypto
+# Replace with a pure software carry-less multiply
+if 'vmull_p64' in content:
+    # Find the function containing vmull_p64 and replace the vmull_p64 call
+    # with a software implementation
+    sw_clmul = """
+/* Software carry-less multiply (replaces hardware vmull_p64) */
+static inline poly128_t sw_pmull_64(uint64_t a, uint64_t b) {
+    uint64_t r0 = 0, r1 = 0;
+    uint64_t i;
+    for (i = 0; i < 64; i++) {
+        if ((b >> i) & 1) {
+            r0 ^= (a << i);
+            if (i > 0) r1 ^= (a >> (64 - i));
+        }
+    }
+    /* Pack into poly128_t (two uint64x1_t) */
+    uint64x2_t result;
+    result = vsetq_lane_u64(r0, result, 0);
+    result = vsetq_lane_u64(r1, result, 1);
+    return vreinterpretq_p128_u64(result);
+}
+"""
+    content = content.replace('vmull_p64(', 'sw_pmull_64(')
+    # Insert the software function before first use
+    # Find a good insertion point (before the function that uses it)
+    insert_pos = content.find('sw_pmull_64(')
+    if insert_pos > 0:
+        # Go back to find start of the containing function or a blank line
+        line_start = content.rfind('\n\n', 0, insert_pos)
+        if line_start < 0:
+            line_start = 0
+        # Only insert if we haven't already
+        if 'static inline poly128_t sw_pmull_64' not in content:
+            content = content[:line_start] + '\n' + sw_clmul + content[line_start:]
+    patched = True
+    print("PATCHED: Replaced vmull_p64 with software carry-less multiply")
+
+if patched:
+    with open(sys.argv[1], 'w') as f:
+        f.write(content)
+else:
+    print("WARNING: No patches needed or applied")
+PYEOF
+                            python3 /tmp/clhash_patch.py verus/verus_clhash_portable.cpp 2>&1 || {
+                                warn "    Python patch failed, trying sed fallback..."
+                                sed -i '/vaesmcq_u8\|vaeseq_u8/s/^/\/\/DISABLED: /' verus/verus_clhash_portable.cpp 2>/dev/null || true
+                            }
+                            rm -f /tmp/clhash_patch.py
+                            log "    Patch 3: verus_clhash_portable.cpp → software AES + CLMUL"
+                        else
+                            log "    Patch 3: verus_clhash_portable.cpp already clean"
+                        fi
+                    fi
+                    
+                    # PATCH 4: Also patch configure.sh and build.sh march flags
+                    for patchfile in configure.sh build.sh; do
+                        if [ -f "$patchfile" ]; then
+                            sed -i 's/-march=armv8-a+crypto/-march=armv8-a+crc+simd/g' "$patchfile" 2>/dev/null || true
+                        fi
+                    done
+                    log "    Patch 4: build.sh/configure.sh march flags → +crc+simd"
+                fi
+                
+                # Set build flags
+                ARM64_SAFE_FLAGS="-O2 $ARM64_MARCH -mtune=cortex-a72"
                 export CFLAGS="$ARM64_SAFE_FLAGS"
                 export CXXFLAGS="$ARM64_SAFE_FLAGS"
                 export LDFLAGS=""
                 
-                # Patch configure.sh to use our flags instead of its defaults
-                if [ -f configure.sh ]; then
-                    sed -i 's/-march=native/-march=armv8-a+crypto+crc/g' configure.sh 2>/dev/null || true
-                    sed -i 's/-march=armv8-a /-march=armv8-a+crypto+crc /g' configure.sh 2>/dev/null || true
-                    sed -i 's/-march=armv8-a"/-march=armv8-a+crypto+crc"/g' configure.sh 2>/dev/null || true
-                fi
+                # Patch any remaining -march=armv8-a+crypto in configure scripts
+                for patchfile in configure.sh build.sh; do
+                    if [ -f "$patchfile" ]; then
+                        sed -i "s|-march=native|$ARM64_MARCH|g" "$patchfile" 2>/dev/null || true
+                        sed -i "s|-march=armv8-a+crypto|$ARM64_MARCH|g" "$patchfile" 2>/dev/null || true
+                    fi
+                done
                 
                 # Try build.sh first (recommended method)
                 if [ -f build.sh ]; then
-                    # Patch build.sh too
-                    sed -i 's/-march=native/-march=armv8-a+crypto+crc/g' build.sh 2>/dev/null || true
-                    sed -i 's/-march=armv8-a /-march=armv8-a+crypto+crc /g' build.sh 2>/dev/null || true
-                    
                     log "Running build.sh..."
                     if ./build.sh 2>&1; then
                         if [ -f ccminer ]; then
@@ -2581,25 +2810,19 @@ install_verus_miner() {
                     log "build.sh failed or produced bad binary, trying manual build..."
                 fi
                 
-                # Manual build with forced flags in Makefile
+                # Manual build with explicit configure flags
                 ./autogen.sh 2>/dev/null || true
                 if [ -f configure ]; then
-                    log "Running configure with forced ARM64 crypto flags..."
-                    ./configure --with-crypto --with-curl CFLAGS="$ARM64_SAFE_FLAGS" CXXFLAGS="$ARM64_SAFE_FLAGS" >/dev/null 2>&1 || \
-                    ./configure CFLAGS="$ARM64_SAFE_FLAGS" CXXFLAGS="$ARM64_SAFE_FLAGS" >/dev/null 2>&1 || \
+                    log "Running configure with ARM64 flags ($ARM64_MARCH)..."
+                    ./configure CFLAGS="$ARM64_SAFE_FLAGS" CXXFLAGS="$ARM64_SAFE_FLAGS -D_REENTRANT -falign-functions=16 -falign-jumps=16 -falign-labels=16" >/dev/null 2>&1 || \
                     ./configure >/dev/null 2>&1 || true
                 fi
                 
-                # Force our flags into the Makefile (configure/build.sh may have overridden them)
+                # Force our march flags into Makefile (configure may have injected +crypto)
                 if [ -f Makefile ]; then
-                    log "Patching Makefile to force safe ARM64 flags..."
-                    sed -i "s|-march=native|$ARM64_SAFE_FLAGS|g" Makefile 2>/dev/null || true
-                    sed -i "s|-march=armv8-a |$ARM64_SAFE_FLAGS |g" Makefile 2>/dev/null || true
-                    # Also ensure -march appears in CFLAGS if not already present
-                    if ! grep -q "march=armv8-a+crypto" Makefile 2>/dev/null; then
-                        sed -i "s|^CFLAGS = |CFLAGS = $ARM64_SAFE_FLAGS |" Makefile 2>/dev/null || true
-                        sed -i "s|^CXXFLAGS = |CXXFLAGS = $ARM64_SAFE_FLAGS |" Makefile 2>/dev/null || true
-                    fi
+                    log "Patching Makefile to force $ARM64_MARCH..."
+                    sed -i "s|-march=armv8-a+crypto|$ARM64_MARCH|g" Makefile 2>/dev/null || true
+                    sed -i "s|-march=native|$ARM64_MARCH|g" Makefile 2>/dev/null || true
                 fi
                 
                 CORES=$(nproc 2>/dev/null || echo 2)
@@ -2628,111 +2851,9 @@ install_verus_miner() {
                 warn "Failed to clone monkins1010/ccminer - check network connectivity"
             fi
             
-            # === Attempt 5: Try Oink70/ccminer-verus source build ===
-            log "Attempt 5: Building from Oink70/ccminer-verus source..."
-            rm -rf ccminer-verus-oink-build 2>/dev/null
-            if git clone --depth 1 https://github.com/Oink70/ccminer-verus.git ccminer-verus-oink-build 2>&1; then
-                cd ccminer-verus-oink-build || true
-                
-                ARM64_SAFE_FLAGS="-O2 -march=armv8-a+crypto+crc -mtune=cortex-a72"
-                chmod +x build.sh configure.sh autogen.sh 2>/dev/null || true
-                
-                export CFLAGS="$ARM64_SAFE_FLAGS"
-                export CXXFLAGS="$ARM64_SAFE_FLAGS"
-                
-                # Patch build scripts to use safe flags
-                for f in build.sh configure.sh; do
-                    [ -f "$f" ] && sed -i "s/-march=native/$ARM64_SAFE_FLAGS/g; s/-march=armv8-a /$ARM64_SAFE_FLAGS /g" "$f" 2>/dev/null || true
-                done
-                
-                if [ -f build.sh ]; then
-                    ./build.sh 2>&1 || true
-                fi
-                
-                if [ ! -f ccminer ]; then
-                    ./autogen.sh 2>/dev/null || true
-                    if [ -f configure ]; then
-                        ./configure CFLAGS="$ARM64_SAFE_FLAGS" CXXFLAGS="$ARM64_SAFE_FLAGS" >/dev/null 2>&1 || true
-                    fi
-                    # Force flags into Makefile
-                    [ -f Makefile ] && sed -i "s/-march=armv8-a /$ARM64_SAFE_FLAGS /g" Makefile 2>/dev/null || true
-                    CORES=$(nproc 2>/dev/null || echo 2)
-                    [ "$CORES" -gt 4 ] && CORES=4
-                    make -j"$CORES" 2>&1 || true
-                fi
-                
-                if [ -f ccminer ]; then
-                    cp ccminer /usr/local/bin/ccminer-verus
-                    chmod +x /usr/local/bin/ccminer-verus
-                    if verify_ccminer_mining /usr/local/bin/ccminer-verus "Oink70 source build"; then
-                        log "✅ ccminer-verus built and verified from Oink70 source for ARM64"
-                        cd "$MINERS_DIR"
-                        rm -rf ccminer-verus-oink-build
-                        unset CFLAGS CXXFLAGS
-                        return 0
-                    fi
-                    warn "Oink70 source build failed mining verification"
-                    rm -f /usr/local/bin/ccminer-verus 2>/dev/null
-                fi
-                
-                cd "$MINERS_DIR"
-                rm -rf ccminer-verus-oink-build
-                unset CFLAGS CXXFLAGS
-            fi
-            
-            # === Attempt 6: Oink70/CCminer-ARM-optimized (tuned for Cortex-A53, compatible with A72) ===
-            log "Attempt 6: Building from Oink70/CCminer-ARM-optimized (Cortex-A53 tuned)..."
-            rm -rf ccminer-arm-optimized-build 2>/dev/null
-            if git clone --depth 1 https://github.com/Oink70/CCminer-ARM-optimized.git ccminer-arm-optimized-build 2>&1; then
-                cd ccminer-arm-optimized-build || true
-                
-                chmod +x build.sh configure.sh autogen.sh 2>/dev/null || true
-                
-                # This repo uses clang by default but gcc works too
-                # Use safe flags targeting Cortex-A72
-                ARM64_SAFE_FLAGS="-O2 -march=armv8-a+crypto+crc -mtune=cortex-a72"
-                export CFLAGS="$ARM64_SAFE_FLAGS"
-                export CXXFLAGS="$ARM64_SAFE_FLAGS"
-                
-                if [ -f build.sh ]; then
-                    # Patch build.sh to use gcc (clang may not be installed)
-                    sed -i 's/CXX=clang++/CXX=g++/g; s/CC=clang/CC=gcc/g' build.sh 2>/dev/null || true
-                    sed -i "s/-march=native/$ARM64_SAFE_FLAGS/g" build.sh 2>/dev/null || true
-                    ./build.sh 2>&1 || true
-                fi
-                
-                if [ ! -f ccminer ]; then
-                    ./autogen.sh 2>/dev/null || true
-                    if [ -f configure ]; then
-                        ./configure CFLAGS="$ARM64_SAFE_FLAGS" CXXFLAGS="$ARM64_SAFE_FLAGS" >/dev/null 2>&1 || true
-                    fi
-                    [ -f Makefile ] && sed -i "s/-march=armv8-a /$ARM64_SAFE_FLAGS /g" Makefile 2>/dev/null || true
-                    CORES=$(nproc 2>/dev/null || echo 2)
-                    [ "$CORES" -gt 4 ] && CORES=4
-                    make -j"$CORES" 2>&1 || true
-                fi
-                
-                if [ -f ccminer ]; then
-                    cp ccminer /usr/local/bin/ccminer-verus
-                    chmod +x /usr/local/bin/ccminer-verus
-                    if verify_ccminer_mining /usr/local/bin/ccminer-verus "Oink70 ARM-optimized build"; then
-                        log "✅ ccminer-verus built and verified from Oink70 ARM-optimized for ARM64"
-                        cd "$MINERS_DIR"
-                        rm -rf ccminer-arm-optimized-build
-                        unset CFLAGS CXXFLAGS
-                        return 0
-                    fi
-                    warn "Oink70 ARM-optimized build failed mining verification"
-                    rm -f /usr/local/bin/ccminer-verus 2>/dev/null
-                fi
-                
-                cd "$MINERS_DIR"
-                rm -rf ccminer-arm-optimized-build
-                unset CFLAGS CXXFLAGS
-            fi
-            
             warn "Could not install ccminer-verus for ARM64 after all attempts"
-            warn "Tried: 3 pre-built binaries, 3 source builds"
+            warn "Tried: 3 pre-built binaries + patched source build"
+            warn "If building from source failed, check: gcc, libcurl4-openssl-dev, libjansson-dev, libssl-dev"
             return 1
             ;;
             
