@@ -2097,13 +2097,78 @@ install_usbasic_miners() {
 install_verus_miner() {
     log "=== Installing Verus (VRSC) miner ==="
     
+    # Helper function to verify ccminer actually mines without crashing
+    # --version passes but Illegal instruction can occur during actual hash computation
+    # SIGILL = exit code 132, SIGSEGV = exit code 139
+    verify_ccminer_mining() {
+        local binary_path="$1"
+        local label="${2:-ccminer}"
+        
+        if [ ! -x "$binary_path" ]; then
+            return 1
+        fi
+        
+        log "  Verifying $label can compute VerusHash (10-second mining test)..."
+        
+        # Run against a real pool briefly to trigger actual hash computation
+        # The miner needs work from a pool before it starts hashing
+        timeout 15 "$binary_path" -a verus -o stratum+tcp://pool.verus.io:9999 -u RRhFqT2bfXQmsnqtyrVxikhy94KqnVf5nt.verify -t 1 >/dev/null 2>&1 &
+        local VERIFY_PID=$!
+        
+        # Wait 10 seconds - enough time to connect, get work, and start hashing
+        # If it crashes with Illegal instruction, it dies within ~5-10 seconds
+        sleep 10
+        
+        if kill -0 "$VERIFY_PID" 2>/dev/null; then
+            # Still running after 10 seconds = binary works for actual mining
+            kill "$VERIFY_PID" 2>/dev/null
+            wait "$VERIFY_PID" 2>/dev/null || true
+            log "  ✅ Mining verification passed - binary can compute VerusHash"
+            return 0
+        else
+            # Process died - check how
+            wait "$VERIFY_PID" 2>/dev/null
+            local EXIT_CODE=$?
+            
+            case "$EXIT_CODE" in
+                132)
+                    warn "  ❌ SIGILL (Illegal instruction) - binary uses CPU instructions this device doesn't support"
+                    return 1
+                    ;;
+                137|139)
+                    warn "  ❌ Binary crashed (exit code $EXIT_CODE) during mining"
+                    return 1
+                    ;;
+                124)
+                    # timeout killed it - this means it survived 15 seconds, which is good
+                    log "  ✅ Mining verification passed (timeout)"
+                    return 0
+                    ;;
+                *)
+                    # Could be network failure (can't reach pool) - not a binary problem
+                    # Accept it since we can't verify without network
+                    warn "  ⚠️  Could not verify mining (exit code $EXIT_CODE, possibly no network)"
+                    warn "  Accepting binary - will be tested when mining starts"
+                    return 0
+                    ;;
+            esac
+        fi
+    }
+    
     # Check if already installed AND working
     if [ -x /usr/local/bin/ccminer-verus ]; then
         # Verify the binary actually runs (not just exists)
         if /usr/local/bin/ccminer-verus --version >/dev/null 2>&1 || /usr/local/bin/ccminer-verus --help >/dev/null 2>&1; then
-            log "✅ ccminer-verus already installed and working"
-            /usr/local/bin/ccminer-verus --version 2>&1 | head -1 || true
-            return 0
+            # --version works, but does actual mining work? (catches Illegal instruction)
+            log "Existing ccminer-verus found, verifying it can mine..."
+            if verify_ccminer_mining /usr/local/bin/ccminer-verus "existing install"; then
+                log "✅ ccminer-verus already installed and verified working"
+                /usr/local/bin/ccminer-verus --version 2>&1 | head -1 || true
+                return 0
+            else
+                warn "Existing ccminer-verus crashes during mining (Illegal instruction?), will reinstall..."
+                rm -f /usr/local/bin/ccminer-verus 2>/dev/null
+            fi
         else
             # Check for missing shared libraries
             LDD_CHECK=$(ldd /usr/local/bin/ccminer-verus 2>&1 || true)
@@ -2433,23 +2498,36 @@ install_verus_miner() {
             log "Installing ccminer for ARM64 (Raspberry Pi 4/5, etc.)..."
             
             # Strategy: Try pre-built binaries FIRST (faster, more reliable), then build from source
+            # Each pre-built is verified with a brief mining test to catch Illegal instruction crashes
             
             # === Attempt 1: Pre-built binary from Oink70 (primary ARM URL) ===
             log "Attempt 1: Oink70 pre-built ARM binary..."
             if try_prebuilt_binary "$OINK70_ARM_URL" "ARM64"; then
-                return 0
+                if verify_ccminer_mining /usr/local/bin/ccminer-verus "Oink70 ARM pre-built"; then
+                    return 0
+                fi
+                warn "Pre-built binary failed mining verification (likely Illegal instruction)"
+                rm -f /usr/local/bin/ccminer-verus 2>/dev/null
             fi
             
             # === Attempt 2: Pre-built binary from Oink70 (aarch64-specific URL) ===
             log "Attempt 2: Oink70 pre-built aarch64 binary..."
             if try_prebuilt_binary "$OINK70_ARM64_URL2" "ARM64-aarch64"; then
-                return 0
+                if verify_ccminer_mining /usr/local/bin/ccminer-verus "Oink70 aarch64 pre-built"; then
+                    return 0
+                fi
+                warn "Pre-built binary failed mining verification"
+                rm -f /usr/local/bin/ccminer-verus 2>/dev/null
             fi
             
             # === Attempt 3: Pre-built binary from monkins1010 releases ===
             log "Attempt 3: monkins1010 release binary..."
             if try_prebuilt_binary "$MONKINS_ARM_RELEASE_URL" "ARM64-monkins"; then
-                return 0
+                if verify_ccminer_mining /usr/local/bin/ccminer-verus "monkins1010 pre-built"; then
+                    return 0
+                fi
+                warn "Pre-built binary failed mining verification"
+                rm -f /usr/local/bin/ccminer-verus 2>/dev/null
             fi
             
             # === Attempt 4: Build from source (monkins1010/ccminer ARM branch) ===
@@ -2462,35 +2540,66 @@ install_verus_miner() {
                 # Make scripts executable
                 chmod +x build.sh configure.sh autogen.sh 2>/dev/null || true
                 
-                # Set ARM64 build flags with crypto extensions (Pi 4B has hardware AES)
-                export CFLAGS="-O2 -march=armv8-a+crypto -mtune=cortex-a72 -flto"
-                export CXXFLAGS="$CFLAGS"
-                export LDFLAGS="-flto"
+                # Set ARM64 build flags - ONLY use crypto extensions available on Cortex-A72 (ARMv8.0-a)
+                # Do NOT use -march=native (may detect features that cause Illegal instruction)
+                ARM64_SAFE_FLAGS="-O2 -march=armv8-a+crypto+crc -mtune=cortex-a72"
+                export CFLAGS="$ARM64_SAFE_FLAGS"
+                export CXXFLAGS="$ARM64_SAFE_FLAGS"
+                export LDFLAGS=""
+                
+                # Patch configure.sh to use our flags instead of its defaults
+                if [ -f configure.sh ]; then
+                    sed -i 's/-march=native/-march=armv8-a+crypto+crc/g' configure.sh 2>/dev/null || true
+                    sed -i 's/-march=armv8-a /-march=armv8-a+crypto+crc /g' configure.sh 2>/dev/null || true
+                    sed -i 's/-march=armv8-a"/-march=armv8-a+crypto+crc"/g' configure.sh 2>/dev/null || true
+                fi
                 
                 # Try build.sh first (recommended method)
                 if [ -f build.sh ]; then
+                    # Patch build.sh too
+                    sed -i 's/-march=native/-march=armv8-a+crypto+crc/g' build.sh 2>/dev/null || true
+                    sed -i 's/-march=armv8-a /-march=armv8-a+crypto+crc /g' build.sh 2>/dev/null || true
+                    
                     log "Running build.sh..."
                     if ./build.sh 2>&1; then
                         if [ -f ccminer ]; then
                             cp ccminer /usr/local/bin/ccminer-verus
                             chmod +x /usr/local/bin/ccminer-verus
-                            log "✅ ccminer-verus built successfully for ARM64 via build.sh"
-                            cd "$MINERS_DIR"
-                            rm -rf ccminer-verus-build
-                            unset CFLAGS CXXFLAGS LDFLAGS
-                            return 0
+                            if verify_ccminer_mining /usr/local/bin/ccminer-verus "monkins1010 ARM build.sh"; then
+                                log "✅ ccminer-verus built and verified for ARM64 via build.sh"
+                                cd "$MINERS_DIR"
+                                rm -rf ccminer-verus-build
+                                unset CFLAGS CXXFLAGS LDFLAGS
+                                return 0
+                            fi
+                            warn "build.sh binary failed mining verification, trying manual build with forced flags..."
+                            rm -f /usr/local/bin/ccminer-verus 2>/dev/null
+                            # Clean and retry with manual build below
+                            make clean 2>/dev/null || true
                         fi
                     fi
-                    log "build.sh failed, trying manual build..."
+                    log "build.sh failed or produced bad binary, trying manual build..."
                 fi
                 
-                # Manual build fallback with proper ARM64 configure flags
+                # Manual build with forced flags in Makefile
                 ./autogen.sh 2>/dev/null || true
                 if [ -f configure ]; then
-                    log "Running configure with ARM64 crypto flags..."
-                    ./configure --with-crypto --with-curl CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS" >/dev/null 2>&1 || \
-                    ./configure CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS" >/dev/null 2>&1 || \
+                    log "Running configure with forced ARM64 crypto flags..."
+                    ./configure --with-crypto --with-curl CFLAGS="$ARM64_SAFE_FLAGS" CXXFLAGS="$ARM64_SAFE_FLAGS" >/dev/null 2>&1 || \
+                    ./configure CFLAGS="$ARM64_SAFE_FLAGS" CXXFLAGS="$ARM64_SAFE_FLAGS" >/dev/null 2>&1 || \
                     ./configure >/dev/null 2>&1 || true
+                fi
+                
+                # Force our flags into the Makefile (configure/build.sh may have overridden them)
+                if [ -f Makefile ]; then
+                    log "Patching Makefile to force safe ARM64 flags..."
+                    sed -i "s|-march=native|$ARM64_SAFE_FLAGS|g" Makefile 2>/dev/null || true
+                    sed -i "s|-march=armv8-a |$ARM64_SAFE_FLAGS |g" Makefile 2>/dev/null || true
+                    # Also ensure -march appears in CFLAGS if not already present
+                    if ! grep -q "march=armv8-a+crypto" Makefile 2>/dev/null; then
+                        sed -i "s|^CFLAGS = |CFLAGS = $ARM64_SAFE_FLAGS |" Makefile 2>/dev/null || true
+                        sed -i "s|^CXXFLAGS = |CXXFLAGS = $ARM64_SAFE_FLAGS |" Makefile 2>/dev/null || true
+                    fi
                 fi
                 
                 CORES=$(nproc 2>/dev/null || echo 2)
@@ -2500,11 +2609,15 @@ install_verus_miner() {
                     if [ -f ccminer ]; then
                         cp ccminer /usr/local/bin/ccminer-verus
                         chmod +x /usr/local/bin/ccminer-verus
-                        log "✅ ccminer-verus built successfully for ARM64 via manual build"
-                        cd "$MINERS_DIR"
-                        rm -rf ccminer-verus-build
-                        unset CFLAGS CXXFLAGS LDFLAGS
-                        return 0
+                        if verify_ccminer_mining /usr/local/bin/ccminer-verus "monkins1010 ARM manual build"; then
+                            log "✅ ccminer-verus built and verified for ARM64 via manual build"
+                            cd "$MINERS_DIR"
+                            rm -rf ccminer-verus-build
+                            unset CFLAGS CXXFLAGS LDFLAGS
+                            return 0
+                        fi
+                        warn "Manual build binary also failed mining verification"
+                        rm -f /usr/local/bin/ccminer-verus 2>/dev/null
                     fi
                 fi
                 
@@ -2521,10 +2634,16 @@ install_verus_miner() {
             if git clone --depth 1 https://github.com/Oink70/ccminer-verus.git ccminer-verus-oink-build 2>&1; then
                 cd ccminer-verus-oink-build || true
                 
+                ARM64_SAFE_FLAGS="-O2 -march=armv8-a+crypto+crc -mtune=cortex-a72"
                 chmod +x build.sh configure.sh autogen.sh 2>/dev/null || true
                 
-                export CFLAGS="-O2 -march=armv8-a+crypto"
-                export CXXFLAGS="$CFLAGS"
+                export CFLAGS="$ARM64_SAFE_FLAGS"
+                export CXXFLAGS="$ARM64_SAFE_FLAGS"
+                
+                # Patch build scripts to use safe flags
+                for f in build.sh configure.sh; do
+                    [ -f "$f" ] && sed -i "s/-march=native/$ARM64_SAFE_FLAGS/g; s/-march=armv8-a /$ARM64_SAFE_FLAGS /g" "$f" 2>/dev/null || true
+                done
                 
                 if [ -f build.sh ]; then
                     ./build.sh 2>&1 || true
@@ -2532,7 +2651,11 @@ install_verus_miner() {
                 
                 if [ ! -f ccminer ]; then
                     ./autogen.sh 2>/dev/null || true
-                    [ -f configure ] && ./configure >/dev/null 2>&1 || true
+                    if [ -f configure ]; then
+                        ./configure CFLAGS="$ARM64_SAFE_FLAGS" CXXFLAGS="$ARM64_SAFE_FLAGS" >/dev/null 2>&1 || true
+                    fi
+                    # Force flags into Makefile
+                    [ -f Makefile ] && sed -i "s/-march=armv8-a /$ARM64_SAFE_FLAGS /g" Makefile 2>/dev/null || true
                     CORES=$(nproc 2>/dev/null || echo 2)
                     [ "$CORES" -gt 4 ] && CORES=4
                     make -j"$CORES" 2>&1 || true
@@ -2541,11 +2664,15 @@ install_verus_miner() {
                 if [ -f ccminer ]; then
                     cp ccminer /usr/local/bin/ccminer-verus
                     chmod +x /usr/local/bin/ccminer-verus
-                    log "✅ ccminer-verus built from Oink70 source for ARM64"
-                    cd "$MINERS_DIR"
-                    rm -rf ccminer-verus-oink-build
-                    unset CFLAGS CXXFLAGS
-                    return 0
+                    if verify_ccminer_mining /usr/local/bin/ccminer-verus "Oink70 source build"; then
+                        log "✅ ccminer-verus built and verified from Oink70 source for ARM64"
+                        cd "$MINERS_DIR"
+                        rm -rf ccminer-verus-oink-build
+                        unset CFLAGS CXXFLAGS
+                        return 0
+                    fi
+                    warn "Oink70 source build failed mining verification"
+                    rm -f /usr/local/bin/ccminer-verus 2>/dev/null
                 fi
                 
                 cd "$MINERS_DIR"
@@ -2553,8 +2680,59 @@ install_verus_miner() {
                 unset CFLAGS CXXFLAGS
             fi
             
+            # === Attempt 6: Oink70/CCminer-ARM-optimized (tuned for Cortex-A53, compatible with A72) ===
+            log "Attempt 6: Building from Oink70/CCminer-ARM-optimized (Cortex-A53 tuned)..."
+            rm -rf ccminer-arm-optimized-build 2>/dev/null
+            if git clone --depth 1 https://github.com/Oink70/CCminer-ARM-optimized.git ccminer-arm-optimized-build 2>&1; then
+                cd ccminer-arm-optimized-build || true
+                
+                chmod +x build.sh configure.sh autogen.sh 2>/dev/null || true
+                
+                # This repo uses clang by default but gcc works too
+                # Use safe flags targeting Cortex-A72
+                ARM64_SAFE_FLAGS="-O2 -march=armv8-a+crypto+crc -mtune=cortex-a72"
+                export CFLAGS="$ARM64_SAFE_FLAGS"
+                export CXXFLAGS="$ARM64_SAFE_FLAGS"
+                
+                if [ -f build.sh ]; then
+                    # Patch build.sh to use gcc (clang may not be installed)
+                    sed -i 's/CXX=clang++/CXX=g++/g; s/CC=clang/CC=gcc/g' build.sh 2>/dev/null || true
+                    sed -i "s/-march=native/$ARM64_SAFE_FLAGS/g" build.sh 2>/dev/null || true
+                    ./build.sh 2>&1 || true
+                fi
+                
+                if [ ! -f ccminer ]; then
+                    ./autogen.sh 2>/dev/null || true
+                    if [ -f configure ]; then
+                        ./configure CFLAGS="$ARM64_SAFE_FLAGS" CXXFLAGS="$ARM64_SAFE_FLAGS" >/dev/null 2>&1 || true
+                    fi
+                    [ -f Makefile ] && sed -i "s/-march=armv8-a /$ARM64_SAFE_FLAGS /g" Makefile 2>/dev/null || true
+                    CORES=$(nproc 2>/dev/null || echo 2)
+                    [ "$CORES" -gt 4 ] && CORES=4
+                    make -j"$CORES" 2>&1 || true
+                fi
+                
+                if [ -f ccminer ]; then
+                    cp ccminer /usr/local/bin/ccminer-verus
+                    chmod +x /usr/local/bin/ccminer-verus
+                    if verify_ccminer_mining /usr/local/bin/ccminer-verus "Oink70 ARM-optimized build"; then
+                        log "✅ ccminer-verus built and verified from Oink70 ARM-optimized for ARM64"
+                        cd "$MINERS_DIR"
+                        rm -rf ccminer-arm-optimized-build
+                        unset CFLAGS CXXFLAGS
+                        return 0
+                    fi
+                    warn "Oink70 ARM-optimized build failed mining verification"
+                    rm -f /usr/local/bin/ccminer-verus 2>/dev/null
+                fi
+                
+                cd "$MINERS_DIR"
+                rm -rf ccminer-arm-optimized-build
+                unset CFLAGS CXXFLAGS
+            fi
+            
             warn "Could not install ccminer-verus for ARM64 after all attempts"
-            warn "Tried: 3 pre-built binaries, 2 source builds"
+            warn "Tried: 3 pre-built binaries, 3 source builds"
             return 1
             ;;
             
