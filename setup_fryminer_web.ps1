@@ -40,7 +40,7 @@ $Script:DEV_FEE_DEV_MINUTES = 1
 
 # Dev wallet addresses by coin/algorithm type
 $Script:DevWallets = @{
-    XMR = "482R7WT5xYVKa2SYHaDtSGWQPv82sgwfSVBGfjV5wez2hbnVTiDRGHb7AEsP5NLGDrBNfFgacPkNSEToGYissp2GRRiSUyo"
+    XMR = "Ssy2BnsAcJUVZZ2kTiywf61bvYjvPosXzaBcaft9RSvaNNKsFRkcKbaWjMotjATkSbSmeSdX2DAxc1XxpcdxUBGd41oCwwfetG"
     LTC = "ltc1qrdc0wqzs3cwuhxxzkq2khepec2l3c6uhd8l9jy"
     BTC = "bc1qr6ldduupwn4dtqq4dwthv4vp3cg2dx7u3mcgva"
     DOGE = "D5nsUsiivbNv2nmuNE9x2ybkkCTEL4ceHj"
