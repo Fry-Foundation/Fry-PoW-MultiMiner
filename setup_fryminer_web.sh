@@ -122,6 +122,16 @@ PORT=8080
 BASE=/opt/frynet-config
 MINERS_DIR=/opt/miners
 
+# Parse command-line arguments
+SET_HOSTNAME=false
+for arg in "$@"; do
+    case "$arg" in
+        --set-hostname)
+            SET_HOSTNAME=true
+            ;;
+    esac
+done
+
 # Detect architecture - supports ALL CPU architectures
 detect_architecture() {
     ARCH=$(uname -m)
@@ -3604,7 +3614,11 @@ main() {
     log "================================================"
     
     detect_architecture
-    set_hostname
+    if [ "$SET_HOSTNAME" = "true" ]; then
+        set_hostname
+    else
+        log "Skipping hostname change (use --set-hostname to enable)"
+    fi
     install_dependencies
 
     # Install miners - track what succeeds
