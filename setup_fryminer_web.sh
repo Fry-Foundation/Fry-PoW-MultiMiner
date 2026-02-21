@@ -4883,11 +4883,13 @@ function forceUpdate() {
 // Initialize
 loadConfig();
 checkStatus();
+updateStats();
 fetchCpuCores();
 checkForUpdate();
 refreshLogs();
 setInterval(checkStatus, 5000);
 setInterval(refreshLogs, 3000);
+setInterval(updateStats, 5000);
 
 // Fetch CPU cores and set max threads
 function fetchCpuCores() {
@@ -5183,7 +5185,7 @@ for param in $POST_DATA; do
     set -- $param
     key="$1"
     value="$2"
-    value=$(echo "$value" | sed 's/+/ /g' | sed 's/%\([0-9A-F][0-9A-F]\)/\\x\1/g' | xargs -0 printf "%b")
+    value=$(echo "$value" | sed 's/+/ /g' | sed 's/%\([0-9A-Fa-f][0-9A-Fa-f]\)/\\x\1/g' | xargs -0 printf "%b")
 
     case "$key" in
         miner) MINER="$value" ;;
@@ -6108,17 +6110,19 @@ echo ""
 
 if [ -f /opt/frynet-config/config.txt ]; then
     . /opt/frynet-config/config.txt
-    # Default password to "x" if not set
+    # Default all fields to safe values if not set
     [ -z "$password" ] && password="x"
-    # Default CPU mining to true, GPU mining to false, USB ASIC mining to false
+    [ -z "$worker" ] && worker="worker1"
+    [ -z "$threads" ] && threads="2"
     [ -z "$cpu_mining" ] && cpu_mining="true"
     [ -z "$gpu_mining" ] && gpu_mining="false"
     [ -z "$gpu_miner" ] && gpu_miner="srbminer"
     [ -z "$usbasic_mining" ] && usbasic_mining="false"
     [ -z "$usbasic_algo" ] && usbasic_algo="sha256d"
     [ -z "$doge_wallet" ] && doge_wallet=""
-    printf '{"miner":"%s","wallet":"%s","doge_wallet":"%s","worker":"%s","threads":"%s","pool":"%s","password":"%s","cpu_mining":"%s","gpu_mining":"%s","gpu_miner":"%s","usbasic_mining":"%s","usbasic_algo":"%s"}' \
-        "$miner" "$wallet" "$doge_wallet" "$worker" "$threads" "$pool" "$password" "$cpu_mining" "$gpu_mining" "$gpu_miner" "$usbasic_mining" "$usbasic_algo"
+    [ -z "$ltc_wallet" ] && ltc_wallet=""
+    printf '{"miner":"%s","wallet":"%s","doge_wallet":"%s","ltc_wallet":"%s","worker":"%s","threads":"%s","pool":"%s","password":"%s","cpu_mining":"%s","gpu_mining":"%s","gpu_miner":"%s","usbasic_mining":"%s","usbasic_algo":"%s"}' \
+        "$miner" "$wallet" "$doge_wallet" "$ltc_wallet" "$worker" "$threads" "$pool" "$password" "$cpu_mining" "$gpu_mining" "$gpu_miner" "$usbasic_mining" "$usbasic_algo"
 else
     echo "{}"
 fi
@@ -6213,24 +6217,27 @@ CONFIG_FILE="/opt/frynet-config/config.txt"
 PID_FILE="/opt/frynet-config/miner.pid"
 
 if [ -f "$LOG_FILE" ]; then
-    # Strip ANSI codes
-    CLEAN_LOG=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG_FILE" 2>/dev/null)
-    
-    # Get hashrate - XMRig format: "speed 10s/60s/15m 218.2 220.6 n/a H/s"
-    # Take the 60s average (middle value)
-    HR=$(echo "$CLEAN_LOG" | grep -E "miner.*speed" | tail -1 | grep -oE 'speed [0-9.]+/[0-9.]+/[0-9.n/a]+ [0-9.]+ [0-9.]+ [0-9.n/a]+ [kKMGT]?H/s')
+    # Use tail to get recent log lines (avoid loading huge logs into memory)
+    # Use a large enough window to capture hashrate, shares, algo, and difficulty
+    RECENT_LOG=$(tail -500 "$LOG_FILE" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+
+    # Get hashrate - XMRig format: "miner    speed 10s/60s/15m 218.2 220.6 n/a H/s"
+    # The labels contain letters (10s, 60s, 15m) so match them properly
+    HR=$(echo "$RECENT_LOG" | grep -E "miner.*speed" | tail -1 | grep -oE 'speed [0-9]+s/[0-9]+s/[0-9]+m [0-9.]+ [0-9.]+ [0-9.na/]+ [kKMGT]?H/s')
     if [ -n "$HR" ]; then
-        # Extract 60s value (second number after "speed")
+        # Extract 60s value: $1=speed $2=10s/60s/15m $3=10s_val $4=60s_val
         HR_60S=$(echo "$HR" | awk '{print $4}')
         HR_UNIT=$(echo "$HR" | grep -oE '[kKMGT]?H/s')
         HASHRATE="${HR_60S} ${HR_UNIT}"
     else
-        # Try cpuminer format
-        HR=$(echo "$CLEAN_LOG" | grep -oE '[0-9]+\.?[0-9]* [kKMGT]?H/s' | tail -1)
+        # Try cpuminer/ccminer format: "123.45 kH/s"
+        HR=$(echo "$RECENT_LOG" | grep -oE '[0-9]+\.?[0-9]* [kKMGT]?H/s' | tail -1)
         [ -n "$HR" ] && HASHRATE="$HR"
     fi
-    
-    # Count accepted shares
+
+    # Count accepted shares from FULL log (need total count, not just recent)
+    CLEAN_LOG=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG_FILE" 2>/dev/null)
+
     # XMRig: "[timestamp]  net      accepted (1/0) diff 100001 (42 ms)"
     ACC=$(echo "$CLEAN_LOG" | grep -c "net.*accepted" 2>/dev/null || echo "0")
     if [ "$ACC" -eq 0 ]; then
@@ -6238,24 +6245,24 @@ if [ -f "$LOG_FILE" ]; then
         ACC=$(echo "$CLEAN_LOG" | grep -ciE "accepted|yay!" 2>/dev/null || echo "0")
     fi
     SHARES="$ACC"
-    
+
     # Count rejected
     REJ=$(echo "$CLEAN_LOG" | grep -c "net.*rejected" 2>/dev/null || echo "0")
     if [ "$REJ" -eq 0 ]; then
         REJ=$(echo "$CLEAN_LOG" | grep -ciE "rejected|booo" 2>/dev/null || echo "0")
     fi
     REJECTED="$REJ"
-    
-    # Get algorithm from log
-    ALG=$(echo "$CLEAN_LOG" | grep "POOL.*algo" | tail -1 | grep -oE "algo [a-zA-Z0-9/_-]+" | cut -d' ' -f2)
-    [ -z "$ALG" ] && ALG=$(echo "$CLEAN_LOG" | grep "Algorithm:" | tail -1 | cut -d: -f2 | tr -d ' ')
+
+    # Get algorithm from recent log
+    ALG=$(echo "$RECENT_LOG" | grep "POOL.*algo" | tail -1 | grep -oE "algo [a-zA-Z0-9/_-]+" | cut -d' ' -f2)
+    [ -z "$ALG" ] && ALG=$(echo "$RECENT_LOG" | grep "Algorithm:" | tail -1 | cut -d: -f2 | tr -d ' ')
     [ -n "$ALG" ] && ALGO="$ALG"
-    
+
     # Get difficulty - XMRig format: "new job from pool diff 100001"
-    DIFF_VAL=$(echo "$CLEAN_LOG" | grep "new job.*diff" | tail -1 | grep -oE "diff [0-9]+" | cut -d' ' -f2)
-    [ -z "$DIFF_VAL" ] && DIFF_VAL=$(echo "$CLEAN_LOG" | grep -oE "[Dd]iff[: ]+[0-9]+" | tail -1 | grep -oE "[0-9]+")
+    DIFF_VAL=$(echo "$RECENT_LOG" | grep "new job.*diff" | tail -1 | grep -oE "diff [0-9]+" | cut -d' ' -f2)
+    [ -z "$DIFF_VAL" ] && DIFF_VAL=$(echo "$RECENT_LOG" | grep -oE "[Dd]iff[: ]+[0-9]+" | tail -1 | grep -oE "[0-9]+")
     [ -n "$DIFF_VAL" ] && DIFF="$DIFF_VAL"
-    
+
     # Get pool from config
     if [ -f "$CONFIG_FILE" ]; then
         . "$CONFIG_FILE" 2>/dev/null
