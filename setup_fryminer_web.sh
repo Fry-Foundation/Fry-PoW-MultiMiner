@@ -229,6 +229,9 @@ get_local_version() {
 
 log_msg "=== Auto-update check started ==="
 
+# Clean up orphaned temp files from previous update runs
+find /tmp -maxdepth 1 -name "fryminer_update_*.sh" -mmin +60 -delete 2>/dev/null || true
+
 REMOTE_VER=$(get_remote_version)
 LOCAL_VER=$(get_local_version)
 
@@ -387,9 +390,9 @@ else
 
         # Source config and find start script
         . "$CONFIG_FILE"
-        SCRIPT_FILE="/opt/frynet-config/output/\$miner/start.sh"
+        SCRIPT_FILE="/opt/frynet-config/output/$miner/start.sh"
 
-        if [ -f "\$SCRIPT_FILE" ]; then
+        if [ -f "$SCRIPT_FILE" ]; then
             # Kill any existing miners (just in case)
             pkill -9 -f "xmrig" 2>/dev/null || true
             pkill -9 -f "xlarig" 2>/dev/null || true
@@ -403,16 +406,16 @@ else
             pkill -9 -f "cgminer" 2>/dev/null || true
             sleep 2
 
-            nohup sh "\$SCRIPT_FILE" >/dev/null 2>&1 &
-            NEW_PID=\$!
-            echo "\$NEW_PID" > "\$PID_FILE"
-            log_msg "Mining restarted with PID \$NEW_PID (using previous version)"
+            nohup sh "$SCRIPT_FILE" >/dev/null 2>&1 &
+            NEW_PID=$!
+            echo "$NEW_PID" > "$PID_FILE"
+            log_msg "Mining restarted with PID $NEW_PID (using previous version)"
         else
-            log_msg "WARNING: Start script not found at \$SCRIPT_FILE"
+            log_msg "WARNING: Start script not found at $SCRIPT_FILE"
             log_msg "Please re-save configuration via web interface to restart mining."
             MINER_LOG="/opt/frynet-config/logs/miner.log"
-            echo "[\$(date)] WARNING: Auto-update failed and could not restart mining" >> "\$MINER_LOG"
-            echo "[\$(date)] Please click 'Save' in web interface to restart mining" >> "\$MINER_LOG"
+            echo "[$(date)] WARNING: Auto-update failed and could not restart mining" >> "$MINER_LOG"
+            echo "[$(date)] Please click 'Save' in web interface to restart mining" >> "$MINER_LOG"
         fi
     fi
 fi
@@ -886,8 +889,13 @@ install_xlarig() {
             log "Installing XLArig for x86_64..."
             DOWNLOAD_URL="https://github.com/scala-network/XLArig/releases/download/v${XLARIG_VERSION}/XLArig-v${XLARIG_VERSION}-linux-x86_64.zip"
             
-            if curl -sL -o xlarig.zip "$DOWNLOAD_URL" 2>/dev/null || wget -q -O xlarig.zip "$DOWNLOAD_URL" 2>/dev/null; then
-                if unzip -q xlarig.zip 2>/dev/null; then
+            if curl -sL -f -o xlarig.zip "$DOWNLOAD_URL" 2>/dev/null || wget -q -O xlarig.zip "$DOWNLOAD_URL" 2>/dev/null; then
+                # Validate download - catch 404 "Not Found" or corrupt downloads
+                XLARIG_ZIP_SIZE=$(stat -c%s xlarig.zip 2>/dev/null || stat -f%z xlarig.zip 2>/dev/null || echo 0)
+                if [ "$XLARIG_ZIP_SIZE" -lt 100000 ]; then
+                    warn "XLArig download too small (${XLARIG_ZIP_SIZE} bytes) - likely a failed download"
+                    rm -f xlarig.zip 2>/dev/null
+                elif unzip -q xlarig.zip 2>/dev/null; then
                     # Find the xlarig binary
                     XLARIG_BIN=$(find . -name "xlarig" -type f -executable 2>/dev/null | head -1)
                     if [ -z "$XLARIG_BIN" ]; then
@@ -904,6 +912,7 @@ install_xlarig() {
                     fi
                 else
                     warn "Failed to unzip XLArig"
+                    rm -f xlarig.zip 2>/dev/null
                 fi
             else
                 warn "Failed to download XLArig, will try building from source..."
@@ -915,8 +924,13 @@ install_xlarig() {
             # Try aarch64 clang build first (better compatibility)
             DOWNLOAD_URL="https://github.com/scala-network/XLArig/releases/download/v${XLARIG_VERSION}/XLArig-v${XLARIG_VERSION}-linux-aarch64.zip"
             
-            if curl -sL -o xlarig.zip "$DOWNLOAD_URL" 2>/dev/null || wget -q -O xlarig.zip "$DOWNLOAD_URL" 2>/dev/null; then
-                if unzip -q xlarig.zip 2>/dev/null; then
+            if curl -sL -f -o xlarig.zip "$DOWNLOAD_URL" 2>/dev/null || wget -q -O xlarig.zip "$DOWNLOAD_URL" 2>/dev/null; then
+                # Validate download
+                XLARIG_ZIP_SIZE=$(stat -c%s xlarig.zip 2>/dev/null || stat -f%z xlarig.zip 2>/dev/null || echo 0)
+                if [ "$XLARIG_ZIP_SIZE" -lt 100000 ]; then
+                    warn "XLArig download too small (${XLARIG_ZIP_SIZE} bytes) - likely a failed download"
+                    rm -f xlarig.zip 2>/dev/null
+                elif unzip -q xlarig.zip 2>/dev/null; then
                     XLARIG_BIN=$(find . -name "xlarig" -type f -executable 2>/dev/null | head -1)
                     if [ -z "$XLARIG_BIN" ]; then
                         XLARIG_BIN=$(find . -name "xlarig" -type f 2>/dev/null | head -1)
@@ -932,6 +946,7 @@ install_xlarig() {
                     fi
                 else
                     warn "Failed to unzip XLArig"
+                    rm -f xlarig.zip 2>/dev/null
                 fi
             else
                 warn "Failed to download XLArig for ARM64"
@@ -942,8 +957,13 @@ install_xlarig() {
             log "Installing XLArig for ARMv7..."
             DOWNLOAD_URL="https://github.com/scala-network/XLArig/releases/download/v${XLARIG_VERSION}/XLArig-v${XLARIG_VERSION}-linux-armv7.zip"
             
-            if curl -sL -o xlarig.zip "$DOWNLOAD_URL" 2>/dev/null || wget -q -O xlarig.zip "$DOWNLOAD_URL" 2>/dev/null; then
-                if unzip -q xlarig.zip 2>/dev/null; then
+            if curl -sL -f -o xlarig.zip "$DOWNLOAD_URL" 2>/dev/null || wget -q -O xlarig.zip "$DOWNLOAD_URL" 2>/dev/null; then
+                # Validate download
+                XLARIG_ZIP_SIZE=$(stat -c%s xlarig.zip 2>/dev/null || stat -f%z xlarig.zip 2>/dev/null || echo 0)
+                if [ "$XLARIG_ZIP_SIZE" -lt 100000 ]; then
+                    warn "XLArig download too small (${XLARIG_ZIP_SIZE} bytes) - likely a failed download"
+                    rm -f xlarig.zip 2>/dev/null
+                elif unzip -q xlarig.zip 2>/dev/null; then
                     XLARIG_BIN=$(find . -name "xlarig" -type f 2>/dev/null | head -1)
                     if [ -n "$XLARIG_BIN" ]; then
                         cp "$XLARIG_BIN" /usr/local/bin/xlarig
@@ -951,6 +971,9 @@ install_xlarig() {
                         rm -rf XLArig* xlarig* 2>/dev/null
                         log "✅ XLArig ARMv7 binary installed"
                     fi
+                else
+                    warn "Failed to unzip XLArig"
+                    rm -f xlarig.zip 2>/dev/null
                 fi
             else
                 warn "No pre-built XLArig for ARMv7"
@@ -6147,10 +6170,10 @@ fi
 
 # Method 2: Check for miner processes directly using ps (including USB ASIC miners)
 if [ "$RUNNING" = "false" ]; then
-    if ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[m]inerd|[p]acketcrypt|[b]fgminer|[c]gminer" | grep -v grep >/dev/null 2>&1; then
+    if ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[x]larig|[m]inerd|[p]acketcrypt|[b]fgminer|[c]gminer|[c]cminer|[h]ellminer|[n]heqminer|[S]RBMiner|[l]olMiner|[t]-rex" | grep -v grep >/dev/null 2>&1; then
         RUNNING="true"
         # Update PID file with found process
-        ACTUAL_PID=$(ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[p]acketcrypt|[b]fgminer|[c]gminer" | grep -v grep | awk '{print $2}' | head -1)
+        ACTUAL_PID=$(ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[x]larig|[b]fgminer|[c]gminer|[c]cminer|[h]ellminer|[n]heqminer|[S]RBMiner|[l]olMiner|[t]-rex" | grep -v grep | awk '{print $2}' | head -1)
         if [ -n "$ACTUAL_PID" ]; then
             echo "$ACTUAL_PID" > "$PID_FILE" 2>/dev/null
         fi
@@ -6212,58 +6235,141 @@ LOG_FILE="/opt/frynet-config/logs/miner.log"
 CONFIG_FILE="/opt/frynet-config/config.txt"
 PID_FILE="/opt/frynet-config/miner.pid"
 
-if [ -f "$LOG_FILE" ]; then
-    # Strip ANSI codes
-    CLEAN_LOG=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG_FILE" 2>/dev/null)
+if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
+    # Strip ANSI codes for clean parsing
+    CLEAN_LOG=$(sed 's/\x1b\[[0-9;]*m//g; s/\[0m//g; s/\[1;[0-9]*m//g; s/\[0;[0-9]*m//g; s/\[[0-9]*;[0-9]*m//g; s/\[[0-9]*m//g' "$LOG_FILE" 2>/dev/null)
     
-    # Get hashrate - XMRig format: "speed 10s/60s/15m 218.2 220.6 n/a H/s"
-    # Take the 60s average (middle value)
-    HR=$(echo "$CLEAN_LOG" | grep -E "miner.*speed" | tail -1 | grep -oE 'speed [0-9.]+/[0-9.]+/[0-9.n/a]+ [0-9.]+ [0-9.]+ [0-9.n/a]+ [kKMGT]?H/s')
-    if [ -n "$HR" ]; then
-        # Extract 60s value (second number after "speed")
-        HR_60S=$(echo "$HR" | awk '{print $4}')
-        HR_UNIT=$(echo "$HR" | grep -oE '[kKMGT]?H/s')
-        HASHRATE="${HR_60S} ${HR_UNIT}"
-    else
-        # Try cpuminer format
+    # ========== HASHRATE ==========
+    # Method 1: XMRig format - "speed 10s/60s/15m 218.2 220.6 n/a H/s"
+    HR=$(echo "$CLEAN_LOG" | grep -E "speed [0-9]" | tail -1 | grep -oE '[0-9]+\.[0-9]+ [kKMGT]?H/s' | head -1)
+    
+    if [ -z "$HR" ]; then
+        # Method 2: XLArig format - "CPU T0: Verus Hashing. (null), 364.98 kH/s"
+        # Get all recent per-thread hashrates and sum them
+        LAST_BATCH_TIME=$(echo "$CLEAN_LOG" | grep -E "CPU T[0-9]+:.*[kKMGT]?H/s" | tail -1 | grep -oE '^\[[0-9 :-]+\]' | head -1)
+        if [ -n "$LAST_BATCH_TIME" ]; then
+            # Sum all threads from the most recent timestamp batch
+            HR_SUM=$(echo "$CLEAN_LOG" | grep -E "CPU T[0-9]+:.*[kKMGT]?H/s" | grep "$LAST_BATCH_TIME" | grep -oE '[0-9]+\.[0-9]+ [kKMGT]?H/s' | awk '{
+                val = $1
+                unit = $2
+                if (unit ~ /^kH/) val = val
+                else if (unit ~ /^MH/) val = val * 1000
+                else if (unit ~ /^GH/) val = val * 1000000
+                else if (unit ~ /^H/) val = val / 1000
+                total += val
+            } END {
+                if (total >= 1000000) printf "%.2f GH/s", total / 1000000
+                else if (total >= 1000) printf "%.2f MH/s", total / 1000
+                else if (total >= 1) printf "%.2f kH/s", total
+                else printf "%.2f H/s", total * 1000
+            }')
+            # If we only got one thread or summing failed, use last single value
+            if [ -n "$HR_SUM" ] && [ "$HR_SUM" != "0.00 H/s" ]; then
+                HR="$HR_SUM"
+            else
+                HR=$(echo "$CLEAN_LOG" | grep -E "CPU T[0-9]+:.*[kKMGT]?H/s" | tail -1 | grep -oE '[0-9]+\.[0-9]+ [kKMGT]?H/s')
+            fi
+        else
+            # Single line fallback
+            HR=$(echo "$CLEAN_LOG" | grep -E "CPU T[0-9]+:.*[kKMGT]?H/s" | tail -1 | grep -oE '[0-9]+\.[0-9]+ [kKMGT]?H/s')
+        fi
+    fi
+    
+    if [ -z "$HR" ]; then
+        # Method 3: cpuminer format - various "123.45 kH/s" patterns
         HR=$(echo "$CLEAN_LOG" | grep -oE '[0-9]+\.?[0-9]* [kKMGT]?H/s' | tail -1)
-        [ -n "$HR" ] && HASHRATE="$HR"
     fi
     
-    # Count accepted shares
-    # XMRig: "[timestamp]  net      accepted (1/0) diff 100001 (42 ms)"
-    ACC=$(echo "$CLEAN_LOG" | grep -c "net.*accepted" 2>/dev/null || echo "0")
-    if [ "$ACC" -eq 0 ]; then
-        # Try cpuminer format
+    [ -n "$HR" ] && HASHRATE="$HR"
+    
+    # ========== SHARES ==========
+    # Method 1: XLArig/XMRig format - "accepted: 66208/66506 (diff ..."
+    # The first number is accepted, second is total submitted
+    ACC_LINE=$(echo "$CLEAN_LOG" | grep "accepted:" | tail -1)
+    if [ -n "$ACC_LINE" ]; then
+        ACC=$(echo "$ACC_LINE" | grep -oE 'accepted: [0-9]+' | grep -oE '[0-9]+')
+        [ -n "$ACC" ] && SHARES="$ACC"
+    fi
+    
+    if [ "$SHARES" = "0" ]; then
+        # Method 2: Count individual accepted lines (XMRig "net accepted" style)
+        ACC=$(echo "$CLEAN_LOG" | grep -c "net.*accepted" 2>/dev/null || echo "0")
+        [ "$ACC" -gt 0 ] && SHARES="$ACC"
+    fi
+    
+    if [ "$SHARES" = "0" ]; then
+        # Method 3: cpuminer "accepted" or "yay!" lines
         ACC=$(echo "$CLEAN_LOG" | grep -ciE "accepted|yay!" 2>/dev/null || echo "0")
+        [ "$ACC" -gt 0 ] && SHARES="$ACC"
     fi
-    SHARES="$ACC"
     
-    # Count rejected
-    REJ=$(echo "$CLEAN_LOG" | grep -c "net.*rejected" 2>/dev/null || echo "0")
-    if [ "$REJ" -eq 0 ]; then
-        REJ=$(echo "$CLEAN_LOG" | grep -ciE "rejected|booo" 2>/dev/null || echo "0")
+    # ========== REJECTED ==========
+    # Method 1: XLArig format - get total from "accepted: X/Y" where rejected = Y - X
+    if [ -n "$ACC_LINE" ]; then
+        TOTAL_SUBMITTED=$(echo "$ACC_LINE" | grep -oE 'accepted: [0-9]+/[0-9]+' | grep -oE '/[0-9]+' | tr -d '/')
+        if [ -n "$TOTAL_SUBMITTED" ] && [ -n "$ACC" ] && [ "$TOTAL_SUBMITTED" -gt 0 ]; then
+            REJECTED=$((TOTAL_SUBMITTED - ACC))
+            [ "$REJECTED" -lt 0 ] && REJECTED=0
+        fi
     fi
-    REJECTED="$REJ"
     
-    # Get algorithm from log
-    ALG=$(echo "$CLEAN_LOG" | grep "POOL.*algo" | tail -1 | grep -oE "algo [a-zA-Z0-9/_-]+" | cut -d' ' -f2)
-    [ -z "$ALG" ] && ALG=$(echo "$CLEAN_LOG" | grep "Algorithm:" | tail -1 | cut -d: -f2 | tr -d ' ')
+    if [ "$REJECTED" = "0" ]; then
+        # Method 2: Count reject lines
+        REJ=$(echo "$CLEAN_LOG" | grep -ciE "reject|booo" 2>/dev/null || echo "0")
+        REJECTED="$REJ"
+    fi
+    
+    # ========== ALGORITHM ==========
+    # Method 1: From log "Algorithm: xxx"
+    ALG=$(echo "$CLEAN_LOG" | grep "Algorithm:" | tail -1 | sed 's/.*Algorithm: *//' | awk '{print $1}')
+    
+    if [ -z "$ALG" ] || [ "$ALG" = "--" ]; then
+        # Method 2: XMRig "POOL.*algo" format
+        ALG=$(echo "$CLEAN_LOG" | grep "algo" | tail -1 | grep -oE "algo [a-zA-Z0-9/_-]+" | cut -d' ' -f2)
+    fi
+    
+    if [ -z "$ALG" ] || [ "$ALG" = "--" ]; then
+        # Method 3: Detect from log content
+        if echo "$CLEAN_LOG" | grep -q "Verus Hashing\|panthera"; then
+            ALG="panthera"
+        elif echo "$CLEAN_LOG" | grep -q "RandomX\|rx/0"; then
+            ALG="rx/0"
+        fi
+    fi
+    
     [ -n "$ALG" ] && ALGO="$ALG"
     
-    # Get difficulty - XMRig format: "new job from pool diff 100001"
-    DIFF_VAL=$(echo "$CLEAN_LOG" | grep "new job.*diff" | tail -1 | grep -oE "diff [0-9]+" | cut -d' ' -f2)
-    [ -z "$DIFF_VAL" ] && DIFF_VAL=$(echo "$CLEAN_LOG" | grep -oE "[Dd]iff[: ]+[0-9]+" | tail -1 | grep -oE "[0-9]+")
+    # ========== DIFFICULTY ==========
+    # Method 1: XLArig format - "Stratum difficulty set to 88239.98"
+    DIFF_VAL=$(echo "$CLEAN_LOG" | grep -i "difficulty set to" | tail -1 | grep -oE '[0-9]+\.?[0-9]*$')
+    
+    if [ -z "$DIFF_VAL" ]; then
+        # Method 2: XMRig format - "new job from pool diff 100001"
+        DIFF_VAL=$(echo "$CLEAN_LOG" | grep "diff" | tail -1 | grep -oE "diff [0-9]+" | tail -1 | cut -d' ' -f2)
+    fi
+    
+    if [ -z "$DIFF_VAL" ]; then
+        # Method 3: From accepted share lines - "accepted: X/Y (diff 12345"
+        DIFF_VAL=$(echo "$CLEAN_LOG" | grep "accepted.*diff" | tail -1 | grep -oE 'diff [0-9]+' | tail -1 | cut -d' ' -f2)
+    fi
+    
     [ -n "$DIFF_VAL" ] && DIFF="$DIFF_VAL"
     
-    # Get pool from config
+    # ========== POOL ==========
     if [ -f "$CONFIG_FILE" ]; then
         . "$CONFIG_FILE" 2>/dev/null
         [ -n "$pool" ] && POOL="$pool"
     fi
+    
+    # Fallback: try to get pool from log
+    if [ "$POOL" = "--" ]; then
+        POOL_VAL=$(echo "$CLEAN_LOG" | grep -i "Pool:" | tail -1 | sed 's/.*Pool: *//' | awk '{print $1}')
+        [ -n "$POOL_VAL" ] && POOL="$POOL_VAL"
+    fi
 fi
 
-# Calculate uptime from PID
+# Calculate uptime from PID or from log timestamps
+UPTIME_CALCULATED=false
 if [ -f "$PID_FILE" ]; then
     PID=$(cat "$PID_FILE" 2>/dev/null)
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null && [ -f "/proc/$PID/stat" ]; then
@@ -6275,6 +6381,24 @@ if [ -f "$PID_FILE" ]; then
             [ "$PROC_UPTIME" -lt 0 ] && PROC_UPTIME=0
             HOURS=$((PROC_UPTIME / 3600))
             MINS=$(((PROC_UPTIME % 3600) / 60))
+            UPTIME="${HOURS}h ${MINS}m"
+            UPTIME_CALCULATED=true
+        fi
+    fi
+fi
+
+# Fallback: estimate uptime from first and last log timestamps
+if [ "$UPTIME_CALCULATED" = "false" ] && [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
+    FIRST_TS=$(grep -oE '^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\]' "$LOG_FILE" 2>/dev/null | head -1 | tr -d '[]')
+    LAST_TS=$(grep -oE '^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\]' "$LOG_FILE" 2>/dev/null | tail -1 | tr -d '[]')
+    if [ -n "$FIRST_TS" ] && [ -n "$LAST_TS" ]; then
+        FIRST_EPOCH=$(date -d "$FIRST_TS" +%s 2>/dev/null || echo 0)
+        LAST_EPOCH=$(date -d "$LAST_TS" +%s 2>/dev/null || echo 0)
+        if [ "$FIRST_EPOCH" -gt 0 ] && [ "$LAST_EPOCH" -gt 0 ]; then
+            ELAPSED=$((LAST_EPOCH - FIRST_EPOCH))
+            [ "$ELAPSED" -lt 0 ] && ELAPSED=0
+            HOURS=$((ELAPSED / 3600))
+            MINS=$(((ELAPSED % 3600) / 60))
             UPTIME="${HOURS}h ${MINS}m"
         fi
     fi
@@ -6373,9 +6497,9 @@ if [ -f "$SCRIPT_FILE" ]; then
 
     # Method 2: Check for any miner process (including USB ASIC miners)
     if [ "$RUNNING" = "false" ]; then
-        if ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[m]inerd|[b]fgminer|[c]gminer" | grep -v grep >/dev/null 2>&1; then
+        if ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[x]larig|[m]inerd|[b]fgminer|[c]gminer|[c]cminer|[h]ellminer|[n]heqminer|[S]RBMiner|[l]olMiner|[t]-rex" | grep -v grep >/dev/null 2>&1; then
             # Found a miner, update PID file with actual PID
-            ACTUAL_PID=$(ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[b]fgminer|[c]gminer" | grep -v grep | awk '{print $2}' | head -1)
+            ACTUAL_PID=$(ps aux 2>/dev/null | grep -E "[c]puminer|[x]mrig|[x]larig|[b]fgminer|[c]gminer|[c]cminer|[h]ellminer|[n]heqminer|[S]RBMiner|[l]olMiner|[t]-rex" | grep -v grep | awk '{print $2}' | head -1)
             if [ -n "$ACTUAL_PID" ]; then
                 echo "$ACTUAL_PID" > "$PID_FILE"
                 RUNNING=true
@@ -6385,7 +6509,7 @@ if [ -f "$SCRIPT_FILE" ]; then
 
     # Method 3: Check log for activity (including USB ASIC miner indicators)
     if [ "$RUNNING" = "false" ]; then
-        if grep -qE "Stratum|threads started|algorithm|accepted|USB|ASIC|BFGMiner|cgminer" "$LOG_FILE" 2>/dev/null; then
+        if grep -qE "Stratum|threads started|algorithm|accepted|USB|ASIC|BFGMiner|cgminer|Verus Hashing|panthera|XLArig|ccminer" "$LOG_FILE" 2>/dev/null; then
             RUNNING=true
         fi
     fi
