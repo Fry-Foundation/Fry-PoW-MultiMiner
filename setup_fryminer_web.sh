@@ -3264,11 +3264,31 @@ install_ore_cli() {
         return 0
     fi
 
+    # Architecture check - Solana CLI only supports x86_64 and ARM64
+    # ore-cli builds from source via Cargo (works on any Rust-supported arch)
+    # but Solana CLI is required and has limited platform support
+    case "$ARCH_TYPE" in
+        x86_64|arm64)
+            log "Architecture $ARCH_TYPE supported for ORE mining"
+            ;;
+        armv7|armv6)
+            warn "Solana CLI has limited ARM32 support - attempting build from source"
+            ;;
+        riscv64|ppc64|mips)
+            warn "Solana CLI does not officially support $ARCH_TYPE"
+            warn "Attempting build from source - this may fail"
+            ;;
+        *)
+            warn "Unknown architecture $ARCH_TYPE for ORE mining"
+            warn "Will attempt source build but success is not guaranteed"
+            ;;
+    esac
+
     # Install Rust if not present
     if ! command -v cargo >/dev/null 2>&1; then
-        log "Installing Rust toolchain..."
+        log "Installing Rust toolchain for $ARCH_TYPE..."
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y 2>&1 || {
-            warn "Rust installation failed"
+            warn "Rust installation failed on $ARCH_TYPE"
             return 1
         }
         # Source cargo environment
@@ -3282,13 +3302,42 @@ install_ore_cli() {
 
     # Install Solana CLI if not present
     if ! command -v solana >/dev/null 2>&1; then
-        log "Installing Solana CLI..."
-        sh -c "$(curl -sSfL https://release.solana.com/stable/install)" 2>&1 || {
-            warn "Solana CLI installation failed"
-            return 1
-        }
+        log "Installing Solana CLI for $ARCH_TYPE..."
+
+        case "$ARCH_TYPE" in
+            x86_64)
+                # Official prebuilt binary
+                sh -c "$(curl -sSfL https://release.solana.com/stable/install)" 2>&1 || {
+                    warn "Solana CLI prebuilt install failed, trying cargo build..."
+                    cargo install solana-cli 2>&1 || {
+                        warn "Solana CLI installation failed on x86_64"
+                        return 1
+                    }
+                }
+                ;;
+            arm64)
+                # ARM64 prebuilt or source
+                sh -c "$(curl -sSfL https://release.solana.com/stable/install)" 2>&1 || {
+                    warn "Solana CLI prebuilt install failed on ARM64, trying cargo build..."
+                    cargo install solana-cli 2>&1 || {
+                        warn "Solana CLI installation failed on ARM64"
+                        return 1
+                    }
+                }
+                ;;
+            armv7|armv6|riscv64|ppc64|mips|*)
+                # No prebuilt binary - must build from source via cargo
+                log "No prebuilt Solana CLI for $ARCH_TYPE - building from source (this will take a long time)..."
+                cargo install solana-cli 2>&1 || {
+                    warn "Solana CLI source build failed on $ARCH_TYPE"
+                    warn "ORE mining requires Solana CLI which may not support this architecture"
+                    return 1
+                }
+                ;;
+        esac
+
         # Add solana to PATH
-        export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+        export PATH="$HOME/.local/share/solana/install/active_release/bin:$HOME/.cargo/bin:$PATH"
     fi
     log "Solana CLI available: $(solana --version 2>/dev/null || echo 'not found')"
 
@@ -3299,14 +3348,16 @@ install_ore_cli() {
         yum install -y openssl-devel pkgconfig 2>/dev/null || true
     elif command -v pacman >/dev/null 2>&1; then
         pacman -Sy --noconfirm openssl pkg-config 2>/dev/null || true
+    elif command -v apk >/dev/null 2>&1; then
+        apk add openssl-dev pkgconfig 2>/dev/null || true
     fi
 
-    # Install ore-cli via cargo
-    log "Building ore-cli from crates.io (this may take several minutes)..."
+    # Install ore-cli via cargo (builds from source - works on any Rust-supported arch)
+    log "Building ore-cli from crates.io for $ARCH_TYPE (this may take several minutes)..."
     cargo install ore-cli 2>&1 || {
         warn "ore-cli cargo install failed, trying from GitHub source..."
         cargo install --git https://github.com/regolith-labs/ore-cli.git 2>&1 || {
-            warn "ore-cli installation failed from all sources"
+            warn "ore-cli installation failed from all sources on $ARCH_TYPE"
             return 1
         }
     }
@@ -3327,10 +3378,10 @@ install_ore_cli() {
     fi
 
     if command -v ore >/dev/null 2>&1 || [ -x /usr/local/bin/ore ]; then
-        log "✅ ore-cli installed successfully"
+        log "✅ ore-cli installed successfully on $ARCH_TYPE"
         return 0
     else
-        warn "ore-cli binary not found after installation"
+        warn "ore-cli binary not found after installation on $ARCH_TYPE"
         return 1
     fi
 }
@@ -3342,54 +3393,142 @@ install_ore_cli() {
 install_ora_miner() {
     log "=== Installing Oranges (ORA) miner ==="
 
+    # Architecture check - Algorand provides prebuilt binaries for x86_64 and ARM64
+    # For other architectures, the updater script auto-detects and attempts to build
+    # The ORA mining script itself is pure POSIX shell and runs on any architecture
+    case "$ARCH_TYPE" in
+        x86_64|arm64)
+            log "Architecture $ARCH_TYPE fully supported for Algorand/ORA"
+            ;;
+        armv7)
+            log "ARMv7 has community support for Algorand - attempting install"
+            ;;
+        armv6|armv5)
+            warn "Algorand node has limited support on $ARCH_TYPE"
+            warn "ORA mining will use API-only mode (no local goal CLI)"
+            ;;
+        riscv64|ppc64|mips)
+            warn "Algorand node not officially supported on $ARCH_TYPE"
+            warn "ORA mining will use API-only mode (requires external Algorand node)"
+            ;;
+        *)
+            warn "Unknown architecture $ARCH_TYPE for Algorand"
+            warn "Will attempt install but may fall back to API-only mode"
+            ;;
+    esac
+
     # Check if goal CLI is already available
     if command -v goal >/dev/null 2>&1; then
         log "Algorand goal CLI already installed"
     else
-        log "Installing Algorand node (goal CLI)..."
+        log "Installing Algorand node (goal CLI) for $ARCH_TYPE..."
 
-        # Try official Algorand updater first
-        if command -v apt-get >/dev/null 2>&1; then
-            # Debian/Ubuntu - use official Algorand repository
-            log "Adding Algorand APT repository..."
-            curl -o - https://releases.algorand.com/key.pub 2>/dev/null | apt-key add - 2>/dev/null || true
-            if [ -f /etc/lsb-release ]; then
-                . /etc/lsb-release
-                DISTRO_CODENAME="$DISTRIB_CODENAME"
-            elif [ -f /etc/os-release ]; then
-                . /etc/os-release
-                DISTRO_CODENAME="$VERSION_CODENAME"
-            fi
-            [ -z "$DISTRO_CODENAME" ] && DISTRO_CODENAME="stable"
-            echo "deb [arch=$(dpkg --print-architecture)] https://releases.algorand.com/deb/ $DISTRO_CODENAME main" > /etc/apt/sources.list.d/algorand.list 2>/dev/null || true
-            apt-get update 2>/dev/null || true
-            apt-get install -y algorand 2>/dev/null || {
-                warn "APT install failed, trying binary download..."
-            }
+        GOAL_INSTALLED=false
+
+        # Method 1: Official APT repository (Debian/Ubuntu - x86_64 and ARM64)
+        if [ "$GOAL_INSTALLED" = "false" ] && command -v apt-get >/dev/null 2>&1; then
+            case "$ARCH_TYPE" in
+                x86_64|arm64)
+                    log "Trying Algorand APT repository for $ARCH_TYPE..."
+                    curl -o - https://releases.algorand.com/key.pub 2>/dev/null | apt-key add - 2>/dev/null || true
+                    if [ -f /etc/lsb-release ]; then
+                        . /etc/lsb-release
+                        DISTRO_CODENAME="$DISTRIB_CODENAME"
+                    elif [ -f /etc/os-release ]; then
+                        . /etc/os-release
+                        DISTRO_CODENAME="$VERSION_CODENAME"
+                    fi
+                    [ -z "$DISTRO_CODENAME" ] && DISTRO_CODENAME="stable"
+                    echo "deb [arch=$(dpkg --print-architecture)] https://releases.algorand.com/deb/ $DISTRO_CODENAME main" > /etc/apt/sources.list.d/algorand.list 2>/dev/null || true
+                    apt-get update 2>/dev/null || true
+                    if apt-get install -y algorand 2>/dev/null; then
+                        GOAL_INSTALLED=true
+                    else
+                        warn "APT install failed for $ARCH_TYPE"
+                    fi
+                    ;;
+                *)
+                    log "Skipping APT repository (no packages for $ARCH_TYPE)"
+                    ;;
+            esac
         fi
 
-        # Fallback: download updater script
-        if ! command -v goal >/dev/null 2>&1; then
-            log "Downloading Algorand updater..."
+        # Method 2: Official YUM/DNF repository (RHEL/Fedora - x86_64)
+        if [ "$GOAL_INSTALLED" = "false" ] && command -v yum >/dev/null 2>&1; then
+            case "$ARCH_TYPE" in
+                x86_64)
+                    log "Trying Algorand YUM repository for x86_64..."
+                    cat > /etc/yum.repos.d/algorand.repo <<'YUMREPO'
+[algorand]
+name=Algorand Stable
+baseurl=https://releases.algorand.com/rpm/stable/
+enabled=1
+gpgcheck=0
+YUMREPO
+                    if yum install -y algorand 2>/dev/null; then
+                        GOAL_INSTALLED=true
+                    fi
+                    ;;
+            esac
+        fi
+
+        # Method 3: Algorand updater script (supports x86_64, ARM64, ARMv7 via auto-detection)
+        if [ "$GOAL_INSTALLED" = "false" ]; then
+            log "Trying Algorand updater script for $ARCH_TYPE..."
             ALGO_DIR="/opt/miners/algorand"
             mkdir -p "$ALGO_DIR"
             cd "$ALGO_DIR"
             curl -sSfL https://raw.githubusercontent.com/algorand/go-algorand/rel/stable/cmd/updater/update.sh -o update.sh 2>/dev/null && {
                 chmod 755 update.sh
-                ./update.sh -i -c stable -p "$ALGO_DIR" -d "$ALGO_DIR/data" -n 2>&1 || true
+                # The updater auto-detects architecture and downloads appropriate binary
+                if ./update.sh -i -c stable -p "$ALGO_DIR" -d "$ALGO_DIR/data" -n 2>&1; then
+                    GOAL_INSTALLED=true
+                else
+                    warn "Algorand updater failed for $ARCH_TYPE"
+                fi
             }
             # Add to PATH
             if [ -x "$ALGO_DIR/goal" ]; then
                 ln -sf "$ALGO_DIR/goal" /usr/local/bin/goal 2>/dev/null || true
                 ln -sf "$ALGO_DIR/algod" /usr/local/bin/algod 2>/dev/null || true
                 ln -sf "$ALGO_DIR/kmd" /usr/local/bin/kmd 2>/dev/null || true
+                GOAL_INSTALLED=true
             fi
             cd /
+        fi
+
+        # Method 4: Build from source via Go (any architecture with Go support)
+        if [ "$GOAL_INSTALLED" = "false" ]; then
+            log "Attempting to build Algorand from source for $ARCH_TYPE..."
+            if command -v go >/dev/null 2>&1; then
+                ALGO_DIR="/opt/miners/algorand"
+                mkdir -p "$ALGO_DIR"
+                cd "$ALGO_DIR"
+                if git clone --depth 1 --branch rel/stable https://github.com/algorand/go-algorand.git 2>&1; then
+                    cd go-algorand
+                    if make install 2>&1; then
+                        GOAL_INSTALLED=true
+                        log "Built Algorand from source for $ARCH_TYPE"
+                    else
+                        warn "Go source build failed for $ARCH_TYPE"
+                    fi
+                    cd /
+                fi
+            else
+                warn "Go not installed - cannot build Algorand from source"
+                warn "On $ARCH_TYPE, install Go first: apt-get install golang-go"
+            fi
+        fi
+
+        if [ "$GOAL_INSTALLED" = "false" ]; then
+            warn "Could not install Algorand goal CLI on $ARCH_TYPE"
+            warn "ORA mining will use API-only mode (requires external Algorand node URL)"
         fi
     fi
 
     # Create ORA mining script that submits juice transactions
-    log "Creating ORA mining script..."
+    # This script is pure POSIX shell and works on ANY architecture
+    log "Creating ORA mining script (portable shell - all architectures)..."
     mkdir -p /opt/frynet-config/scripts
 
     cat > /opt/frynet-config/scripts/ora_miner.sh <<'ORAMINER'
@@ -3468,12 +3607,16 @@ ORAMINER
 
     chmod 755 /opt/frynet-config/scripts/ora_miner.sh
 
-    if command -v goal >/dev/null 2>&1 || [ -x /opt/frynet-config/scripts/ora_miner.sh ]; then
-        log "✅ ORA miner installed successfully"
-        [ ! command -v goal >/dev/null 2>&1 ] && warn "Note: Algorand goal CLI not found - ORA mining will use API fallback mode"
+    if [ -x /opt/frynet-config/scripts/ora_miner.sh ]; then
+        if command -v goal >/dev/null 2>&1; then
+            log "✅ ORA miner installed successfully on $ARCH_TYPE (with goal CLI)"
+        else
+            log "✅ ORA miner installed on $ARCH_TYPE (API-only mode - no local goal CLI)"
+            warn "Note: Without goal CLI, ORA mining requires a reachable Algorand node URL"
+        fi
         return 0
     else
-        warn "ORA miner installation failed"
+        warn "ORA miner installation failed on $ARCH_TYPE"
         return 1
     fi
 }
