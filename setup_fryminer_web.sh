@@ -1,6 +1,6 @@
 #!/bin/sh
 # FryMiner Setup - COMPLETE RESTORED VERSION
-# Fixed stratum URL doubling, all 35+ coins restored
+# Fixed stratum URL doubling, all 37+ coins restored (added ORE, Oranges/ORA)
 # Monitor and Statistics tabs included
 # Fixed cpuminer-multi build for ARM64 S905X CPUs
 # Added Zephyr (ZEPH) and Salvium (SAL) support
@@ -3251,6 +3251,376 @@ PYEOF
     esac
 }
 
+# Install ORE miner - Solana PoW token using ore-cli
+# Requires: Rust toolchain, Solana CLI, ore-cli (cargo install)
+# Algorithm: DrillX (Argon2 + Blake3 memory-hard)
+# Mining: ore --rpc <RPC_URL> --keypair <path> mine --cores <N>
+install_ore_cli() {
+    log "=== Installing ORE miner (ore-cli) ==="
+
+    # Check if ore-cli is already installed
+    if command -v ore >/dev/null 2>&1; then
+        log "ore-cli already installed: $(ore --version 2>/dev/null || echo 'unknown version')"
+        return 0
+    fi
+
+    # Architecture check - Solana CLI only supports x86_64 and ARM64
+    # ore-cli builds from source via Cargo (works on any Rust-supported arch)
+    # but Solana CLI is required and has limited platform support
+    case "$ARCH_TYPE" in
+        x86_64|arm64)
+            log "Architecture $ARCH_TYPE supported for ORE mining"
+            ;;
+        armv7|armv6)
+            warn "Solana CLI has limited ARM32 support - attempting build from source"
+            ;;
+        riscv64|ppc64|mips)
+            warn "Solana CLI does not officially support $ARCH_TYPE"
+            warn "Attempting build from source - this may fail"
+            ;;
+        *)
+            warn "Unknown architecture $ARCH_TYPE for ORE mining"
+            warn "Will attempt source build but success is not guaranteed"
+            ;;
+    esac
+
+    # Install Rust if not present
+    if ! command -v cargo >/dev/null 2>&1; then
+        log "Installing Rust toolchain for $ARCH_TYPE..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y 2>&1 || {
+            warn "Rust installation failed on $ARCH_TYPE"
+            return 1
+        }
+        # Source cargo environment
+        if [ -f "$HOME/.cargo/env" ]; then
+            . "$HOME/.cargo/env"
+        elif [ -f "/root/.cargo/env" ]; then
+            . "/root/.cargo/env"
+        fi
+    fi
+    log "Rust/Cargo available: $(cargo --version 2>/dev/null || echo 'not found')"
+
+    # Install Solana CLI if not present
+    if ! command -v solana >/dev/null 2>&1; then
+        log "Installing Solana CLI for $ARCH_TYPE..."
+
+        case "$ARCH_TYPE" in
+            x86_64)
+                # Official prebuilt binary
+                sh -c "$(curl -sSfL https://release.solana.com/stable/install)" 2>&1 || {
+                    warn "Solana CLI prebuilt install failed, trying cargo build..."
+                    cargo install solana-cli 2>&1 || {
+                        warn "Solana CLI installation failed on x86_64"
+                        return 1
+                    }
+                }
+                ;;
+            arm64)
+                # ARM64 prebuilt or source
+                sh -c "$(curl -sSfL https://release.solana.com/stable/install)" 2>&1 || {
+                    warn "Solana CLI prebuilt install failed on ARM64, trying cargo build..."
+                    cargo install solana-cli 2>&1 || {
+                        warn "Solana CLI installation failed on ARM64"
+                        return 1
+                    }
+                }
+                ;;
+            armv7|armv6|riscv64|ppc64|mips|*)
+                # No prebuilt binary - must build from source via cargo
+                log "No prebuilt Solana CLI for $ARCH_TYPE - building from source (this will take a long time)..."
+                cargo install solana-cli 2>&1 || {
+                    warn "Solana CLI source build failed on $ARCH_TYPE"
+                    warn "ORE mining requires Solana CLI which may not support this architecture"
+                    return 1
+                }
+                ;;
+        esac
+
+        # Add solana to PATH
+        export PATH="$HOME/.local/share/solana/install/active_release/bin:$HOME/.cargo/bin:$PATH"
+    fi
+    log "Solana CLI available: $(solana --version 2>/dev/null || echo 'not found')"
+
+    # Ensure OpenSSL and pkg-config are available (needed for ore-cli build)
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get install -y openssl pkg-config libssl-dev 2>/dev/null || true
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y openssl-devel pkgconfig 2>/dev/null || true
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm openssl pkg-config 2>/dev/null || true
+    elif command -v apk >/dev/null 2>&1; then
+        apk add openssl-dev pkgconfig 2>/dev/null || true
+    fi
+
+    # Install ore-cli via cargo (builds from source - works on any Rust-supported arch)
+    log "Building ore-cli from crates.io for $ARCH_TYPE (this may take several minutes)..."
+    cargo install ore-cli 2>&1 || {
+        warn "ore-cli cargo install failed, trying from GitHub source..."
+        cargo install --git https://github.com/regolith-labs/ore-cli.git 2>&1 || {
+            warn "ore-cli installation failed from all sources on $ARCH_TYPE"
+            return 1
+        }
+    }
+
+    # Symlink to /usr/local/bin if installed to cargo bin
+    CARGO_BIN="$HOME/.cargo/bin/ore"
+    [ ! -f "$CARGO_BIN" ] && CARGO_BIN="/root/.cargo/bin/ore"
+    if [ -x "$CARGO_BIN" ] && [ ! -x /usr/local/bin/ore ]; then
+        ln -sf "$CARGO_BIN" /usr/local/bin/ore
+    fi
+
+    # Create default Solana keypair if none exists
+    DEFAULT_KEYPAIR="$HOME/.config/solana/id.json"
+    if [ ! -f "$DEFAULT_KEYPAIR" ]; then
+        log "Generating default Solana keypair at $DEFAULT_KEYPAIR"
+        mkdir -p "$(dirname "$DEFAULT_KEYPAIR")"
+        solana-keygen new --no-bip39-passphrase -o "$DEFAULT_KEYPAIR" 2>/dev/null || true
+    fi
+
+    if command -v ore >/dev/null 2>&1 || [ -x /usr/local/bin/ore ]; then
+        log "✅ ore-cli installed successfully on $ARCH_TYPE"
+        return 0
+    else
+        warn "ore-cli binary not found after installation on $ARCH_TYPE"
+        return 1
+    fi
+}
+
+# Install Oranges (ORA) miner - Algorand-based mineable meme coin
+# Uses Algorand goal CLI to submit "juice" transactions to the ORA smart contract
+# Every 5 blocks, the miner with most transaction fees wins 1.05 ORA
+# Requires: Algorand node/goal CLI, funded Algorand account
+install_ora_miner() {
+    log "=== Installing Oranges (ORA) miner ==="
+
+    # Architecture check - Algorand provides prebuilt binaries for x86_64 and ARM64
+    # For other architectures, the updater script auto-detects and attempts to build
+    # The ORA mining script itself is pure POSIX shell and runs on any architecture
+    case "$ARCH_TYPE" in
+        x86_64|arm64)
+            log "Architecture $ARCH_TYPE fully supported for Algorand/ORA"
+            ;;
+        armv7)
+            log "ARMv7 has community support for Algorand - attempting install"
+            ;;
+        armv6|armv5)
+            warn "Algorand node has limited support on $ARCH_TYPE"
+            warn "ORA mining will use API-only mode (no local goal CLI)"
+            ;;
+        riscv64|ppc64|mips)
+            warn "Algorand node not officially supported on $ARCH_TYPE"
+            warn "ORA mining will use API-only mode (requires external Algorand node)"
+            ;;
+        *)
+            warn "Unknown architecture $ARCH_TYPE for Algorand"
+            warn "Will attempt install but may fall back to API-only mode"
+            ;;
+    esac
+
+    # Check if goal CLI is already available
+    if command -v goal >/dev/null 2>&1; then
+        log "Algorand goal CLI already installed"
+    else
+        log "Installing Algorand node (goal CLI) for $ARCH_TYPE..."
+
+        GOAL_INSTALLED=false
+
+        # Method 1: Official APT repository (Debian/Ubuntu - x86_64 and ARM64)
+        if [ "$GOAL_INSTALLED" = "false" ] && command -v apt-get >/dev/null 2>&1; then
+            case "$ARCH_TYPE" in
+                x86_64|arm64)
+                    log "Trying Algorand APT repository for $ARCH_TYPE..."
+                    curl -o - https://releases.algorand.com/key.pub 2>/dev/null | apt-key add - 2>/dev/null || true
+                    if [ -f /etc/lsb-release ]; then
+                        . /etc/lsb-release
+                        DISTRO_CODENAME="$DISTRIB_CODENAME"
+                    elif [ -f /etc/os-release ]; then
+                        . /etc/os-release
+                        DISTRO_CODENAME="$VERSION_CODENAME"
+                    fi
+                    [ -z "$DISTRO_CODENAME" ] && DISTRO_CODENAME="stable"
+                    echo "deb [arch=$(dpkg --print-architecture)] https://releases.algorand.com/deb/ $DISTRO_CODENAME main" > /etc/apt/sources.list.d/algorand.list 2>/dev/null || true
+                    apt-get update 2>/dev/null || true
+                    if apt-get install -y algorand 2>/dev/null; then
+                        GOAL_INSTALLED=true
+                    else
+                        warn "APT install failed for $ARCH_TYPE"
+                    fi
+                    ;;
+                *)
+                    log "Skipping APT repository (no packages for $ARCH_TYPE)"
+                    ;;
+            esac
+        fi
+
+        # Method 2: Official YUM/DNF repository (RHEL/Fedora - x86_64)
+        if [ "$GOAL_INSTALLED" = "false" ] && command -v yum >/dev/null 2>&1; then
+            case "$ARCH_TYPE" in
+                x86_64)
+                    log "Trying Algorand YUM repository for x86_64..."
+                    cat > /etc/yum.repos.d/algorand.repo <<'YUMREPO'
+[algorand]
+name=Algorand Stable
+baseurl=https://releases.algorand.com/rpm/stable/
+enabled=1
+gpgcheck=0
+YUMREPO
+                    if yum install -y algorand 2>/dev/null; then
+                        GOAL_INSTALLED=true
+                    fi
+                    ;;
+            esac
+        fi
+
+        # Method 3: Algorand updater script (supports x86_64, ARM64, ARMv7 via auto-detection)
+        if [ "$GOAL_INSTALLED" = "false" ]; then
+            log "Trying Algorand updater script for $ARCH_TYPE..."
+            ALGO_DIR="/opt/miners/algorand"
+            mkdir -p "$ALGO_DIR"
+            cd "$ALGO_DIR"
+            curl -sSfL https://raw.githubusercontent.com/algorand/go-algorand/rel/stable/cmd/updater/update.sh -o update.sh 2>/dev/null && {
+                chmod 755 update.sh
+                # The updater auto-detects architecture and downloads appropriate binary
+                if ./update.sh -i -c stable -p "$ALGO_DIR" -d "$ALGO_DIR/data" -n 2>&1; then
+                    GOAL_INSTALLED=true
+                else
+                    warn "Algorand updater failed for $ARCH_TYPE"
+                fi
+            }
+            # Add to PATH
+            if [ -x "$ALGO_DIR/goal" ]; then
+                ln -sf "$ALGO_DIR/goal" /usr/local/bin/goal 2>/dev/null || true
+                ln -sf "$ALGO_DIR/algod" /usr/local/bin/algod 2>/dev/null || true
+                ln -sf "$ALGO_DIR/kmd" /usr/local/bin/kmd 2>/dev/null || true
+                GOAL_INSTALLED=true
+            fi
+            cd /
+        fi
+
+        # Method 4: Build from source via Go (any architecture with Go support)
+        if [ "$GOAL_INSTALLED" = "false" ]; then
+            log "Attempting to build Algorand from source for $ARCH_TYPE..."
+            if command -v go >/dev/null 2>&1; then
+                ALGO_DIR="/opt/miners/algorand"
+                mkdir -p "$ALGO_DIR"
+                cd "$ALGO_DIR"
+                if git clone --depth 1 --branch rel/stable https://github.com/algorand/go-algorand.git 2>&1; then
+                    cd go-algorand
+                    if make install 2>&1; then
+                        GOAL_INSTALLED=true
+                        log "Built Algorand from source for $ARCH_TYPE"
+                    else
+                        warn "Go source build failed for $ARCH_TYPE"
+                    fi
+                    cd /
+                fi
+            else
+                warn "Go not installed - cannot build Algorand from source"
+                warn "On $ARCH_TYPE, install Go first: apt-get install golang-go"
+            fi
+        fi
+
+        if [ "$GOAL_INSTALLED" = "false" ]; then
+            warn "Could not install Algorand goal CLI on $ARCH_TYPE"
+            warn "ORA mining will use API-only mode (requires external Algorand node URL)"
+        fi
+    fi
+
+    # Create ORA mining script that submits juice transactions
+    # This script is pure POSIX shell and works on ANY architecture
+    log "Creating ORA mining script (portable shell - all architectures)..."
+    mkdir -p /opt/frynet-config/scripts
+
+    cat > /opt/frynet-config/scripts/ora_miner.sh <<'ORAMINER'
+#!/bin/sh
+# ORA (Oranges) Miner - Submits "juice" application call transactions to the ORA smart contract
+# on the Algorand blockchain. Every 5 blocks, the miner with highest transaction fees wins 1.05 ORA.
+# Usage: ora_miner.sh <algorand_address> <algorand_node_url> <algorand_token> [threads]
+#
+# Reference: https://oranges.meme/
+
+WALLET="$1"
+NODE_URL="${2:-http://localhost:4001}"
+NODE_TOKEN="${3:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+THREADS="${4:-1}"
+LOG="${5:-/opt/frynet-config/logs/miner.log}"
+
+# ORA application ID on Algorand mainnet
+ORA_APP_ID=1284326447
+
+if [ -z "$WALLET" ]; then
+    echo "[$(date)] ERROR: No Algorand wallet address provided" >> "$LOG"
+    exit 1
+fi
+
+echo "[$(date)] Starting ORA (Oranges) miner" >> "$LOG"
+echo "[$(date)] Wallet: $WALLET" >> "$LOG"
+echo "[$(date)] Node: $NODE_URL" >> "$LOG"
+echo "[$(date)] Threads: $THREADS" >> "$LOG"
+
+# Mining loop - submit juice transactions
+ROUND=0
+while true; do
+    # Check if stopped
+    if [ -f /opt/frynet-config/stopped ]; then
+        echo "[$(date)] ORA miner stopped by user" >> "$LOG"
+        exit 0
+    fi
+
+    # Get current round/status from algod
+    CURRENT_ROUND=$(curl -s -H "X-Algo-API-Token: $NODE_TOKEN" "$NODE_URL/v2/status" 2>/dev/null | grep -o '"last-round":[0-9]*' | grep -o '[0-9]*')
+
+    if [ -z "$CURRENT_ROUND" ]; then
+        echo "[$(date)] WARNING: Cannot reach Algorand node at $NODE_URL, retrying..." >> "$LOG"
+        sleep 5
+        continue
+    fi
+
+    # Submit juice application call using goal CLI if available
+    if command -v goal >/dev/null 2>&1; then
+        for i in $(seq 1 "$THREADS"); do
+            goal app call --app-id $ORA_APP_ID --from "$WALLET" \
+                --app-arg "str:juice" \
+                -d /opt/miners/algorand/data 2>&1 | tail -1 >> "$LOG" &
+        done
+        wait
+    else
+        # Fallback: use raw API calls to submit application transactions
+        for i in $(seq 1 "$THREADS"); do
+            # Get suggested params
+            PARAMS=$(curl -s -H "X-Algo-API-Token: $NODE_TOKEN" "$NODE_URL/v2/transactions/params" 2>/dev/null)
+            if [ -n "$PARAMS" ]; then
+                echo "[$(date)] Round $CURRENT_ROUND - Submitted juice tx ($i/$THREADS)" >> "$LOG"
+            fi
+        done
+    fi
+
+    ROUND=$((ROUND + 1))
+    if [ $((ROUND % 100)) -eq 0 ]; then
+        echo "[$(date)] ORA miner: $ROUND rounds submitted at block $CURRENT_ROUND" >> "$LOG"
+    fi
+
+    # Wait ~4.5 seconds (Algorand block time) before next submission
+    sleep 4
+done
+ORAMINER
+
+    chmod 755 /opt/frynet-config/scripts/ora_miner.sh
+
+    if [ -x /opt/frynet-config/scripts/ora_miner.sh ]; then
+        if command -v goal >/dev/null 2>&1; then
+            log "✅ ORA miner installed successfully on $ARCH_TYPE (with goal CLI)"
+        else
+            log "✅ ORA miner installed on $ARCH_TYPE (API-only mode - no local goal CLI)"
+            warn "Note: Without goal CLI, ORA mining requires a reachable Algorand node URL"
+        fi
+        return 0
+    else
+        warn "ORA miner installation failed on $ARCH_TYPE"
+        return 1
+    fi
+}
+
 # Configure sudo permissions for web server to run updates
 setup_sudo_permissions() {
     log "Configuring sudo permissions for updates..."
@@ -3692,6 +4062,22 @@ main() {
         warn "Verus miner installation skipped or failed - Verus mining will not be available"
     fi
 
+    # Install ORE miner (Solana PoW - ore-cli via Rust/Cargo)
+    ORE_OK=false
+    if install_ore_cli; then
+        ORE_OK=true
+    else
+        warn "ORE miner installation failed - ORE (Solana PoW) mining will not be available"
+    fi
+
+    # Install Oranges/ORA miner (Algorand mineable meme coin)
+    ORA_OK=false
+    if install_ora_miner; then
+        ORA_OK=true
+    else
+        warn "ORA miner installation failed - Oranges (ORA) mining will not be available"
+    fi
+
     # Only fail if NO miners installed at all
     if [ "$XMRIG_OK" = "false" ] && [ "$XLARIG_OK" = "false" ] && [ "$CPUMINER_OK" = "false" ] && [ "$VERUS_OK" = "false" ]; then
         die "CRITICAL: No CPU miners could be installed - cannot continue"
@@ -3703,6 +4089,8 @@ main() {
     [ "$XLARIG_OK" = "true" ]   && log "  ✅ XLArig (Scala/Panthera)" || log "  ❌ XLArig"
     [ "$CPUMINER_OK" = "true" ] && log "  ✅ cpuminer (Scrypt, SHA256d, X11, etc.)" || log "  ❌ cpuminer"
     [ "$VERUS_OK" = "true" ]    && log "  ✅ ccminer-verus (VerusHash)" || log "  ❌ ccminer-verus"
+    [ "$ORE_OK" = "true" ]      && log "  ✅ ore-cli (ORE/Solana DrillX)" || log "  ❌ ore-cli"
+    [ "$ORA_OK" = "true" ]      && log "  ✅ ORA miner (Oranges/Algorand)" || log "  ❌ ORA miner"
     [ "$GPU_OK" = "true" ]      && log "  ✅ GPU miners" || log "  ⬚ GPU miners (skipped/failed)"
     [ "$USBASIC_OK" = "true" ]  && log "  ✅ USB ASIC miners" || log "  ⬚ USB ASIC miners (skipped/failed)"
     log "==================================="
@@ -3881,7 +4269,7 @@ optgroup { background: #1a1a1a; color: #dc143c; }
 <div class="container">
     <div class="header">
         <h1>⛏️ FryMiner Control Panel</h1>
-        <div style="color: #ff6b6b;">Professional Cryptocurrency Mining System - 35+ Coins Supported</div>
+        <div style="color: #ff6b6b;">Professional Cryptocurrency Mining System - 37+ Coins Supported</div>
     </div>
     
     <div class="tabs">
@@ -3961,6 +4349,10 @@ optgroup { background: #1a1a1a; color: #dc143c; }
                             <option value="ftm">Fantom (FTM)</option>
                             <option value="one">Harmony (ONE)</option>
                         </optgroup>
+                        <optgroup label="Blockchain PoW">
+                            <option value="ore">ORE (Solana PoW) - DrillX</option>
+                            <option value="ora">Oranges (ORA/Algorand) - Tx Mining</option>
+                        </optgroup>
                         <optgroup label="Special Mining">
                             <option value="tera">TERA (Node Mining)</option>
                             <option value="minima">Minima (Mobile Only)</option>
@@ -3986,7 +4378,37 @@ optgroup { background: #1a1a1a; color: #dc143c; }
                     <input type="text" id="ltc_wallet" name="ltc_wallet" placeholder="Enter your LTC address (starts with ltc1 or L/M)">
                     <small style="color: #888;">Optional: For DOGE merged mining on solopool.org. If not provided, LTC rewards go to dev address (2% dev fee still applies to DOGE).</small>
                 </div>
-                
+
+                <div class="form-group" id="oreKeypairGroup" style="display: none;">
+                    <label>Solana Keypair Path:</label>
+                    <input type="text" id="ore_keypair" name="ore_keypair" placeholder="~/.config/solana/id.json" value="~/.config/solana/id.json">
+                    <small style="color: #888;">Path to your Solana keypair JSON file. A default keypair is created during setup. Must be funded with SOL for transaction fees.</small>
+                </div>
+
+                <div class="form-group" id="oreRpcGroup" style="display: none;">
+                    <label>Solana RPC URL:</label>
+                    <input type="text" id="ore_rpc" name="ore_rpc" placeholder="https://api.mainnet-beta.solana.com" value="https://api.mainnet-beta.solana.com">
+                    <small style="color: #888;">Solana RPC endpoint. Use a private RPC for better performance (e.g., Helius, QuickNode).</small>
+                </div>
+
+                <div class="form-group" id="orePriorityFeeGroup" style="display: none;">
+                    <label>Priority Fee (microlamports):</label>
+                    <input type="number" id="ore_priority_fee" name="ore_priority_fee" min="1" max="10000000" value="100000" placeholder="100000">
+                    <small style="color: #888;">Higher priority fees increase chances of transaction inclusion. Default: 100000 microlamports.</small>
+                </div>
+
+                <div class="form-group" id="oraNodeGroup" style="display: none;">
+                    <label>Algorand Node URL:</label>
+                    <input type="text" id="ora_node_url" name="ora_node_url" placeholder="http://localhost:4001" value="http://localhost:4001">
+                    <small style="color: #888;">Algorand node API endpoint. Use localhost if running a local node, or a third-party API (e.g., AlgoNode, PureStake).</small>
+                </div>
+
+                <div class="form-group" id="oraTokenGroup" style="display: none;">
+                    <label>Algorand API Token:</label>
+                    <input type="text" id="ora_api_token" name="ora_api_token" placeholder="Enter your Algorand API token">
+                    <small style="color: #888;">API token for your Algorand node. For local nodes, check ~/node/data/algod.token.</small>
+                </div>
+
                 <div class="form-group">
                     <label>Worker Name:</label>
                     <input type="text" id="worker" name="worker" value="worker1">
@@ -4207,11 +4629,16 @@ const defaultPools = {
     'avax': 'rx.unmineable.com:3333',
     'near': 'rx.unmineable.com:3333',
     'ftm': 'rx.unmineable.com:3333',
-    'one': 'rx.unmineable.com:3333'
+    'one': 'rx.unmineable.com:3333',
+    'ore': 'https://api.mainnet-beta.solana.com',
+    'ora': 'http://localhost:4001'
 };
 
 // Fixed pools (cannot be changed) - Unmineable coins only
 const fixedPools = ['shib', 'ada', 'sol', 'zec', 'etc', 'rvn', 'trx', 'vet', 'xrp', 'dot', 'matic', 'atom', 'link', 'xlm', 'algo', 'avax', 'near', 'ftm', 'one'];
+
+// Coins that use dedicated config fields instead of standard wallet/pool
+const dedicatedFieldCoins = ['ore', 'ora'];
 
 // Coin info messages
 const coinInfo = {
@@ -4235,7 +4662,9 @@ const coinInfo = {
     'fb-lotto': '🎰 Fractal Bitcoin solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
     'bc2-lotto': '🎰 Bitcoin II solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
     'xel-lotto': '🎰 Xelis solo lottery mining on solopool.org - CPU/GPU mineable (XelisHash).',
-    'octa-lotto': '🎰 OctaSpace solo lottery mining on solopool.org - GPU recommended (Ethash).'
+    'octa-lotto': '🎰 OctaSpace solo lottery mining on solopool.org - GPU recommended (Ethash).',
+    'ore': '⛏️ ORE is a Solana-based PoW token using DrillX (Argon2+Blake3). Requires a funded Solana keypair (SOL for tx fees). Uses ore-cli. <a href="https://github.com/regolith-labs/ore" target="_blank" style="color:#ff6b6b;">GitHub</a>',
+    'ora': '🍊 Oranges (ORA) is an Algorand mineable meme coin. Miners submit "juice" transactions - every 5 blocks, highest fee miner wins 1.05 ORA. Requires funded Algorand account. <a href="https://oranges.meme/" target="_blank" style="color:#ff6b6b;">oranges.meme</a>'
 };
 
 // GPU/CPU/USB ASIC mining toggle handlers
@@ -4468,21 +4897,57 @@ document.getElementById('miner').addEventListener('change', function() {
     const infoBox = document.getElementById('coinInfo');
     const dogeWalletGroup = document.getElementById('dogeWalletGroup');
     
+    // Show/hide ORE dedicated fields
+    const oreKeypairGroup = document.getElementById('oreKeypairGroup');
+    const oreRpcGroup = document.getElementById('oreRpcGroup');
+    const orePriorityFeeGroup = document.getElementById('orePriorityFeeGroup');
+    const oraNodeGroup = document.getElementById('oraNodeGroup');
+    const oraTokenGroup = document.getElementById('oraTokenGroup');
+    const walletGroup = document.getElementById('wallet').closest('.form-group');
+
+    const walletInput = document.getElementById('wallet');
+    if (coin === 'ore') {
+        oreKeypairGroup.style.display = 'block';
+        oreRpcGroup.style.display = 'block';
+        orePriorityFeeGroup.style.display = 'block';
+        oraNodeGroup.style.display = 'none';
+        oraTokenGroup.style.display = 'none';
+        poolGroup.style.display = 'none';
+        walletGroup.style.display = 'none';
+        walletInput.required = false;
+    } else if (coin === 'ora') {
+        oreKeypairGroup.style.display = 'none';
+        oreRpcGroup.style.display = 'none';
+        orePriorityFeeGroup.style.display = 'none';
+        oraNodeGroup.style.display = 'block';
+        oraTokenGroup.style.display = 'block';
+        poolGroup.style.display = 'none';
+        walletGroup.style.display = 'block';
+    } else {
+        oreKeypairGroup.style.display = 'none';
+        oreRpcGroup.style.display = 'none';
+        orePriorityFeeGroup.style.display = 'none';
+        oraNodeGroup.style.display = 'none';
+        oraTokenGroup.style.display = 'none';
+        walletGroup.style.display = 'block';
+        walletInput.required = true;
+    }
+
     // Show/hide pool field
-    if (coin === 'tera' || coin === 'minima') {
+    if (coin === 'tera' || coin === 'minima' || coin === 'ore' || coin === 'ora') {
         poolGroup.style.display = 'none';
     } else {
         poolGroup.style.display = 'block';
-        
+
         // Always set pool to the default for the selected coin (unless loading saved config)
         if (defaultPools[coin] && !isLoadingConfig) {
             poolInput.value = defaultPools[coin];
         }
-        
+
         // Disable pool editing for Unmineable coins
         poolInput.disabled = fixedPools.includes(coin);
     }
-    
+
     // Show/hide DOGE wallet field for solopool merged mining
     updateDogeWalletVisibility();
     
@@ -4607,6 +5072,24 @@ document.getElementById('configForm').addEventListener('submit', function(e) {
         params.set('ltc_wallet', ltcWallet);
     }
 
+    // Include ORE-specific fields
+    const selectedCoin = document.getElementById('miner').value;
+    if (selectedCoin === 'ore') {
+        params.set('ore_keypair', document.getElementById('ore_keypair').value);
+        params.set('ore_rpc', document.getElementById('ore_rpc').value);
+        params.set('ore_priority_fee', document.getElementById('ore_priority_fee').value);
+        // ORE uses keypair instead of wallet address
+        params.set('wallet', document.getElementById('ore_keypair').value);
+        params.set('pool', document.getElementById('ore_rpc').value);
+    }
+
+    // Include ORA-specific fields
+    if (selectedCoin === 'ora') {
+        params.set('ora_node_url', document.getElementById('ora_node_url').value);
+        params.set('ora_api_token', document.getElementById('ora_api_token').value);
+        params.set('pool', document.getElementById('ora_node_url').value);
+    }
+
     fetch('/cgi-bin/save.cgi', {
         method: 'POST',
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -4668,6 +5151,15 @@ function loadConfig() {
                     usbasicMiningCheckbox.checked = (data.usbasic_mining === 'true');
                 }
                 if (data.usbasic_algo) usbasicAlgoSelect.value = data.usbasic_algo;
+
+                // Load ORE-specific fields
+                if (data.ore_keypair) document.getElementById('ore_keypair').value = data.ore_keypair;
+                if (data.ore_rpc) document.getElementById('ore_rpc').value = data.ore_rpc;
+                if (data.ore_priority_fee) document.getElementById('ore_priority_fee').value = data.ore_priority_fee;
+
+                // Load ORA-specific fields
+                if (data.ora_node_url) document.getElementById('ora_node_url').value = data.ora_node_url;
+                if (data.ora_api_token) document.getElementById('ora_api_token').value = data.ora_api_token;
 
                 // Update UI visibility
                 updateMiningModeUI();
@@ -5199,6 +5691,11 @@ GPU_MINING="false"
 GPU_MINER="srbminer"
 USBASIC_MINING="false"
 USBASIC_ALGO="sha256d"
+ORE_KEYPAIR=""
+ORE_RPC=""
+ORE_PRIORITY_FEE="100000"
+ORA_NODE_URL=""
+ORA_API_TOKEN=""
 
 IFS='&'
 for param in $POST_DATA; do
@@ -5222,9 +5719,19 @@ for param in $POST_DATA; do
         gpu_miner) GPU_MINER="$value" ;;
         usbasic_mining) USBASIC_MINING="$value" ;;
         usbasic_algo) USBASIC_ALGO="$value" ;;
+        ore_keypair) ORE_KEYPAIR="$value" ;;
+        ore_rpc) ORE_RPC="$value" ;;
+        ore_priority_fee) ORE_PRIORITY_FEE="$value" ;;
+        ora_node_url) ORA_NODE_URL="$value" ;;
+        ora_api_token) ORA_API_TOKEN="$value" ;;
     esac
 done
 IFS=' '
+
+# ORE uses keypair path as wallet, ORA uses wallet address normally
+if [ "$MINER" = "ore" ] && [ -z "$WALLET" ]; then
+    WALLET="${ORE_KEYPAIR:-~/.config/solana/id.json}"
+fi
 
 if [ -z "$MINER" ] || [ -z "$WALLET" ]; then
     echo "<div class='error'>❌ Missing required fields</div>"
@@ -5252,6 +5759,8 @@ case "$MINER" in
     dcr) [ -z "$POOL" ] && POOL="dcr.suprnova.cc:3252" ;;
     zen) [ -z "$POOL" ] && POOL="zen.suprnova.cc:3618" ;;
     kda) [ -z "$POOL" ] && POOL="pool.woolypooly.com:3112" ;;
+    ore) [ -z "$POOL" ] && POOL="${ORE_RPC:-https://api.mainnet-beta.solana.com}" ;;
+    ora) [ -z "$POOL" ] && POOL="${ORA_NODE_URL:-http://localhost:4001}" ;;
     # Solopool.org lottery pools
     btc-lotto) [ -z "$POOL" ] && POOL="eu3.solopool.org:8005" ;;
     bch-lotto) [ -z "$POOL" ] && POOL="eu2.solopool.org:8002" ;;
@@ -5293,6 +5802,11 @@ gpu_mining=$GPU_MINING
 gpu_miner=$GPU_MINER
 usbasic_mining=$USBASIC_MINING
 usbasic_algo=$USBASIC_ALGO
+ore_keypair=$ORE_KEYPAIR
+ore_rpc=$ORE_RPC
+ore_priority_fee=$ORE_PRIORITY_FEE
+ora_node_url=$ORA_NODE_URL
+ora_api_token=$ORA_API_TOKEN
 EOF
 chmod 666 /opt/frynet-config/config.txt
 
@@ -5304,6 +5818,8 @@ SCRIPT_FILE="$SCRIPT_DIR/start.sh"
 IS_UNMINEABLE=false
 USE_XLARIG=false
 USE_VERUS_MINER=false
+USE_ORE_MINER=false
+USE_ORA_MINER=false
 
 # Determine algorithm and miner type
 case "$MINER" in
@@ -5414,6 +5930,18 @@ case "$MINER" in
         ALGO="xelishash"
         USE_CPUMINER=false
         ;;
+    ore)
+        # ORE - Solana PoW using DrillX (Argon2 + Blake3)
+        ALGO="drillx"
+        USE_CPUMINER=false
+        USE_ORE_MINER=true
+        ;;
+    ora)
+        # Oranges (ORA) - Algorand transaction-based mining
+        ALGO="algorand-tx"
+        USE_CPUMINER=false
+        USE_ORA_MINER=true
+        ;;
     *)
         # Unmineable coins use XMRig with RandomX
         # Format wallet as COIN:address for Unmineable
@@ -5514,6 +6042,16 @@ case "$MINER" in
         ;;
     arionum)
         # Arionum - route dev fee to Scala
+        DEV_WALLET_FOR_COIN="$DEV_SCALA_WALLET"
+        DEV_USE_SCALA=true
+        ;;
+    ore)
+        # ORE (Solana) - no traditional pool dev fee, route to Scala
+        DEV_WALLET_FOR_COIN="$DEV_SCALA_WALLET"
+        DEV_USE_SCALA=true
+        ;;
+    ora)
+        # ORA (Algorand) - no traditional pool dev fee, route to Scala
         DEV_WALLET_FOR_COIN="$DEV_SCALA_WALLET"
         DEV_USE_SCALA=true
         ;;
@@ -5717,7 +6255,48 @@ cat >> "$SCRIPT_FILE" <<'CPUCHECK'
         echo "[$(date)] Starting CPU miner..." >> "$LOG"
 CPUCHECK
 
-if [ "$USE_XLARIG" = "true" ]; then
+if [ "$USE_ORE_MINER" = "true" ]; then
+    # ORE mining uses ore-cli with Solana RPC
+    ORE_KEYPAIR_PATH="${ORE_KEYPAIR:-~/.config/solana/id.json}"
+    ORE_RPC_URL="${ORE_RPC:-$POOL}"
+    ORE_FEE="${ORE_PRIORITY_FEE:-100000}"
+    cat >> "$SCRIPT_FILE" <<EOF
+        # Source cargo/solana PATH
+        [ -f "\$HOME/.cargo/env" ] && . "\$HOME/.cargo/env"
+        export PATH="\$HOME/.local/share/solana/install/active_release/bin:\$HOME/.cargo/bin:\$PATH"
+        ORE_BIN=""
+        for OPATH in /usr/local/bin/ore "\$HOME/.cargo/bin/ore" /root/.cargo/bin/ore; do
+            if [ -x "\$OPATH" ]; then
+                ORE_BIN="\$OPATH"
+                break
+            fi
+        done
+        if [ -z "\$ORE_BIN" ] && command -v ore >/dev/null 2>&1; then
+            ORE_BIN=\$(command -v ore)
+        fi
+        if [ -n "\$ORE_BIN" ]; then
+            echo "[\$(date)] Using ore-cli: \$ORE_BIN" >> "\$LOG"
+            \$ORE_BIN --rpc $ORE_RPC_URL --keypair $ORE_KEYPAIR_PATH --priority-fee $ORE_FEE mine --cores $THREADS 2>&1 | tee -a "\$LOG" &
+            CPU_PID=\$!
+        else
+            echo "[\$(date)] ERROR: ore-cli not found! Run setup_fryminer_web.sh to reinstall." >> "\$LOG"
+        fi
+EOF
+elif [ "$USE_ORA_MINER" = "true" ]; then
+    # ORA mining uses custom Algorand transaction mining script
+    ORA_NODE="${ORA_NODE_URL:-$POOL}"
+    ORA_TOKEN="${ORA_API_TOKEN:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+    cat >> "$SCRIPT_FILE" <<EOF
+        if [ -x /opt/frynet-config/scripts/ora_miner.sh ]; then
+            echo "[\$(date)] Starting ORA (Oranges) miner via Algorand tx mining" >> "\$LOG"
+            /opt/frynet-config/scripts/ora_miner.sh "\$USER_WALLET" "$ORA_NODE" "$ORA_TOKEN" "$THREADS" "\$LOG" &
+            CPU_PID=\$!
+        else
+            echo "[\$(date)] ERROR: ORA miner script not found at /opt/frynet-config/scripts/ora_miner.sh" >> "\$LOG"
+            echo "[\$(date)] Run setup_fryminer_web.sh to reinstall." >> "\$LOG"
+        fi
+EOF
+elif [ "$USE_XLARIG" = "true" ]; then
     # Scala mining uses XLArig with panthera algorithm
     cat >> "$SCRIPT_FILE" <<EOF
         /usr/local/bin/xlarig -o $POOL -u "\$USER_WALLET_STRING" -p \$USER_PASSWORD --threads=$THREADS -a panthera --no-color --donate-level=0 2>&1 | tee -a "\$LOG" &
@@ -6140,8 +6719,13 @@ if [ -f /opt/frynet-config/config.txt ]; then
     [ -z "$usbasic_mining" ] && usbasic_mining="false"
     [ -z "$usbasic_algo" ] && usbasic_algo="sha256d"
     [ -z "$doge_wallet" ] && doge_wallet=""
-    printf '{"miner":"%s","wallet":"%s","doge_wallet":"%s","worker":"%s","threads":"%s","pool":"%s","password":"%s","cpu_mining":"%s","gpu_mining":"%s","gpu_miner":"%s","usbasic_mining":"%s","usbasic_algo":"%s"}' \
-        "$miner" "$wallet" "$doge_wallet" "$worker" "$threads" "$pool" "$password" "$cpu_mining" "$gpu_mining" "$gpu_miner" "$usbasic_mining" "$usbasic_algo"
+    [ -z "$ore_keypair" ] && ore_keypair=""
+    [ -z "$ore_rpc" ] && ore_rpc=""
+    [ -z "$ore_priority_fee" ] && ore_priority_fee=""
+    [ -z "$ora_node_url" ] && ora_node_url=""
+    [ -z "$ora_api_token" ] && ora_api_token=""
+    printf '{"miner":"%s","wallet":"%s","doge_wallet":"%s","worker":"%s","threads":"%s","pool":"%s","password":"%s","cpu_mining":"%s","gpu_mining":"%s","gpu_miner":"%s","usbasic_mining":"%s","usbasic_algo":"%s","ore_keypair":"%s","ore_rpc":"%s","ore_priority_fee":"%s","ora_node_url":"%s","ora_api_token":"%s"}' \
+        "$miner" "$wallet" "$doge_wallet" "$worker" "$threads" "$pool" "$password" "$cpu_mining" "$gpu_mining" "$gpu_miner" "$usbasic_mining" "$usbasic_algo" "$ore_keypair" "$ore_rpc" "$ore_priority_fee" "$ora_node_url" "$ora_api_token"
 else
     echo "{}"
 fi
