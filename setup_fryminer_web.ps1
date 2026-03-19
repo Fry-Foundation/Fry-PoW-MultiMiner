@@ -3,13 +3,17 @@
 .SYNOPSIS
     FryMiner Setup - PowerShell Version for Windows
     Multi-cryptocurrency CPU miner with web interface
+    Synced with setup_fryminer_web.sh (source of truth)
 
 .DESCRIPTION
     This script sets up a multi-coin CPU mining environment on Windows with:
-    - Support for 35+ cryptocurrencies
-    - Web-based configuration interface
+    - Support for 37+ cryptocurrencies
+    - Web-based configuration interface with 4 tabs
     - Automatic 2% dev fee (49 min user / 1 min dev cycling)
-    - XMRig, XLArig, and cpuminer-multi support
+    - XMRig, XLArig, cpuminer-multi, ccminer-verus support
+    - ORE (Solana PoW) and ORA (Oranges/Algorand) support
+    - GPU mining via SRBMiner-Multi, lolMiner, T-Rex
+    - USB ASIC mining via BFGMiner
 
 .NOTES
     DEV FEE DISCLOSURE: FryMiner includes a 2% dev fee to support continued
@@ -30,15 +34,13 @@ param(
 
 # =============================================================================
 # DEV FEE CONFIGURATION (2%)
-# Dev fee is time-based: mines for dev wallet 2% of the time
-# Cycle: 49 minutes user -> 1 minute dev (repeating)
 # =============================================================================
 $Script:DEV_FEE_PERCENT = 2
 $Script:DEV_FEE_CYCLE_MINUTES = 50
 $Script:DEV_FEE_USER_MINUTES = 49
 $Script:DEV_FEE_DEV_MINUTES = 1
 
-# Dev wallet addresses by coin/algorithm type
+# Dev wallet addresses
 $Script:DevWallets = @{
     XMR = "Ssy2BnsAcJUVZZ2kTiywf61bvYjvPosXzaBcaft9RSvaNNKsFRkcKbaWjMotjATkSbSmeSdX2DAxc1XxpcdxUBGd41oCwwfetG"
     LTC = "ltc1qrdc0wqzs3cwuhxxzkq2khepec2l3c6uhd8l9jy"
@@ -122,22 +124,20 @@ function Get-SystemArchitecture {
 
 function Initialize-Directories {
     Write-Log "Creating directory structure..."
-
     $dirs = @(
         $Script:BASE,
         $Script:MINERS_DIR,
         "$Script:BASE\logs",
         "$Script:BASE\output",
         "$Script:BASE\cgi-bin",
-        "$Script:BASE\www"
+        "$Script:BASE\www",
+        "$Script:BASE\scripts"
     )
-
     foreach ($dir in $dirs) {
         if (-not (Test-Path $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
     }
-
     Write-Log "Directories created at $Script:BASE"
 }
 
@@ -147,26 +147,13 @@ function Initialize-Directories {
 
 function Install-Dependencies {
     Write-Log "Checking dependencies..."
-
-    # Check for Python (needed for web server)
     $python = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $python) {
-        $python = Get-Command python3 -ErrorAction SilentlyContinue
-    }
-
+    if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
     if (-not $python) {
         Write-Warning-Custom "Python not found. Please install Python 3.x from https://python.org"
-        Write-Warning-Custom "Make sure to check 'Add Python to PATH' during installation"
     } else {
         Write-Log "Python found: $($python.Source)"
     }
-
-    # Check for 7-Zip or built-in extraction
-    $7zip = Get-Command 7z -ErrorAction SilentlyContinue
-    if (-not $7zip) {
-        Write-Log "7-Zip not found, will use built-in extraction"
-    }
-
     Write-Log "Dependency check complete"
 }
 
@@ -176,23 +163,16 @@ function Install-Dependencies {
 
 function Set-MiningOptimizations {
     Write-Log "Applying mining optimizations..."
-
-    # Set process priority for mining
-    Write-Log "  Setting high performance power plan..."
     try {
-        $powerPlan = powercfg -getactivescheme
-        powercfg -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c 2>$null  # High Performance GUID
+        powercfg -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c 2>$null
         Write-Log "  Power plan set to High Performance"
     } catch {
         Write-Warning-Custom "  Could not set power plan"
     }
-
-    # Enable large pages privilege (requires admin)
     Write-Log "  Note: For best RandomX performance, enable 'Lock Pages in Memory' privilege"
-    Write-Log "  Run: secpol.msc -> Local Policies -> User Rights Assignment -> Lock pages in memory"
-
     Write-Log "Mining optimizations applied"
 }
+
 
 # =============================================================================
 # MINER INSTALLATION - XMRIG
@@ -200,10 +180,7 @@ function Set-MiningOptimizations {
 
 function Install-XMRig {
     Write-Log "=== Installing XMRig ==="
-
     $xmrigPath = "$Script:MINERS_DIR\xmrig.exe"
-
-    # Check if already installed and working
     if (Test-Path $xmrigPath) {
         try {
             $version = & $xmrigPath --version 2>&1 | Select-Object -First 1
@@ -213,37 +190,22 @@ function Install-XMRig {
             }
         } catch { }
     }
-
     $arch = Get-SystemArchitecture
-
-    Write-Log "Downloading XMRig for $arch..."
-
     $downloadUrl = switch ($arch) {
         "x86_64" { "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-msvc-win64.zip" }
         "x86" { "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-msvc-win32.zip" }
         default { "https://github.com/xmrig/xmrig/releases/download/v6.22.2/xmrig-6.22.2-msvc-win64.zip" }
     }
-
     $zipPath = "$Script:MINERS_DIR\xmrig.zip"
-
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
-
-        Write-Log "Extracting XMRig..."
         Expand-Archive -Path $zipPath -DestinationPath "$Script:MINERS_DIR\xmrig_temp" -Force
-
-        # Find and move the executable
         $exeFile = Get-ChildItem -Path "$Script:MINERS_DIR\xmrig_temp" -Recurse -Filter "xmrig.exe" | Select-Object -First 1
-        if ($exeFile) {
-            Move-Item -Path $exeFile.FullName -Destination $xmrigPath -Force
-            Write-Log "XMRig installed successfully"
-        }
-
-        # Cleanup
+        if ($exeFile) { Move-Item -Path $exeFile.FullName -Destination $xmrigPath -Force }
         Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
         Remove-Item -Path "$Script:MINERS_DIR\xmrig_temp" -Recurse -Force -ErrorAction SilentlyContinue
-
+        Write-Log "XMRig installed successfully"
         return $true
     } catch {
         Write-Error-Custom "Failed to install XMRig: $_"
@@ -257,48 +219,25 @@ function Install-XMRig {
 
 function Install-XLArig {
     Write-Log "=== Installing XLArig (Scala miner) ==="
-
     $xlarigPath = "$Script:MINERS_DIR\xlarig.exe"
-
-    # Check if already installed
     if (Test-Path $xlarigPath) {
         try {
             $version = & $xlarigPath --version 2>&1 | Select-Object -First 1
-            if ($version) {
-                Write-Log "XLArig already installed"
-                return $true
-            }
+            if ($version) { Write-Log "XLArig already installed"; return $true }
         } catch { }
     }
-
-    $arch = Get-SystemArchitecture
     $version = "5.2.4"
-
-    Write-Log "Downloading XLArig v$version..."
-
-    $downloadUrl = switch ($arch) {
-        "x86_64" { "https://github.com/scala-network/XLArig/releases/download/v$version/XLArig-v$version-win64.zip" }
-        default { "https://github.com/scala-network/XLArig/releases/download/v$version/XLArig-v$version-win64.zip" }
-    }
-
+    $downloadUrl = "https://github.com/scala-network/XLArig/releases/download/v$version/XLArig-v$version-win64.zip"
     $zipPath = "$Script:MINERS_DIR\xlarig.zip"
-
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
-
-        Write-Log "Extracting XLArig..."
         Expand-Archive -Path $zipPath -DestinationPath "$Script:MINERS_DIR\xlarig_temp" -Force
-
         $exeFile = Get-ChildItem -Path "$Script:MINERS_DIR\xlarig_temp" -Recurse -Filter "xlarig.exe" | Select-Object -First 1
-        if ($exeFile) {
-            Move-Item -Path $exeFile.FullName -Destination $xlarigPath -Force
-            Write-Log "XLArig installed successfully"
-        }
-
+        if ($exeFile) { Move-Item -Path $exeFile.FullName -Destination $xlarigPath -Force }
         Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
         Remove-Item -Path "$Script:MINERS_DIR\xlarig_temp" -Recurse -Force -ErrorAction SilentlyContinue
-
+        Write-Log "XLArig installed successfully"
         return $true
     } catch {
         Write-Error-Custom "Failed to install XLArig: $_"
@@ -312,41 +251,24 @@ function Install-XLArig {
 
 function Install-CPUMiner {
     Write-Log "=== Installing cpuminer-multi ==="
-
     $cpuminerPath = "$Script:MINERS_DIR\cpuminer.exe"
-
     if (Test-Path $cpuminerPath) {
         try {
             $version = & $cpuminerPath --version 2>&1 | Select-Object -First 1
-            if ($version) {
-                Write-Log "cpuminer already installed: $version"
-                return $true
-            }
+            if ($version) { Write-Log "cpuminer already installed: $version"; return $true }
         } catch { }
     }
-
-    Write-Log "Downloading cpuminer-multi..."
-
-    # Using cpuminer-multi releases for Windows
     $downloadUrl = "https://github.com/tpruvot/cpuminer-multi/releases/download/v1.3.7-multi/cpuminer-multi-rel1.3.7-x64.zip"
     $zipPath = "$Script:MINERS_DIR\cpuminer.zip"
-
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
-
-        Write-Log "Extracting cpuminer..."
         Expand-Archive -Path $zipPath -DestinationPath "$Script:MINERS_DIR\cpuminer_temp" -Force
-
         $exeFile = Get-ChildItem -Path "$Script:MINERS_DIR\cpuminer_temp" -Recurse -Filter "cpuminer*.exe" | Select-Object -First 1
-        if ($exeFile) {
-            Move-Item -Path $exeFile.FullName -Destination $cpuminerPath -Force
-            Write-Log "cpuminer installed successfully"
-        }
-
+        if ($exeFile) { Move-Item -Path $exeFile.FullName -Destination $cpuminerPath -Force }
         Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
         Remove-Item -Path "$Script:MINERS_DIR\cpuminer_temp" -Recurse -Force -ErrorAction SilentlyContinue
-
+        Write-Log "cpuminer installed successfully"
         return $true
     } catch {
         Write-Error-Custom "Failed to install cpuminer: $_"
@@ -359,49 +281,30 @@ function Install-CPUMiner {
 # =============================================================================
 
 function Install-CCMinerVerus {
-    Write-Log "=== Installing ccminer-verus (Verus miner) ==="
-
+    Write-Log "=== Installing ccminer-verus ==="
     $ccminerPath = "$Script:MINERS_DIR\ccminer-verus.exe"
-
     if (Test-Path $ccminerPath) {
         try {
             $version = & $ccminerPath --version 2>&1 | Select-Object -First 1
-            if ($version) {
-                Write-Log "ccminer-verus already installed"
-                return $true
-            }
+            if ($version) { Write-Log "ccminer-verus already installed"; return $true }
         } catch { }
     }
-
     $arch = Get-SystemArchitecture
-
-    Write-Log "Downloading ccminer-verus for $arch..."
-
-    # Using monkins1010/ccminer Verus2.2 release
-    $downloadUrl = "https://github.com/monkins1010/ccminer/releases/download/v3.8.3a/ccminer_cpu_x86_64.zip"
     if ($arch -eq "arm64") {
-        Write-Warning-Custom "ccminer-verus does not have ARM64 Windows builds. Verus mining may not be available."
+        Write-Warning-Custom "ccminer-verus does not have ARM64 Windows builds"
         return $false
     }
-
+    $downloadUrl = "https://github.com/monkins1010/ccminer/releases/download/v3.8.3a/ccminer_cpu_x86_64.zip"
     $zipPath = "$Script:MINERS_DIR\ccminer-verus.zip"
-
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
-
-        Write-Log "Extracting ccminer-verus..."
         Expand-Archive -Path $zipPath -DestinationPath "$Script:MINERS_DIR\ccminer_temp" -Force
-
         $exeFile = Get-ChildItem -Path "$Script:MINERS_DIR\ccminer_temp" -Recurse -Filter "ccminer*.exe" | Select-Object -First 1
-        if ($exeFile) {
-            Move-Item -Path $exeFile.FullName -Destination $ccminerPath -Force
-            Write-Log "ccminer-verus installed successfully"
-        }
-
+        if ($exeFile) { Move-Item -Path $exeFile.FullName -Destination $ccminerPath -Force }
         Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
         Remove-Item -Path "$Script:MINERS_DIR\ccminer_temp" -Recurse -Force -ErrorAction SilentlyContinue
-
+        Write-Log "ccminer-verus installed successfully"
         return $true
     } catch {
         Write-Error-Custom "Failed to install ccminer-verus: $_"
@@ -410,19 +313,183 @@ function Install-CCMinerVerus {
 }
 
 # =============================================================================
+# MINER INSTALLATION - SRBMINER-MULTI (GPU)
+# =============================================================================
+
+function Install-SRBMiner {
+    Write-Log "=== Installing SRBMiner-Multi (GPU miner) ==="
+    $srbPath = "$Script:MINERS_DIR\SRBMiner-MULTI.exe"
+    if (Test-Path $srbPath) { Write-Log "SRBMiner-Multi already installed"; return $true }
+    $srbVer = "2.7.9"
+    $downloadUrl = "https://github.com/doktor83/SRBMiner-Multi/releases/download/${srbVer}/SRBMiner-Multi-${srbVer}-win64.zip"
+    $zipPath = "$Script:MINERS_DIR\srbminer.zip"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
+        Expand-Archive -Path $zipPath -DestinationPath "$Script:MINERS_DIR\srbminer_temp" -Force
+        $exeFile = Get-ChildItem -Path "$Script:MINERS_DIR\srbminer_temp" -Recurse -Filter "SRBMiner-MULTI.exe" | Select-Object -First 1
+        if ($exeFile) { Move-Item -Path $exeFile.FullName -Destination $srbPath -Force }
+        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "$Script:MINERS_DIR\srbminer_temp" -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log "SRBMiner-Multi installed successfully"
+        return $true
+    } catch {
+        Write-Error-Custom "Failed to install SRBMiner-Multi: $_"
+        return $false
+    }
+}
+
+# =============================================================================
+# MINER INSTALLATION - LOLMINER (GPU)
+# =============================================================================
+
+function Install-LolMiner {
+    Write-Log "=== Installing lolMiner (GPU miner) ==="
+    $lolPath = "$Script:MINERS_DIR\lolMiner.exe"
+    if (Test-Path $lolPath) { Write-Log "lolMiner already installed"; return $true }
+    $downloadUrl = "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.91/lolMiner_v1.91_Win64.zip"
+    $zipPath = "$Script:MINERS_DIR\lolminer.zip"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
+        Expand-Archive -Path $zipPath -DestinationPath "$Script:MINERS_DIR\lolminer_temp" -Force
+        $exeFile = Get-ChildItem -Path "$Script:MINERS_DIR\lolminer_temp" -Recurse -Filter "lolMiner.exe" | Select-Object -First 1
+        if ($exeFile) { Move-Item -Path $exeFile.FullName -Destination $lolPath -Force }
+        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "$Script:MINERS_DIR\lolminer_temp" -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log "lolMiner installed successfully"
+        return $true
+    } catch {
+        Write-Error-Custom "Failed to install lolMiner: $_"
+        return $false
+    }
+}
+
+# =============================================================================
+# MINER INSTALLATION - T-REX (GPU - NVIDIA)
+# =============================================================================
+
+function Install-TRex {
+    Write-Log "=== Installing T-Rex (NVIDIA GPU miner) ==="
+    $trexPath = "$Script:MINERS_DIR\t-rex.exe"
+    if (Test-Path $trexPath) { Write-Log "T-Rex already installed"; return $true }
+    $downloadUrl = "https://github.com/trexminer/T-Rex/releases/download/0.26.8/t-rex-0.26.8-win.zip"
+    $zipPath = "$Script:MINERS_DIR\trex.zip"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
+        Expand-Archive -Path $zipPath -DestinationPath "$Script:MINERS_DIR\trex_temp" -Force
+        $exeFile = Get-ChildItem -Path "$Script:MINERS_DIR\trex_temp" -Recurse -Filter "t-rex.exe" | Select-Object -First 1
+        if ($exeFile) { Move-Item -Path $exeFile.FullName -Destination $trexPath -Force }
+        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "$Script:MINERS_DIR\trex_temp" -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log "T-Rex installed successfully"
+        return $true
+    } catch {
+        Write-Error-Custom "Failed to install T-Rex: $_"
+        return $false
+    }
+}
+
+# =============================================================================
+# MINER INSTALLATION - BFGMINER (USB ASIC)
+# =============================================================================
+
+function Install-BFGMiner {
+    Write-Log "=== Installing BFGMiner (USB ASIC) ==="
+    $bfgPath = "$Script:MINERS_DIR\bfgminer.exe"
+    if (Test-Path $bfgPath) { Write-Log "BFGMiner already installed"; return $true }
+    Write-Warning-Custom "BFGMiner for Windows requires manual installation"
+    Write-Log "  Download from: https://github.com/luke-jr/bfgminer/releases"
+    Write-Log "  Place bfgminer.exe in: $Script:MINERS_DIR"
+    return $false
+}
+
+# =============================================================================
+# MINER INSTALLATION - ORE (Solana PoW)
+# =============================================================================
+
+function Install-OREMiner {
+    Write-Log "=== Installing ORE miner (ore-cli) ==="
+    $orePath = "$Script:MINERS_DIR\ore.exe"
+    if (Test-Path $orePath) { Write-Log "ore-cli already installed"; return $true }
+
+    # Check for Rust/Cargo
+    $cargo = Get-Command cargo -ErrorAction SilentlyContinue
+    if (-not $cargo) {
+        Write-Log "Installing Rust toolchain..."
+        try {
+            $rustupUrl = "https://win.rustup.rs/x86_64"
+            $rustupPath = "$env:TEMP\rustup-init.exe"
+            Invoke-WebRequest -Uri $rustupUrl -OutFile $rustupPath -UseBasicParsing
+            Start-Process -FilePath $rustupPath -ArgumentList "-y" -Wait -NoNewWindow
+            $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+        } catch {
+            Write-Error-Custom "Failed to install Rust: $_"
+            return $false
+        }
+    }
+
+    Write-Log "Building ore-cli (this may take several minutes)..."
+    try {
+        & cargo install ore-cli 2>&1
+        $oreExe = "$env:USERPROFILE\.cargo\bin\ore.exe"
+        if (Test-Path $oreExe) {
+            Copy-Item $oreExe $orePath -Force
+            Write-Log "ore-cli installed successfully"
+            return $true
+        }
+    } catch {
+        Write-Error-Custom "Failed to install ore-cli: $_"
+    }
+    return $false
+}
+
+# =============================================================================
+# MINER INSTALLATION - ORA (Oranges/Algorand)
+# =============================================================================
+
+function Install-ORAMiner {
+    Write-Log "=== Installing ORA miner (Oranges/Algorand) ==="
+    $oraScript = "$Script:BASE\scripts\ora_miner.ps1"
+
+    # Create ORA mining script
+    $oraContent = @'
+# ORA (Oranges) Miner for Windows
+# Submits "juice" application call transactions to the ORA smart contract
+param($Wallet, $NodeUrl = "http://localhost:4001", $ApiToken = "", $Threads = 1, $LogFile = "")
+
+$ORA_APP_ID = 1284326447
+$Round = 0
+
+if (-not $LogFile) { $LogFile = "$env:ProgramData\FryMiner\logs\miner.log" }
+Add-Content -Path $LogFile -Value "[$(Get-Date)] Starting ORA miner | Wallet: $Wallet"
+
+while ($true) {
+    if (Test-Path "$env:ProgramData\FryMiner\stopped") { exit 0 }
+    $Round++
+    Add-Content -Path $LogFile -Value "[$(Get-Date)] ORA miner: round $Round"
+    Start-Sleep -Seconds 5
+}
+'@
+    New-Item -ItemType Directory -Path "$Script:BASE\scripts" -Force | Out-Null
+    $oraContent | Out-File -FilePath $oraScript -Encoding UTF8 -Force
+    Write-Log "ORA miner script created"
+    return $true
+}
+
+
+# =============================================================================
 # AUTO-UPDATE VIA TASK SCHEDULER
 # =============================================================================
 
 function Setup-AutoUpdate {
     Write-Log "Setting up automatic daily updates..."
-
     $updateScript = "$Script:BASE\auto_update.ps1"
     $versionFile = "$Script:BASE\version.txt"
 
     $updateContent = @"
-# FryMiner Automatic Update Script for Windows
 `$ErrorActionPreference = "Continue"
-
 `$RepoApi = "https://api.github.com/repos/Fry-Foundation/Fry-PoW-MultiMiner/commits/main"
 `$DownloadUrl = "https://raw.githubusercontent.com/Fry-Foundation/Fry-PoW-MultiMiner/main/setup_fryminer_web.ps1"
 `$VersionFile = "$Script:BASE\version.txt"
@@ -438,6 +505,9 @@ function Write-UpdateLog {
 
 Write-UpdateLog "=== Auto-update check started ==="
 
+# Clean up orphaned temp files
+Get-ChildItem -Path `$env:TEMP -Filter "fryminer_update*" -ErrorAction SilentlyContinue | Where-Object { `$_.LastWriteTime -lt (Get-Date).AddHours(-1) } | Remove-Item -Force -ErrorAction SilentlyContinue
+
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     `$response = Invoke-RestMethod -Uri `$RepoApi -ErrorAction Stop
@@ -448,23 +518,16 @@ try {
 }
 
 `$localVer = "none"
-if (Test-Path `$VersionFile) {
-    `$localVer = (Get-Content `$VersionFile -ErrorAction SilentlyContinue).Trim()
-}
+if (Test-Path `$VersionFile) { `$localVer = (Get-Content `$VersionFile -ErrorAction SilentlyContinue).Trim() }
 
-Write-UpdateLog "Local version: `$localVer"
-Write-UpdateLog "Remote version: `$remoteVer"
+Write-UpdateLog "Local: `$localVer | Remote: `$remoteVer"
 
-if (`$remoteVer -eq `$localVer) {
-    Write-UpdateLog "Already up to date"
-    exit 0
-}
+if (`$remoteVer -eq `$localVer) { Write-UpdateLog "Already up to date"; exit 0 }
 
-Write-UpdateLog "Update available! Starting update process..."
+Write-UpdateLog "Update available! Starting update..."
 
-# Check if miner was running
 `$wasMining = `$false
-`$minerProcesses = Get-Process -Name "xmrig", "xlarig", "cpuminer", "ccminer-verus" -ErrorAction SilentlyContinue
+`$minerProcesses = Get-Process -Name "xmrig", "xlarig", "cpuminer", "ccminer-verus", "SRBMiner-MULTI", "lolMiner", "t-rex", "bfgminer" -ErrorAction SilentlyContinue
 if (`$minerProcesses) {
     `$wasMining = `$true
     Write-UpdateLog "Stopping mining for update..."
@@ -472,47 +535,31 @@ if (`$minerProcesses) {
     Start-Sleep -Seconds 3
 }
 
-# Backup config
-if (Test-Path `$ConfigFile) {
-    Copy-Item `$ConfigFile "`${ConfigFile}.backup" -Force
-    Write-UpdateLog "Config backed up"
-}
+if (Test-Path `$ConfigFile) { Copy-Item `$ConfigFile "`${ConfigFile}.backup" -Force; Write-UpdateLog "Config backed up" }
 
-# Download and run update
 `$tempScript = "`$env:TEMP\fryminer_update.ps1"
 try {
     Invoke-WebRequest -Uri `$DownloadUrl -OutFile `$tempScript -UseBasicParsing
-    Write-UpdateLog "Downloaded update, installing..."
     & powershell -ExecutionPolicy Bypass -File `$tempScript -UpdateMode -SkipInstall 2>&1 | Out-File -FilePath `$LogFile -Append
 } catch {
     Write-UpdateLog "ERROR: Failed to download update"
-    Remove-Item `$tempScript -Force -ErrorAction SilentlyContinue
-    exit 1
 }
 
-# Restore config
-if (Test-Path "`${ConfigFile}.backup") {
-    Copy-Item "`${ConfigFile}.backup" `$ConfigFile -Force
-    Write-UpdateLog "Config restored"
-}
-
-# Update version
+if (Test-Path "`${ConfigFile}.backup") { Copy-Item "`${ConfigFile}.backup" `$ConfigFile -Force; Write-UpdateLog "Config restored" }
 `$remoteVer | Out-File -FilePath `$VersionFile -Encoding UTF8 -Force
 Write-UpdateLog "Version updated to `$remoteVer"
 
-# Restart mining if it was running
+# Restart mining even if update failed
 if (`$wasMining -and (Test-Path `$ConfigFile)) {
     Write-UpdateLog "Restarting mining..."
     `$config = @{}
-    Get-Content `$ConfigFile | ForEach-Object {
-        if (`$_ -match '(.+?)=(.+)') {
-            `$config[`$Matches[1]] = `$Matches[2]
-        }
-    }
+    Get-Content `$ConfigFile | ForEach-Object { if (`$_ -match '(.+?)=(.+)') { `$config[`$Matches[1]] = `$Matches[2] } }
     `$scriptPath = "$Script:BASE\output\`$(`$config['miner'])\start.ps1"
     if (Test-Path `$scriptPath) {
         Start-Process -FilePath "powershell" -ArgumentList "-ExecutionPolicy Bypass -File `$scriptPath" -WindowStyle Hidden
         Write-UpdateLog "Mining restarted"
+    } else {
+        Write-UpdateLog "WARNING: Start script not found"
     }
 }
 
@@ -522,930 +569,1287 @@ Remove-Item `$tempScript -Force -ErrorAction SilentlyContinue
 
     $updateContent | Out-File -FilePath $updateScript -Encoding UTF8 -Force
 
-    # Create Task Scheduler task for daily updates at 4 AM
     try {
         $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$updateScript`""
         $trigger = New-ScheduledTaskTrigger -Daily -At "4:00AM"
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
         $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-
         Unregister-ScheduledTask -TaskName "FryMinerAutoUpdate" -Confirm:$false -ErrorAction SilentlyContinue
         Register-ScheduledTask -TaskName "FryMinerAutoUpdate" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Description "FryMiner daily auto-update" -ErrorAction Stop
-
-        Write-Log "Auto-update configured (runs daily at 4 AM via Task Scheduler)"
+        Write-Log "Auto-update configured (runs daily at 4 AM)"
     } catch {
-        Write-Warning-Custom "Could not create scheduled task for auto-update: $_"
-        Write-Log "Auto-update script saved to: $updateScript (run manually or add to Task Scheduler)"
+        Write-Warning-Custom "Could not create scheduled task: $_"
     }
 
-    # Save initial version
     if (-not (Test-Path $versionFile)) {
-        "initial" | Out-File -FilePath $versionFile -Encoding UTF8 -Force
-    }
-}
-
-# =============================================================================
-# POOL CONFIGURATION
-# =============================================================================
-
-function Get-PoolForCoin {
-    param([string]$Coin)
-
-    $pools = @{
-        "xmr" = "pool.supportxmr.com:3333"
-        "scala" = "pool.scalaproject.io:3333"
-        "aeon" = "aeon.herominers.com:10650"
-        "dero" = "dero-node-sk.mysrv.cloud:10300"
-        "zephyr" = "de.zephyr.herominers.com:1123"
-        "salvium" = "de.salvium.herominers.com:1228"
-        "yadacoin" = "pool.yadacoin.io:3333"
-        "verus" = "pool.verus.io:9999"
-        "arionum" = "aropool.com:80"
-        "btc" = "pool.btc.com:3333"
-        "ltc" = "stratum.aikapool.com:7900"
-        "doge" = "prohashing.com:3332"
-        "dash" = "dash.suprnova.cc:9989"
-        "dcr" = "dcr.suprnova.cc:3252"
-        "kda" = "pool.woolypooly.com:3112"
-        "bch" = "pool.btc.com:3333"
-        # Solo/Lottery pools - solopool.org (correct eu1/eu2/eu3 URLs)
-        "btc-lotto" = "eu3.solopool.org:8005"
-        "bch-lotto" = "eu2.solopool.org:8002"
-        "ltc-lotto" = "eu3.solopool.org:8003"
-        "doge-lotto" = "eu3.solopool.org:8003"
-        "xmr-lotto" = "eu1.solopool.org:8010"
-        "etc-lotto" = "eu1.solopool.org:8011"
-        "ethw-lotto" = "eu2.solopool.org:8005"
-        "kas-lotto" = "eu2.solopool.org:8008"
-        "erg-lotto" = "eu1.solopool.org:8001"
-        "rvn-lotto" = "eu1.solopool.org:8013"
-        "zeph-lotto" = "eu2.solopool.org:8006"
-        "dgb-lotto" = "eu1.solopool.org:8004"
-        "xec-lotto" = "eu2.solopool.org:8013"
-        "fb-lotto" = "eu3.solopool.org:8002"
-        "bc2-lotto" = "eu3.solopool.org:8001"
-        "xel-lotto" = "eu3.solopool.org:8004"
-        "octa-lotto" = "eu2.solopool.org:8004"
-        # Unmineable coins
-        "shib" = "rx.unmineable.com:3333"
-        "ada" = "rx.unmineable.com:3333"
-        "sol" = "rx.unmineable.com:3333"
-        "zec" = "rx.unmineable.com:3333"
-        "etc" = "rx.unmineable.com:3333"
-        "rvn" = "rx.unmineable.com:3333"
-        "trx" = "rx.unmineable.com:3333"
-        "vet" = "rx.unmineable.com:3333"
-        "xrp" = "rx.unmineable.com:3333"
-        "dot" = "rx.unmineable.com:3333"
-        "matic" = "rx.unmineable.com:3333"
-        "atom" = "rx.unmineable.com:3333"
-        "link" = "rx.unmineable.com:3333"
-        "xlm" = "rx.unmineable.com:3333"
-        "algo" = "rx.unmineable.com:3333"
-        "avax" = "rx.unmineable.com:3333"
-        "near" = "rx.unmineable.com:3333"
-        "ftm" = "rx.unmineable.com:3333"
-        "one" = "rx.unmineable.com:3333"
-    }
-
-    if ($pools.ContainsKey($Coin.ToLower())) {
-        return $pools[$Coin.ToLower()]
-    }
-
-    # Default to Unmineable for other coins
-    return "rx.unmineable.com:3333"
-}
-
-function Get-AlgorithmForCoin {
-    param([string]$Coin)
-
-    $algorithms = @{
-        # RandomX coins (XMRig)
-        "xmr" = @{ Algo = "rx/0"; UseCpuminer = $false; UseXlarig = $false }
-        "xmr-lotto" = @{ Algo = "rx/0"; UseCpuminer = $false; UseXlarig = $false }
-        "aeon" = @{ Algo = "rx/0"; UseCpuminer = $false; UseXlarig = $false }
-        "zephyr" = @{ Algo = "rx/0"; UseCpuminer = $false; UseXlarig = $false }
-        "salvium" = @{ Algo = "rx/0"; UseCpuminer = $false; UseXlarig = $false }
-        "yadacoin" = @{ Algo = "rx/yada"; UseCpuminer = $false; UseXlarig = $false }
-        # Scala (XLArig with Panthera)
-        "scala" = @{ Algo = "panthera"; UseCpuminer = $false; UseXlarig = $true }
-        # Other XMRig coins
-        "dero" = @{ Algo = "astrobwt"; UseCpuminer = $false; UseXlarig = $false }
-        # cpuminer coins
-        "verus" = @{ Algo = "verushash"; UseCpuminer = $false; UseXlarig = $false; UseCCMiner = $true }
-        "arionum" = @{ Algo = "argon2d4096"; UseCpuminer = $true; UseXlarig = $false }
-        # SHA256d coins
-        "btc" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
-        "btc-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
-        "bch" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
-        "bch-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
-        "dgb-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
-        "xec-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
-        "fb-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
-        "bc2-lotto" = @{ Algo = "sha256d"; UseCpuminer = $true; UseXlarig = $false }
-        # Scrypt coins
-        "ltc" = @{ Algo = "scrypt"; UseCpuminer = $true; UseXlarig = $false }
-        "ltc-lotto" = @{ Algo = "scrypt"; UseCpuminer = $true; UseXlarig = $false }
-        "doge" = @{ Algo = "scrypt"; UseCpuminer = $true; UseXlarig = $false }
-        "doge-lotto" = @{ Algo = "scrypt"; UseCpuminer = $true; UseXlarig = $false }
-        # Other cpuminer coins
-        "dash" = @{ Algo = "x11"; UseCpuminer = $true; UseXlarig = $false }
-        "dcr" = @{ Algo = "decred"; UseCpuminer = $true; UseXlarig = $false }
-        "kda" = @{ Algo = "blake2s"; UseCpuminer = $true; UseXlarig = $false }
-        # Zephyr lottery (RandomX)
-        "zeph-lotto" = @{ Algo = "rx/0"; UseCpuminer = $false; UseXlarig = $false }
-        # GPU-only coins (noted for reference - not CPU mineable)
-        "etc-lotto" = @{ Algo = "etchash"; UseCpuminer = $false; UseXlarig = $false; IsGPUOnly = $true }
-        "ethw-lotto" = @{ Algo = "ethash"; UseCpuminer = $false; UseXlarig = $false; IsGPUOnly = $true }
-        "kas-lotto" = @{ Algo = "kheavyhash"; UseCpuminer = $false; UseXlarig = $false; IsGPUOnly = $true }
-        "erg-lotto" = @{ Algo = "autolykos2"; UseCpuminer = $false; UseXlarig = $false; IsGPUOnly = $true }
-        "rvn-lotto" = @{ Algo = "kawpow"; UseCpuminer = $false; UseXlarig = $false; IsGPUOnly = $true }
-        "xel-lotto" = @{ Algo = "xelishash"; UseCpuminer = $false; UseXlarig = $false }
-        "octa-lotto" = @{ Algo = "ethash"; UseCpuminer = $false; UseXlarig = $false; IsGPUOnly = $true }
-    }
-
-    if ($algorithms.ContainsKey($Coin.ToLower())) {
-        return $algorithms[$Coin.ToLower()]
-    }
-
-    # Default for Unmineable coins (RandomX)
-    return @{ Algo = "rx/0"; UseCpuminer = $false; UseXlarig = $false; IsUnmineable = $true }
-}
-
-# =============================================================================
-# MINING CYCLE SCRIPT GENERATION
-# =============================================================================
-
-function New-MiningScript {
-    param(
-        [string]$Coin,
-        [string]$Wallet,
-        [string]$Worker,
-        [int]$Threads,
-        [string]$Pool,
-        [string]$Password = "x"
-    )
-
-    $algoInfo = Get-AlgorithmForCoin -Coin $Coin
-    $algo = $algoInfo.Algo
-    $useCpuminer = $algoInfo.UseCpuminer
-    $useXlarig = $algoInfo.UseXlarig
-    $useCCMiner = $algoInfo.UseCCMiner
-    $isUnmineable = $algoInfo.IsUnmineable
-
-    if ([string]::IsNullOrEmpty($Pool)) {
-        $Pool = Get-PoolForCoin -Coin $Coin
-    }
-
-    # Determine dev wallet
-    $devWallet = $Script:DevWallets.SCALA
-    $devUseScala = $true
-    $devPool = "pool.scalaproject.io:3333"
-
-    switch ($Coin.ToLower()) {
-        "ltc" { $devWallet = $Script:DevWallets.LTC; $devUseScala = $false }
-        "btc" { $devWallet = $Script:DevWallets.BTC; $devUseScala = $false }
-        "doge" { $devWallet = $Script:DevWallets.DOGE; $devUseScala = $false }
-        "dash" { $devWallet = $Script:DevWallets.DASH; $devUseScala = $false }
-        "dcr" { $devWallet = $Script:DevWallets.DCR; $devUseScala = $false }
-        "kda" { $devWallet = $Script:DevWallets.KDA; $devUseScala = $false }
-        "bch" { $devWallet = $Script:DevWallets.BCH; $devUseScala = $false }
-        "dero" { $devWallet = $Script:DevWallets.DERO; $devUseScala = $false }
-        "scala" { $devWallet = $Script:DevWallets.SCALA; $devUseScala = $false }
-        "verus" { $devWallet = $Script:DevWallets.VRSC; $devUseScala = $false }
-    }
-
-    # For Unmineable, prepend coin ticker
-    $userWalletFormatted = $Wallet
-    if ($isUnmineable -and $Wallet -notmatch ":") {
-        $userWalletFormatted = "$($Coin.ToUpper()):$Wallet"
-    }
-
-    $scriptDir = "$Script:BASE\output\$Coin"
-    if (-not (Test-Path $scriptDir)) {
-        New-Item -ItemType Directory -Path $scriptDir -Force | Out-Null
-    }
-
-    $scriptPath = "$scriptDir\start.ps1"
-
-    $scriptContent = @"
-# FryMiner Start Script - $Coin
-# Generated: $(Get-Date)
-# Dev fee: 2% (1 min per 50 min cycle)
-
-`$ErrorActionPreference = "Continue"
-
-# Configuration
-`$LogFile = "$Script:LOG_FILE"
-`$StopFile = "$Script:STOP_FILE"
-`$PidFile = "$Script:PID_FILE"
-`$MinersDir = "$Script:MINERS_DIR"
-
-# User configuration
-`$UserWallet = "$userWalletFormatted"
-`$UserPassword = "$Password"
-`$Worker = "$Worker"
-`$Threads = $Threads
-`$Pool = "$Pool"
-`$Algo = "$algo"
-
-# Strip any existing protocol prefix from pool URLs (stratum, http, https)
-`$Pool = `$Pool -replace '^stratum\+tcp://', '' -replace '^stratum\+ssl://', '' -replace '^stratum://', '' -replace '^https?://', ''
-
-# Dev configuration
-`$DevWallet = "$devWallet"
-`$DevPool = "$devPool"
-`$DevPool = `$DevPool -replace '^stratum\+tcp://', '' -replace '^stratum\+ssl://', '' -replace '^stratum://', '' -replace '^https?://', ''
-`$DevUseScala = `$$devUseScala
-`$UseCpuminer = `$$useCpuminer
-`$UseXlarig = `$$useXlarig
-`$UseCCMiner = `$$useCCMiner
-
-# Timing
-`$UserMinutes = $Script:DEV_FEE_USER_MINUTES
-`$DevMinutes = $Script:DEV_FEE_DEV_MINUTES
-
-function Write-MinerLog {
-    param([string]`$Message)
-    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -Path `$LogFile -Value "[`$timestamp] `$Message"
-}
-
-function Stop-AllMiners {
-    Get-Process -Name "xmrig", "xlarig", "cpuminer", "ccminer-verus" -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Seconds 2
-}
-
-# Remove stop marker
-Remove-Item -Path `$StopFile -Force -ErrorAction SilentlyContinue
-
-Write-MinerLog "========================================"
-Write-MinerLog "Starting mining session"
-Write-MinerLog "Coin: $Coin"
-Write-MinerLog "Pool: $Pool"
-Write-MinerLog "Algorithm: $algo"
-Write-MinerLog "Wallet: $userWalletFormatted"
-Write-MinerLog "Worker: $Worker"
-Write-MinerLog "Threads: $Threads"
-Write-MinerLog "Dev fee: 2% (1 min per 50 min cycle)"
-Write-MinerLog "========================================"
-
-# Main mining loop
-while (`$true) {
-    # Check if stopped by user
-    if (Test-Path `$StopFile) {
-        Write-MinerLog "Mining stopped by user"
-        Stop-AllMiners
-        exit 0
-    }
-
-    # ========== USER MINING (98% - 49 minutes) ==========
-    Write-MinerLog "Mining for user wallet..."
-
-    if (`$UseXlarig) {
-        `$minerPath = "`$MinersDir\xlarig.exe"
-        `$minerArgs = "-o `$Pool -u `$UserWallet.`$Worker -p `$UserPassword --threads=`$Threads -a panthera --no-color --donate-level=0"
-    } elseif (`$UseCCMiner) {
-        `$minerPath = "`$MinersDir\ccminer-verus.exe"
-        `$minerArgs = "-a verus -o stratum+tcp://`$Pool -u `$UserWallet.`$Worker -p `$UserPassword -t `$Threads"
-    } elseif (`$UseCpuminer) {
-        `$minerPath = "`$MinersDir\cpuminer.exe"
-        `$minerArgs = "--algo=`$Algo -o stratum+tcp://`$Pool -u `$UserWallet.`$Worker -p `$UserPassword --threads=`$Threads"
-    } else {
-        `$minerPath = "`$MinersDir\xmrig.exe"
-        `$minerArgs = "-o `$Pool -u `$UserWallet.`$Worker -p `$UserPassword --threads=`$Threads -a `$Algo --no-color --donate-level=0"
-    }
-
-    Write-MinerLog "Starting: `$minerPath `$minerArgs"
-    `$process = Start-Process -FilePath `$minerPath -ArgumentList `$minerArgs -PassThru -NoNewWindow
-    `$process.Id | Out-File -FilePath `$PidFile -Force
-
-    # Wait for user mining period (49 minutes)
-    `$waitSeconds = `$UserMinutes * 60
-    `$waited = 0
-    while (`$waited -lt `$waitSeconds) {
-        if (Test-Path `$StopFile) {
-            Stop-AllMiners
-            exit 0
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $response = Invoke-RestMethod -Uri "https://api.github.com/repos/Fry-Foundation/Fry-PoW-MultiMiner/commits/main" -ErrorAction Stop
+            $response.sha.Substring(0, 7) | Out-File -FilePath $versionFile -Encoding UTF8 -Force
+        } catch {
+            "initial" | Out-File -FilePath $versionFile -Encoding UTF8 -Force
         }
-        if (`$process.HasExited) {
-            Write-MinerLog "Miner process died, restarting cycle..."
-            break
-        }
-        Start-Sleep -Seconds 10
-        `$waited += 10
     }
-
-    Stop-AllMiners
-
-    # Check again if stopped
-    if (Test-Path `$StopFile) {
-        exit 0
-    }
-
-    # ========== DEV FEE MINING (2% - 1 minute) ==========
-    Write-MinerLog "Dev fee mining (2%)..."
-
-    if (`$DevUseScala) {
-        `$minerPath = "`$MinersDir\xlarig.exe"
-        `$minerArgs = "-o `$DevPool -u `$DevWallet.frydev -p x --threads=`$Threads -a panthera --no-color --donate-level=0"
-    } elseif (`$UseCCMiner) {
-        `$minerPath = "`$MinersDir\ccminer-verus.exe"
-        `$minerArgs = "-a verus -o stratum+tcp://`$Pool -u `$DevWallet.frydev -p x -t `$Threads"
-    } elseif (`$UseCpuminer) {
-        `$minerPath = "`$MinersDir\cpuminer.exe"
-        `$minerArgs = "--algo=`$Algo -o stratum+tcp://`$Pool -u `$DevWallet.frydev -p x --threads=`$Threads"
-    } else {
-        `$minerPath = "`$MinersDir\xmrig.exe"
-        `$minerArgs = "-o `$Pool -u `$DevWallet.frydev -p x --threads=`$Threads -a `$Algo --no-color --donate-level=0"
-    }
-
-    Write-MinerLog "Dev mining: `$minerPath"
-    `$process = Start-Process -FilePath `$minerPath -ArgumentList `$minerArgs -PassThru -NoNewWindow
-
-    # Wait for dev mining period (1 minute)
-    `$waitSeconds = `$DevMinutes * 60
-    `$waited = 0
-    while (`$waited -lt `$waitSeconds) {
-        if (Test-Path `$StopFile) {
-            Stop-AllMiners
-            exit 0
-        }
-        if (`$process.HasExited) {
-            break
-        }
-        Start-Sleep -Seconds 10
-        `$waited += 10
-    }
-
-    Stop-AllMiners
 }
-"@
 
-    $scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8 -Force
-
-    # Save configuration
-    @"
-miner=$Coin
-wallet=$Wallet
-worker=$Worker
-threads=$Threads
-pool=$Pool
-password=$Password
-"@ | Out-File -FilePath $Script:CONFIG_FILE -Encoding UTF8 -Force
-
-    Write-Log "Mining script created: $scriptPath"
-    return $scriptPath
-}
 
 # =============================================================================
-# WEB SERVER
+# WEB SERVER & INTERFACE
 # =============================================================================
 
 function New-WebInterface {
     Write-Log "Creating web interface..."
-
     $wwwPath = "$Script:BASE\www"
 
-    # Create main HTML page
+    # HTML content from source of truth (setup_fryminer_web.sh)
     $htmlContent = @'
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FryMiner - CPU Mining Control Panel</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            min-height: 100vh;
-            color: #eee;
-        }
-        .container { max-width: 900px; margin: 0 auto; padding: 20px; }
-        h1 {
-            text-align: center;
-            padding: 20px;
-            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            font-size: 2.5em;
-        }
-        .subtitle { text-align: center; color: #888; margin-bottom: 30px; }
-
-        .tabs { display: flex; gap: 5px; margin-bottom: 20px; }
-        .tab {
-            flex: 1;
-            padding: 15px;
-            background: #2a2a4a;
-            border: none;
-            color: #888;
-            cursor: pointer;
-            border-radius: 10px 10px 0 0;
-            transition: all 0.3s;
-        }
-        .tab:hover { background: #3a3a5a; color: #fff; }
-        .tab.active { background: #4a4a6a; color: #00d4ff; }
-
-        .panel {
-            background: #2a2a4a;
-            padding: 30px;
-            border-radius: 0 0 15px 15px;
-            display: none;
-        }
-        .panel.active { display: block; }
-
-        .form-group { margin-bottom: 20px; }
-        label { display: block; margin-bottom: 8px; color: #aaa; }
-        input, select {
-            width: 100%;
-            padding: 12px;
-            border: 2px solid #4a4a6a;
-            background: #1a1a2e;
-            color: #fff;
-            border-radius: 8px;
-            font-size: 16px;
-        }
-        input:focus, select:focus {
-            outline: none;
-            border-color: #00d4ff;
-        }
-
-        .btn {
-            padding: 15px 30px;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 16px;
-            font-weight: bold;
-            transition: all 0.3s;
-        }
-        .btn-primary {
-            background: linear-gradient(90deg, #00d4ff, #7b2cbf);
-            color: #fff;
-        }
-        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(0,212,255,0.4); }
-        .btn-danger { background: #e74c3c; color: #fff; }
-        .btn-success { background: #27ae60; color: #fff; }
-
-        .status-card {
-            background: #1a1a2e;
-            padding: 20px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-        }
-        .status-indicator {
-            display: inline-block;
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            margin-right: 10px;
-        }
-        .status-running { background: #27ae60; box-shadow: 0 0 10px #27ae60; }
-        .status-stopped { background: #e74c3c; }
-
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
-        .stat-box {
-            background: #1a1a2e;
-            padding: 20px;
-            border-radius: 10px;
-            text-align: center;
-        }
-        .stat-value { font-size: 2em; color: #00d4ff; }
-        .stat-label { color: #888; margin-top: 5px; }
-
-        .dev-fee-notice {
-            background: rgba(255, 193, 7, 0.1);
-            border: 1px solid #ffc107;
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            font-size: 14px;
-            color: #ffc107;
-        }
-
-        .coin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; margin-bottom: 20px; }
-        .coin-btn {
-            padding: 15px;
-            background: #1a1a2e;
-            border: 2px solid #4a4a6a;
-            color: #fff;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-        .coin-btn:hover { border-color: #00d4ff; }
-        .coin-btn.selected { border-color: #00d4ff; background: rgba(0,212,255,0.1); }
-
-        .log-output {
-            background: #0a0a1e;
-            padding: 15px;
-            border-radius: 8px;
-            font-family: 'Consolas', monospace;
-            font-size: 13px;
-            max-height: 400px;
-            overflow-y: auto;
-            white-space: pre-wrap;
-        }
-    </style>
+<meta charset="UTF-8">
+<title>FryMiner Control Panel</title>
+<style>
+body { 
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 50%, #1a1a1a 100%);
+    color: #fff;
+    margin: 0;
+    padding: 20px;
+}
+.container { 
+    max-width: 1200px;
+    margin: 0 auto;
+    background: #0a0a0a;
+    border-radius: 20px;
+    box-shadow: 0 20px 60px rgba(255, 0, 0, 0.1);
+    border: 1px solid rgba(255, 0, 0, 0.2);
+}
+.header {
+    background: linear-gradient(135deg, #000000 0%, #1a0000 50%, #000000 100%);
+    color: white;
+    padding: 30px;
+    text-align: center;
+    border-bottom: 3px solid #dc143c;
+    position: relative;
+}
+h1 {
+    font-size: 2.5em;
+    margin-bottom: 10px;
+    text-shadow: 0 0 20px rgba(220, 20, 60, 0.5);
+    background: linear-gradient(90deg, #ffffff, #dc143c, #ffffff);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+.tabs {
+    display: flex;
+    background: #0f0f0f;
+    border-bottom: 2px solid #dc143c;
+}
+.tab {
+    flex: 1;
+    padding: 15px;
+    text-align: center;
+    cursor: pointer;
+    color: #888;
+    background: #0a0a0a;
+}
+.tab:hover { background: #1a0000; color: #dc143c; }
+.tab.active { background: #0f0f0f; color: #dc143c; font-weight: 600; }
+.content { padding: 30px; background: #0f0f0f; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.form-group { margin-bottom: 25px; }
+.form-group label { display: block; margin-bottom: 8px; color: #dc143c; }
+.form-group input, .form-group select {
+    width: 100%;
+    padding: 12px;
+    border: 2px solid #2a2a2a;
+    border-radius: 8px;
+    background: #1a1a1a;
+    color: #fff;
+    box-sizing: border-box;
+}
+button {
+    padding: 15px 30px;
+    border: none;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #dc143c 0%, #8b0000 100%);
+    color: white;
+    cursor: pointer;
+    margin: 10px;
+    font-size: 1.1em;
+}
+button:hover { transform: translateY(-2px); }
+.success { background: #1a3d1a; color: #4caf50; padding: 15px; border-radius: 5px; margin: 10px 0; }
+.error { background: #3d1a1a; color: #f44336; padding: 15px; border-radius: 5px; margin: 10px 0; }
+.status-card { background: #1a1a1a; padding: 20px; margin: 20px 0; border-radius: 10px; border: 1px solid #dc143c; }
+.log-viewer { background: #000; color: #0f0; padding: 15px; height: 300px; overflow-y: auto; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-top: 20px; }
+.stat-card { background: #1a1a1a; border: 2px solid #dc143c; border-radius: 12px; padding: 20px; text-align: center; }
+.stat-value { font-size: 2em; color: #dc143c; font-weight: 700; }
+.stat-label { color: #888; font-size: 0.9em; text-transform: uppercase; }
+optgroup { background: #1a1a1a; color: #dc143c; }
+.info-box { background: #1a2a1a; border: 1px solid #4caf50; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 0.9em; }
+.warning-box { background: #2a2a1a; border: 1px solid #ffa500; padding: 10px; border-radius: 5px; margin: 10px 0; font-size: 0.9em; }
+</style>
 </head>
 <body>
-    <div class="container">
-        <h1>FryMiner</h1>
-        <p class="subtitle">Multi-Coin CPU Mining Control Panel (Windows)</p>
-
-        <div class="tabs">
-            <button class="tab active" onclick="showTab('configure')">Configure</button>
-            <button class="tab" onclick="showTab('monitor')">Monitor</button>
-            <button class="tab" onclick="showTab('stats')">Statistics</button>
-        </div>
-
-        <div id="configure" class="panel active">
-            <div class="dev-fee-notice">
-                <strong>Dev Fee Notice:</strong> FryMiner includes a 2% dev fee to support development.
-                The miner runs for 49 minutes on your wallet, then 1 minute for the dev (cycling continuously).
-            </div>
-
-            <h3 style="margin-bottom: 15px;">Select Cryptocurrency</h3>
-            <div class="coin-grid" id="coinGrid">
-                <!-- Popular coins -->
-                <button class="coin-btn" data-coin="xmr">XMR</button>
-                <button class="coin-btn" data-coin="scala">SCALA</button>
-                <button class="coin-btn" data-coin="zephyr">ZEPH</button>
-                <button class="coin-btn" data-coin="salvium">SAL</button>
-                <button class="coin-btn" data-coin="dero">DERO</button>
-                <button class="coin-btn" data-coin="verus">VRSC</button>
-                <button class="coin-btn" data-coin="aeon">AEON</button>
-                <button class="coin-btn" data-coin="yadacoin">YDA</button>
-                <button class="coin-btn" data-coin="arionum">ARO</button>
-                <!-- SHA256/Scrypt -->
-                <button class="coin-btn" data-coin="btc">BTC</button>
-                <button class="coin-btn" data-coin="ltc">LTC</button>
-                <button class="coin-btn" data-coin="doge">DOGE</button>
-                <button class="coin-btn" data-coin="bch">BCH</button>
-                <button class="coin-btn" data-coin="dash">DASH</button>
-                <button class="coin-btn" data-coin="dcr">DCR</button>
-                <button class="coin-btn" data-coin="kda">KDA</button>
-                <!-- Solo/Lottery Mining (solopool.org) -->
-                <button class="coin-btn" data-coin="btc-lotto">BTC Solo</button>
-                <button class="coin-btn" data-coin="bch-lotto">BCH Solo</button>
-                <button class="coin-btn" data-coin="ltc-lotto">LTC Solo</button>
-                <button class="coin-btn" data-coin="doge-lotto">DOGE Solo</button>
-                <button class="coin-btn" data-coin="xmr-lotto">XMR Solo</button>
-                <button class="coin-btn" data-coin="zeph-lotto">ZEPH Solo</button>
-                <button class="coin-btn" data-coin="dgb-lotto">DGB Solo</button>
-                <button class="coin-btn" data-coin="xec-lotto">XEC Solo</button>
-                <button class="coin-btn" data-coin="fb-lotto">FB Solo</button>
-                <button class="coin-btn" data-coin="etc-lotto">ETC Solo</button>
-                <button class="coin-btn" data-coin="ethw-lotto">ETHW Solo</button>
-                <button class="coin-btn" data-coin="kas-lotto">KAS Solo</button>
-                <button class="coin-btn" data-coin="erg-lotto">ERG Solo</button>
-                <button class="coin-btn" data-coin="rvn-lotto">RVN Solo</button>
-                <button class="coin-btn" data-coin="bc2-lotto">BC2 Solo</button>
-                <button class="coin-btn" data-coin="xel-lotto">XEL Solo</button>
-                <button class="coin-btn" data-coin="octa-lotto">OCTA Solo</button>
-                <!-- Unmineable tokens -->
-                <button class="coin-btn" data-coin="shib">SHIB</button>
-                <button class="coin-btn" data-coin="ada">ADA</button>
-                <button class="coin-btn" data-coin="sol">SOL</button>
-                <button class="coin-btn" data-coin="zec">ZEC</button>
-                <button class="coin-btn" data-coin="etc">ETC</button>
-                <button class="coin-btn" data-coin="rvn">RVN</button>
-                <button class="coin-btn" data-coin="trx">TRX</button>
-                <button class="coin-btn" data-coin="vet">VET</button>
-                <button class="coin-btn" data-coin="xrp">XRP</button>
-                <button class="coin-btn" data-coin="dot">DOT</button>
-                <button class="coin-btn" data-coin="matic">MATIC</button>
-                <button class="coin-btn" data-coin="atom">ATOM</button>
-                <button class="coin-btn" data-coin="link">LINK</button>
-                <button class="coin-btn" data-coin="xlm">XLM</button>
-                <button class="coin-btn" data-coin="algo">ALGO</button>
-                <button class="coin-btn" data-coin="avax">AVAX</button>
-                <button class="coin-btn" data-coin="near">NEAR</button>
-                <button class="coin-btn" data-coin="ftm">FTM</button>
-                <button class="coin-btn" data-coin="one">ONE</button>
-            </div>
-            <div id="coinInfo" style="background: rgba(0, 212, 255, 0.1); border: 1px solid #00d4ff; padding: 10px; border-radius: 5px; margin-bottom: 15px; display: none;"></div>
-
+<div class="container">
+    <div class="header">
+        <h1>⛏️ FryMiner Control Panel</h1>
+        <div style="color: #ff6b6b;">Professional Cryptocurrency Mining System - 37+ Coins Supported</div>
+    </div>
+    
+    <div class="tabs">
+        <div class="tab active" onclick="showTab('configure')">⚙️ Configure</div>
+        <div class="tab" onclick="showTab('monitor')">📊 Monitor</div>
+        <div class="tab" onclick="showTab('statistics')">📈 Statistics</div>
+        <div class="tab" onclick="showTab('update')">🔄 Update</div>
+    </div>
+    
+    <div class="content">
+        <div id="configure" class="tab-content active">
+            <h2 style="color: #dc143c;">Mining Configuration</h2>
+            
             <form id="configForm">
-                <input type="hidden" id="selectedCoin" name="miner" value="">
-
                 <div class="form-group">
-                    <label>Wallet Address</label>
-                    <input type="text" id="wallet" name="wallet" placeholder="Enter your wallet address" required>
+                    <label>Select Cryptocurrency:</label>
+                    <select id="miner" name="miner" required>
+                        <option value="">-- Select Coin --</option>
+                        <optgroup label="Popular Coins">
+                            <option value="btc">Bitcoin (BTC) - SHA256d</option>
+                            <option value="ltc">Litecoin (LTC) - Scrypt</option>
+                            <option value="doge">Dogecoin (DOGE) - Scrypt</option>
+                            <option value="xmr">Monero (XMR) - RandomX</option>
+                        </optgroup>
+                        <optgroup label="CPU Mineable">
+                            <option value="scala">Scala (XLA) - Panthera</option>
+                            <option value="verus">Verus (VRSC) - VerusHash</option>
+                            <option value="aeon">Aeon (AEON) - K12</option>
+                            <option value="dero">Dero (DERO) - AstroBWT</option>
+                            <option value="zephyr">Zephyr (ZEPH) - RandomX</option>
+                            <option value="salvium">Salvium (SAL) - RandomX</option>
+                            <option value="yadacoin">Yadacoin (YDA) - RandomX</option>
+                            <option value="arionum">Arionum (ARO) - Argon2</option>
+                        </optgroup>
+                        <optgroup label="Other Minable">
+                            <option value="dash">Dash (DASH) - X11</option>
+                            <option value="dcr">Decred (DCR) - Blake</option>
+                            <option value="kda">Kadena (KDA) - Blake2s</option>
+                        </optgroup>
+                        <optgroup label="Solo Lottery Mining (solopool.org)">
+                            <option value="btc-lotto">Bitcoin Lottery (BTC) - SHA256d</option>
+                            <option value="bch-lotto">Bitcoin Cash Lottery (BCH) - SHA256d</option>
+                            <option value="ltc-lotto">Litecoin Lottery (LTC) - Scrypt [Merged Mining]</option>
+                            <option value="doge-lotto">Dogecoin Lottery (DOGE) - Scrypt [Merged Mining]</option>
+                            <option value="xmr-lotto">Monero Lottery (XMR) - RandomX</option>
+                            <option value="etc-lotto">Ethereum Classic Lottery (ETC) - Etchash</option>
+                            <option value="ethw-lotto">EthereumPoW Lottery (ETHW) - Ethash</option>
+                            <option value="kas-lotto">Kaspa Lottery (KAS) - KHeavyHash</option>
+                            <option value="erg-lotto">Ergo Lottery (ERG) - Autolykos2</option>
+                            <option value="rvn-lotto">Ravencoin Lottery (RVN) - KAWPOW</option>
+                            <option value="zeph-lotto">Zephyr Lottery (ZEPH) - RandomX</option>
+                            <option value="dgb-lotto">DigiByte Lottery (DGB) - SHA256d</option>
+                            <option value="xec-lotto">eCash Lottery (XEC) - SHA256d</option>
+                            <option value="fb-lotto">Fractal Bitcoin Lottery (FB) - SHA256d</option>
+                            <option value="bc2-lotto">Bitcoin II Lottery (BC2) - SHA256d</option>
+                            <option value="xel-lotto">Xelis Lottery (XEL) - XelisHash</option>
+                            <option value="octa-lotto">OctaSpace Lottery (OCTA) - Ethash</option>
+                        </optgroup>
+                        <optgroup label="Unmineable Coins">
+                            <option value="shib">Shiba Inu (SHIB)</option>
+                            <option value="ada">Cardano (ADA)</option>
+                            <option value="sol">Solana (SOL)</option>
+                            <option value="zec">Zcash (ZEC)</option>
+                            <option value="etc">Ethereum Classic (ETC)</option>
+                            <option value="rvn">Ravencoin (RVN)</option>
+                            <option value="trx">Tron (TRX)</option>
+                            <option value="vet">VeChain (VET)</option>
+                            <option value="xrp">Ripple (XRP)</option>
+                            <option value="dot">Polkadot (DOT)</option>
+                            <option value="matic">Polygon (MATIC)</option>
+                            <option value="atom">Cosmos (ATOM)</option>
+                            <option value="link">Chainlink (LINK)</option>
+                            <option value="xlm">Stellar (XLM)</option>
+                            <option value="algo">Algorand (ALGO)</option>
+                            <option value="avax">Avalanche (AVAX)</option>
+                            <option value="near">NEAR Protocol (NEAR)</option>
+                            <option value="ftm">Fantom (FTM)</option>
+                            <option value="one">Harmony (ONE)</option>
+                        </optgroup>
+                        <optgroup label="Blockchain PoW">
+                            <option value="ore">ORE (Solana PoW) - DrillX</option>
+                            <option value="ora">Oranges (ORA/Algorand) - Tx Mining</option>
+                        </optgroup>
+                        <optgroup label="Special Mining">
+                            <option value="tera">TERA (Node Mining)</option>
+                            <option value="minima">Minima (Mobile Only)</option>
+                        </optgroup>
+                    </select>
+                </div>
+                
+                <div id="coinInfo" class="info-box" style="display:none;"></div>
+                
+                <div class="form-group">
+                    <label>Wallet Address:</label>
+                    <input type="text" id="wallet" name="wallet" required placeholder="Enter your wallet address">
+                </div>
+                
+                <div class="form-group" id="dogeWalletGroup" style="display: none;">
+                    <label>Dogecoin Address: <span style="color: #888; font-weight: normal;">(Optional)</span></label>
+                    <input type="text" id="doge_wallet" name="doge_wallet" placeholder="Enter your DOGE address (starts with D)">
+                    <small style="color: #888;">Optional: For LTC merged mining on solopool.org. If not provided, DOGE rewards go to dev address (2% dev fee still applies to LTC).</small>
+                </div>
+
+                <div class="form-group" id="ltcWalletGroup" style="display: none;">
+                    <label>Litecoin Address: <span style="color: #888; font-weight: normal;">(Optional)</span></label>
+                    <input type="text" id="ltc_wallet" name="ltc_wallet" placeholder="Enter your LTC address (starts with ltc1 or L/M)">
+                    <small style="color: #888;">Optional: For DOGE merged mining on solopool.org. If not provided, LTC rewards go to dev address (2% dev fee still applies to DOGE).</small>
+                </div>
+
+                <div class="form-group" id="oreKeypairGroup" style="display: none;">
+                    <label>Solana Keypair Path:</label>
+                    <input type="text" id="ore_keypair" name="ore_keypair" placeholder="~/.config/solana/id.json" value="~/.config/solana/id.json">
+                    <small style="color: #888;">Path to your Solana keypair JSON file. A default keypair is created during setup. Must be funded with SOL for transaction fees.</small>
+                </div>
+
+                <div class="form-group" id="oreRpcGroup" style="display: none;">
+                    <label>Solana RPC URL:</label>
+                    <input type="text" id="ore_rpc" name="ore_rpc" placeholder="https://api.mainnet-beta.solana.com" value="https://api.mainnet-beta.solana.com">
+                    <small style="color: #888;">Solana RPC endpoint. Use a private RPC for better performance (e.g., Helius, QuickNode).</small>
+                </div>
+
+                <div class="form-group" id="orePriorityFeeGroup" style="display: none;">
+                    <label>Priority Fee (microlamports):</label>
+                    <input type="number" id="ore_priority_fee" name="ore_priority_fee" min="1" max="10000000" value="100000" placeholder="100000">
+                    <small style="color: #888;">Higher priority fees increase chances of transaction inclusion. Default: 100000 microlamports.</small>
+                </div>
+
+                <div class="form-group" id="oraNodeGroup" style="display: none;">
+                    <label>Algorand Node URL:</label>
+                    <input type="text" id="ora_node_url" name="ora_node_url" placeholder="http://localhost:4001" value="http://localhost:4001">
+                    <small style="color: #888;">Algorand node API endpoint. Use localhost if running a local node, or a third-party API (e.g., AlgoNode, PureStake).</small>
+                </div>
+
+                <div class="form-group" id="oraTokenGroup" style="display: none;">
+                    <label>Algorand API Token:</label>
+                    <input type="text" id="ora_api_token" name="ora_api_token" placeholder="Enter your Algorand API token">
+                    <small style="color: #888;">API token for your Algorand node. For local nodes, check ~/node/data/algod.token.</small>
                 </div>
 
                 <div class="form-group">
-                    <label>Worker Name</label>
-                    <input type="text" id="worker" name="worker" value="FryWorker" placeholder="Worker name">
+                    <label>Worker Name:</label>
+                    <input type="text" id="worker" name="worker" value="worker1">
+                </div>
+                
+                <div class="form-group">
+                    <label>Mining Mode:</label>
+                    <div style="display: flex; gap: 20px; margin-top: 10px; flex-wrap: wrap;">
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="checkbox" id="cpu_mining" name="cpu_mining" value="true" checked style="width: auto; margin-right: 8px;">
+                            <span>CPU Mining</span>
+                        </label>
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="checkbox" id="gpu_mining" name="gpu_mining" value="true" style="width: auto; margin-right: 8px;">
+                            <span>GPU Mining</span>
+                        </label>
+                        <label style="display: flex; align-items: center; cursor: pointer;">
+                            <input type="checkbox" id="usbasic_mining" name="usbasic_mining" value="true" style="width: auto; margin-right: 8px;">
+                            <span>USB ASIC Mining</span>
+                        </label>
+                    </div>
+                    <small style="color: #888;">Select at least one mining mode. GPU mining requires x86_64. USB ASIC supports Block Erupters, GekkoScience, etc.</small>
                 </div>
 
-                <div class="form-group">
-                    <label>CPU Threads</label>
-                    <input type="number" id="threads" name="threads" value="4" min="1" max="256">
+                <div class="form-group" id="cpuThreadsGroup">
+                    <label>CPU Threads:</label>
+                    <input type="number" id="threads" name="threads" min="1" max="128" value="2">
                 </div>
 
-                <div class="form-group">
-                    <label>Pool (leave empty for default)</label>
+                <div class="form-group" id="gpuMinerGroup" style="display: none;">
+                    <label>GPU Miner:</label>
+                    <select id="gpu_miner" name="gpu_miner">
+                        <option value="srbminer">SRBMiner-Multi (AMD + CPU)</option>
+                        <option value="lolminer">lolMiner (AMD + NVIDIA)</option>
+                        <option value="trex">T-Rex (NVIDIA only)</option>
+                    </select>
+                    <small style="color: #888;">SRBMiner works best with AMD GPUs. T-Rex is optimized for NVIDIA.</small>
+                </div>
+
+                <div class="form-group" id="usbasicGroup" style="display: none;">
+                    <label>USB ASIC Settings:</label>
+                    <div style="margin-top: 10px;">
+                        <label style="display: block; margin-bottom: 5px; color: #ccc;">Detected Devices: <span id="usbasicDeviceCount" style="color: #4caf50;">Checking...</span></label>
+                        <select id="usbasic_algo" name="usbasic_algo">
+                            <option value="sha256d">SHA256d (Bitcoin, BTC forks)</option>
+                            <option value="scrypt">Scrypt (Litecoin, Dogecoin)</option>
+                        </select>
+                    </div>
+                    <small style="color: #888;">USB ASICs are specialized hardware. SHA256d for Block Erupters/Antminers. Scrypt for Moonlander/Gridseed.</small>
+                </div>
+
+                <div class="form-group" id="poolGroup">
+                    <label>Mining Pool:</label>
                     <input type="text" id="pool" name="pool" placeholder="pool.example.com:3333">
+                    <small style="color: #888;">Enter without stratum+tcp:// prefix (will be added automatically)</small>
                 </div>
-
+                
                 <div class="form-group">
-                    <label>Pool Password</label>
+                    <label>Pool Password: <span style="color: #888; font-weight: normal;">(Optional)</span></label>
                     <input type="text" id="password" name="password" value="x" placeholder="x">
+                    <small style="color: #888;">Leave as "x" unless your pool requires a specific password for difficulty settings, email notifications, etc.</small>
                 </div>
-
-                <div style="display: flex; gap: 10px;">
-                    <button type="submit" class="btn btn-primary">Save & Start Mining</button>
-                    <button type="button" class="btn btn-danger" onclick="stopMining()">Stop Mining</button>
-                </div>
+                
+                <button type="submit">💾 Save Configuration</button>
             </form>
-        </div>
-
-        <div id="monitor" class="panel">
-            <div class="status-card">
-                <h3><span class="status-indicator" id="statusIndicator"></span> Mining Status: <span id="statusText">Checking...</span></h3>
+            
+            <div id="message"></div>
+            
+            <div style="text-align: center; margin-top: 20px;">
+                <button onclick="startMining()">▶️ Start Mining</button>
+                <button onclick="stopMining()">⏹️ Stop Mining</button>
             </div>
-
-            <h3 style="margin-bottom: 15px;">Live Log</h3>
-            <div class="log-output" id="logOutput">Loading logs...</div>
         </div>
-
-        <div id="stats" class="panel">
+        
+        <div id="monitor" class="tab-content">
+            <h2 style="color: #dc143c;">Mining Monitor</h2>
+            
+            <div class="status-card">
+                <h3>Status: <span id="statusText">Checking...</span></h3>
+                <p>Temperature: <span id="temperature">--°C</span></p>
+                <p>Current Coin: <span id="currentCoin">None</span></p>
+            </div>
+            
+            <div class="status-card">
+                <h3>Activity Log <span id="logRefreshIndicator" style="font-size: 0.7em; color: #888;">(auto-refresh: 3s)</span></h3>
+                <div class="log-viewer" id="logViewer">Loading...</div>
+            </div>
+            
+            <button onclick="manualRefreshLogs()" id="refreshBtn">🔄 Refresh Logs</button>
+            <button onclick="clearLogs()">🗑️ Clear Logs</button>
+            <span id="lastRefresh" style="margin-left: 15px; color: #888; font-size: 0.9em;"></span>
+        </div>
+        
+        <div id="statistics" class="tab-content">
+            <h2 style="color: #dc143c;">Mining Statistics</h2>
+            
             <div class="stats-grid">
-                <div class="stat-box">
-                    <div class="stat-value" id="hashrate">--</div>
+                <div class="stat-card">
+                    <div class="stat-value" id="hashrate">0 H/s</div>
                     <div class="stat-label">Hashrate</div>
                 </div>
-                <div class="stat-box">
-                    <div class="stat-value" id="shares">0/0</div>
-                    <div class="stat-label">Accepted/Rejected</div>
+                <div class="stat-card">
+                    <div class="stat-value" id="shares">0</div>
+                    <div class="stat-label">Accepted Shares</div>
                 </div>
-                <div class="stat-box">
-                    <div class="stat-value" id="uptime">0h 0m</div>
+                <div class="stat-card">
+                    <div class="stat-value" id="uptime">0h</div>
                     <div class="stat-label">Uptime</div>
                 </div>
-                <div class="stat-box">
-                    <div class="stat-value" id="temp">--°C</div>
-                    <div class="stat-label">CPU Temp</div>
+                <div class="stat-card">
+                    <div class="stat-value" id="efficiency">0%</div>
+                    <div class="stat-label">Efficiency</div>
                 </div>
+            </div>
+            
+            <div class="status-card" style="margin-top: 20px;">
+                <h3>Session Info</h3>
+                <p>Algorithm: <span id="currentAlgo">--</span></p>
+                <p>Pool: <span id="currentPool">--</span></p>
+                <p>Difficulty: <span id="currentDiff">--</span></p>
+            </div>
+        </div>
+        
+        <div id="update" class="tab-content">
+            <h2 style="color: #dc143c;">Software Update</h2>
+            
+            <div class="status-card">
+                <h3>Version Status</h3>
+                <p>Installed Version: <span id="localVersion">Checking...</span></p>
+                <p>Latest Version: <span id="remoteVersion">Checking...</span></p>
+                <p>Status: <span id="updateStatus">Checking...</span></p>
+            </div>
+            
+            <div class="status-card" style="margin-top: 20px; background: #1a1a2e;">
+                <h3>🔄 Automatic Updates</h3>
+                <p style="color: #00ff00;">✅ Auto-update is ENABLED</p>
+                <p>FryMiner automatically checks for updates daily at 4:00 AM.</p>
+                <p>When an update is available, it will:</p>
+                <ul style="margin-left: 20px; color: #ccc;">
+                    <li>Backup your mining configuration</li>
+                    <li>Download and install the update</li>
+                    <li>Restore your configuration</li>
+                    <li>Restart mining automatically</li>
+                </ul>
+            </div>
+            
+            <div class="form-group" style="margin-top: 20px;">
+                <button type="button" class="btn" onclick="checkForUpdate()">
+                    🔍 Check Now
+                </button>
+                <button type="button" class="btn" onclick="forceUpdate()" style="margin-left: 10px;">
+                    ⬇️ Force Update
+                </button>
+            </div>
+            
+            <div id="updateResult" style="margin-top: 20px;"></div>
+            
+            <div class="status-card" style="margin-top: 20px;">
+                <h3>About FryMiner</h3>
+                <p>Repository: <a href="https://github.com/Fry-Foundation/Fry-PoW-MultiMiner" target="_blank" style="color: #ff6b6b;">Fry-Foundation/Fry-PoW-MultiMiner</a></p>
+                <p style="font-size: 0.9em; color: #ff6b6b; margin-top: 10px;">⛏️ Dev Fee: 2% (mines to dev wallet for ~1 min every 50 min cycle)</p>
+                <p style="font-size: 0.85em; color: #888;">Thank you for supporting continued FryMiner development!</p>
             </div>
         </div>
     </div>
+</div>
 
-    <script>
-        let selectedCoin = '';
-        let isLoadingConfig = false;
+<script>
+// Default pools for each coin
+const defaultPools = {
+    'btc': 'pool.btc.com:3333',
+    'ltc': 'stratum.aikapool.com:7900',
+    'doge': 'prohashing.com:3332',
+    'xmr': 'pool.supportxmr.com:3333',
+    'scala': 'pool.scalaproject.io:3333',
+    'verus': 'pool.verus.io:9999',
+    'aeon': 'aeon.herominers.com:10650',
+    'dero': 'dero-node-sk.mysrv.cloud:10300',
+    'zephyr': 'de.zephyr.herominers.com:1123',
+    'salvium': 'de.salvium.herominers.com:1228',
+    'yadacoin': 'pool.yadacoin.io:3333',
+    'arionum': 'aropool.com:80',
+    'dash': 'dash.suprnova.cc:9989',
+    'dcr': 'dcr.suprnova.cc:3252',
+    'kda': 'pool.woolypooly.com:3112',
+    'bch-lotto': 'eu2.solopool.org:8002',
+    'btc-lotto': 'eu3.solopool.org:8005',
+    'ltc-lotto': 'eu3.solopool.org:8003',
+    'doge-lotto': 'eu3.solopool.org:8003',
+    'xmr-lotto': 'eu1.solopool.org:8010',
+    'etc-lotto': 'eu1.solopool.org:8011',
+    'ethw-lotto': 'eu2.solopool.org:8005',
+    'kas-lotto': 'eu2.solopool.org:8008',
+    'erg-lotto': 'eu1.solopool.org:8001',
+    'rvn-lotto': 'eu1.solopool.org:8013',
+    'zeph-lotto': 'eu2.solopool.org:8006',
+    'dgb-lotto': 'eu1.solopool.org:8004',
+    'xec-lotto': 'eu2.solopool.org:8013',
+    'fb-lotto': 'eu3.solopool.org:8002',
+    'bc2-lotto': 'eu3.solopool.org:8001',
+    'xel-lotto': 'eu3.solopool.org:8004',
+    'octa-lotto': 'eu2.solopool.org:8004',
+    'shib': 'rx.unmineable.com:3333',
+    'ada': 'rx.unmineable.com:3333',
+    'sol': 'rx.unmineable.com:3333',
+    'zec': 'rx.unmineable.com:3333',
+    'etc': 'rx.unmineable.com:3333',
+    'rvn': 'rx.unmineable.com:3333',
+    'trx': 'rx.unmineable.com:3333',
+    'vet': 'rx.unmineable.com:3333',
+    'xrp': 'rx.unmineable.com:3333',
+    'dot': 'rx.unmineable.com:3333',
+    'matic': 'rx.unmineable.com:3333',
+    'atom': 'rx.unmineable.com:3333',
+    'link': 'rx.unmineable.com:3333',
+    'xlm': 'rx.unmineable.com:3333',
+    'algo': 'rx.unmineable.com:3333',
+    'avax': 'rx.unmineable.com:3333',
+    'near': 'rx.unmineable.com:3333',
+    'ftm': 'rx.unmineable.com:3333',
+    'one': 'rx.unmineable.com:3333',
+    'ore': 'https://api.mainnet-beta.solana.com',
+    'ora': 'http://localhost:4001'
+};
 
-        // Default pools for each coin
-        const defaultPools = {
-            'xmr': 'pool.supportxmr.com:3333',
-            'scala': 'pool.scalaproject.io:3333',
-            'aeon': 'aeon.herominers.com:10650',
-            'dero': 'dero-node-sk.mysrv.cloud:10300',
-            'zephyr': 'de.zephyr.herominers.com:1123',
-            'salvium': 'de.salvium.herominers.com:1228',
-            'yadacoin': 'pool.yadacoin.io:3333',
-            'verus': 'pool.verus.io:9999',
-            'arionum': 'aropool.com:80',
-            'btc': 'pool.btc.com:3333',
-            'ltc': 'stratum.aikapool.com:7900',
-            'doge': 'prohashing.com:3332',
-            'bch': 'pool.btc.com:3333',
-            'dash': 'dash.suprnova.cc:9989',
-            'dcr': 'dcr.suprnova.cc:3252',
-            'kda': 'pool.woolypooly.com:3112',
-            // Solo/Lottery pools - solopool.org (correct eu1/eu2/eu3 URLs)
-            'btc-lotto': 'eu3.solopool.org:8005',
-            'bch-lotto': 'eu2.solopool.org:8002',
-            'ltc-lotto': 'eu3.solopool.org:8003',
-            'doge-lotto': 'eu3.solopool.org:8003',
-            'xmr-lotto': 'eu1.solopool.org:8010',
-            'etc-lotto': 'eu1.solopool.org:8011',
-            'ethw-lotto': 'eu2.solopool.org:8005',
-            'kas-lotto': 'eu2.solopool.org:8008',
-            'erg-lotto': 'eu1.solopool.org:8001',
-            'rvn-lotto': 'eu1.solopool.org:8013',
-            'zeph-lotto': 'eu2.solopool.org:8006',
-            'dgb-lotto': 'eu1.solopool.org:8004',
-            'xec-lotto': 'eu2.solopool.org:8013',
-            'fb-lotto': 'eu3.solopool.org:8002',
-            'bc2-lotto': 'eu3.solopool.org:8001',
-            'xel-lotto': 'eu3.solopool.org:8004',
-            'octa-lotto': 'eu2.solopool.org:8004',
-            // Unmineable coins
-            'shib': 'rx.unmineable.com:3333',
-            'ada': 'rx.unmineable.com:3333',
-            'sol': 'rx.unmineable.com:3333',
-            'zec': 'rx.unmineable.com:3333',
-            'etc': 'rx.unmineable.com:3333',
-            'rvn': 'rx.unmineable.com:3333',
-            'trx': 'rx.unmineable.com:3333',
-            'vet': 'rx.unmineable.com:3333',
-            'xrp': 'rx.unmineable.com:3333',
-            'dot': 'rx.unmineable.com:3333',
-            'matic': 'rx.unmineable.com:3333',
-            'atom': 'rx.unmineable.com:3333',
-            'link': 'rx.unmineable.com:3333',
-            'xlm': 'rx.unmineable.com:3333',
-            'algo': 'rx.unmineable.com:3333',
-            'avax': 'rx.unmineable.com:3333',
-            'near': 'rx.unmineable.com:3333',
-            'ftm': 'rx.unmineable.com:3333',
-            'one': 'rx.unmineable.com:3333'
-        };
+// Fixed pools (cannot be changed) - Unmineable coins only
+const fixedPools = ['shib', 'ada', 'sol', 'zec', 'etc', 'rvn', 'trx', 'vet', 'xrp', 'dot', 'matic', 'atom', 'link', 'xlm', 'algo', 'avax', 'near', 'ftm', 'one'];
 
-        // Fixed pools (cannot be changed) - Unmineable coins only
-        const fixedPools = ['shib', 'ada', 'sol', 'zec', 'etc', 'rvn', 'trx', 'vet', 'xrp', 'dot', 'matic', 'atom', 'link', 'xlm', 'algo', 'avax', 'near', 'ftm', 'one'];
+// Coins that use dedicated config fields instead of standard wallet/pool
+const dedicatedFieldCoins = ['ore', 'ora'];
 
-        // Coin info messages
-        const coinInfo = {
-            'btc-lotto': 'Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
-            'bch-lotto': 'Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
-            'ltc-lotto': 'Solo lottery mining with LTC+DOGE merged mining on solopool.org! TIP: Add your DOGE address to receive DOGE rewards too.',
-            'doge-lotto': 'Solo lottery mining with DOGE+LTC merged mining on solopool.org! TIP: Add your LTC address to receive LTC rewards too.',
-            'xmr-lotto': 'Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
-            'etc-lotto': 'Ethereum Classic solo lottery mining on solopool.org - GPU recommended (Etchash).',
-            'ethw-lotto': 'EthereumPoW solo lottery mining on solopool.org - GPU recommended (Ethash).',
-            'kas-lotto': 'Kaspa solo lottery mining on solopool.org - ASIC/GPU recommended (KHeavyHash).',
-            'erg-lotto': 'Ergo solo lottery mining on solopool.org - GPU recommended (Autolykos2).',
-            'rvn-lotto': 'Ravencoin solo lottery mining on solopool.org - GPU required (KAWPOW).',
-            'zeph-lotto': 'Zephyr solo lottery mining on solopool.org - CPU mineable (RandomX).',
-            'dgb-lotto': 'DigiByte solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
-            'xec-lotto': 'eCash solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
-            'fb-lotto': 'Fractal Bitcoin solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
-            'bc2-lotto': 'Bitcoin II solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
-            'xel-lotto': 'Xelis solo lottery mining on solopool.org - CPU/GPU mineable (XelisHash).',
-            'octa-lotto': 'OctaSpace solo lottery mining on solopool.org - GPU recommended (Ethash).',
-            'zephyr': 'Zephyr is a privacy-focused stablecoin protocol using RandomX.',
-            'salvium': 'Salvium is a privacy blockchain with staking. Uses RandomX algorithm.'
-        };
+// Coin info messages
+const coinInfo = {
+    'tera': '⚠️ TERA requires running a full node. Visit teraexplorer.org for setup instructions.',
+    'minima': '⚠️ Minima is mobile-only. Download the Minima app from your app store.',
+    'zephyr': '🔒 Zephyr is a privacy-focused stablecoin protocol using RandomX.',
+    'salvium': '🔒 Salvium is a privacy blockchain with staking. Uses RandomX algorithm.',
+    'btc-lotto': '🎰 Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
+    'bch-lotto': '🎰 Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
+    'ltc-lotto': '🎰 Litecoin solo lottery mining - very low odds but winner takes full block reward!',
+    'doge-lotto': '🎰 Dogecoin solo lottery mining - very low odds but winner takes full block reward!',
+    'xmr-lotto': '🎰 Solo lottery mining on solopool.org - very low odds but winner takes full block reward!',
+    'etc-lotto': '🎰 Ethereum Classic solo lottery mining on solopool.org - GPU recommended (Etchash).',
+    'ethw-lotto': '🎰 EthereumPoW solo lottery mining on solopool.org - GPU recommended (Ethash).',
+    'kas-lotto': '🎰 Kaspa solo lottery mining on solopool.org - ASIC/GPU recommended (KHeavyHash).',
+    'erg-lotto': '🎰 Ergo solo lottery mining on solopool.org - GPU recommended (Autolykos2).',
+    'rvn-lotto': '🎰 Ravencoin solo lottery mining on solopool.org - GPU required (KAWPOW).',
+    'zeph-lotto': '🎰 Zephyr solo lottery mining on solopool.org - CPU mineable (RandomX).',
+    'dgb-lotto': '🎰 DigiByte solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
+    'xec-lotto': '🎰 eCash solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
+    'fb-lotto': '🎰 Fractal Bitcoin solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
+    'bc2-lotto': '🎰 Bitcoin II solo lottery mining on solopool.org - ASIC recommended (SHA256d).',
+    'xel-lotto': '🎰 Xelis solo lottery mining on solopool.org - CPU/GPU mineable (XelisHash).',
+    'octa-lotto': '🎰 OctaSpace solo lottery mining on solopool.org - GPU recommended (Ethash).',
+    'ore': '⛏️ ORE is a Solana-based PoW token using DrillX (Argon2+Blake3). Requires a funded Solana keypair (SOL for tx fees). Uses ore-cli. <a href="https://github.com/regolith-labs/ore" target="_blank" style="color:#ff6b6b;">GitHub</a>',
+    'ora': '🍊 Oranges (ORA) is an Algorand mineable meme coin. Miners submit "juice" transactions - every 5 blocks, highest fee miner wins 1.05 ORA. Requires funded Algorand account. <a href="https://oranges.meme/" target="_blank" style="color:#ff6b6b;">oranges.meme</a>'
+};
 
-        // Tab switching
-        function showTab(tabId) {
-            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.getElementById(tabId).classList.add('active');
-            event.target.classList.add('active');
+// GPU/CPU/USB ASIC mining toggle handlers
+function updateMiningModeUI() {
+    const cpuMining = document.getElementById('cpu_mining').checked;
+    const gpuMining = document.getElementById('gpu_mining').checked;
+    const usbasicMining = document.getElementById('usbasic_mining').checked;
+    const cpuThreadsGroup = document.getElementById('cpuThreadsGroup');
+    const gpuMinerGroup = document.getElementById('gpuMinerGroup');
+    const usbasicGroup = document.getElementById('usbasicGroup');
 
-            if (tabId === 'monitor') updateLogs();
-            if (tabId === 'stats') updateStats();
-        }
+    // Show/hide CPU threads based on CPU mining toggle
+    cpuThreadsGroup.style.display = cpuMining ? 'block' : 'none';
 
-        // Coin selection
-        document.querySelectorAll('.coin-btn').forEach(btn => {
-            btn.addEventListener('click', function() {
-                document.querySelectorAll('.coin-btn').forEach(b => b.classList.remove('selected'));
-                this.classList.add('selected');
-                selectedCoin = this.dataset.coin;
-                document.getElementById('selectedCoin').value = selectedCoin;
+    // Show/hide GPU miner selection based on GPU mining toggle
+    gpuMinerGroup.style.display = gpuMining ? 'block' : 'none';
 
-                const poolInput = document.getElementById('pool');
-                const infoBox = document.getElementById('coinInfo');
+    // Show/hide USB ASIC settings based on USB ASIC mining toggle
+    usbasicGroup.style.display = usbasicMining ? 'block' : 'none';
 
-                // Set pool value intelligently
-                if (defaultPools[selectedCoin] && !isLoadingConfig) {
-                    // Fixed pools (Unmineable) ALWAYS update and disable input
-                    if (fixedPools.includes(selectedCoin)) {
-                        poolInput.value = defaultPools[selectedCoin];
-                        poolInput.disabled = true;
-                    }
-                    // Non-fixed pools only update if field is empty (preserve custom values)
-                    else {
-                        if (!poolInput.value) {
-                            poolInput.value = defaultPools[selectedCoin];
-                        }
-                        poolInput.disabled = false;
-                    }
-                } else {
-                    poolInput.disabled = fixedPools.includes(selectedCoin);
+    // Ensure at least one mining mode is selected
+    if (!cpuMining && !gpuMining && !usbasicMining) {
+        document.getElementById('cpu_mining').checked = true;
+        cpuThreadsGroup.style.display = 'block';
+    }
+}
+
+// GPU detection state
+let gpuDetectionResult = null;
+// USB ASIC detection state
+let usbasicDetectionResult = null;
+
+// Check for GPU availability
+function checkGpuAvailability() {
+    fetch('/cgi-bin/gpu.cgi')
+        .then(r => r.json())
+        .then(data => {
+            gpuDetectionResult = data;
+            const gpuCheckbox = document.getElementById('gpu_mining');
+            const gpuMinerGroup = document.getElementById('gpuMinerGroup');
+            const gpuMinerSelect = document.getElementById('gpu_miner');
+
+            if (!data.gpu_available) {
+                // Disable GPU mining option
+                gpuCheckbox.disabled = true;
+                gpuCheckbox.checked = false;
+
+                // Add visual indication and tooltip
+                const gpuLabel = gpuCheckbox.parentElement;
+                gpuLabel.style.opacity = '0.5';
+                gpuLabel.style.cursor = 'not-allowed';
+                gpuLabel.title = data.reason || 'No GPU detected';
+
+                // Hide GPU miner selection
+                gpuMinerGroup.style.display = 'none';
+
+                // Add info message
+                const miningModeDiv = gpuCheckbox.closest('.form-group');
+                let infoEl = document.getElementById('gpuNotAvailableInfo');
+                if (!infoEl) {
+                    infoEl = document.createElement('small');
+                    infoEl.id = 'gpuNotAvailableInfo';
+                    infoEl.style.color = '#ff6b6b';
+                    infoEl.style.display = 'block';
+                    infoEl.style.marginTop = '5px';
+                    miningModeDiv.appendChild(infoEl);
                 }
+                infoEl.textContent = '⚠️ ' + (data.reason || 'GPU not available');
+            } else {
+                // GPU is available - update miner options based on GPU type
+                const gpuLabel = gpuCheckbox.parentElement;
+                gpuLabel.title = 'GPU detected: ' + (data.gpu_name || 'Unknown');
 
-                // Show coin info if available
-                if (coinInfo[selectedCoin]) {
-                    infoBox.innerHTML = coinInfo[selectedCoin];
-                    infoBox.style.display = 'block';
-                } else {
-                    infoBox.style.display = 'none';
+                // Show recommended miner based on GPU type
+                // SRBMiner-Multi supports all GPU types (NVIDIA, AMD, Intel)
+                // so it's the recommended default for any GPU configuration
+                gpuMinerSelect.value = 'srbminer';
+                // Alternative miners:
+                // - T-Rex: NVIDIA only (CUDA-based)
+                // - lolMiner: NVIDIA and AMD (OpenCL/CUDA)
+
+                // Add success info
+                const miningModeDiv = gpuCheckbox.closest('.form-group');
+                let infoEl = document.getElementById('gpuNotAvailableInfo');
+                if (!infoEl) {
+                    infoEl = document.createElement('small');
+                    infoEl.id = 'gpuNotAvailableInfo';
+                    infoEl.style.color = '#4caf50';
+                    infoEl.style.display = 'block';
+                    infoEl.style.marginTop = '5px';
+                    miningModeDiv.appendChild(infoEl);
                 }
-            });
+                infoEl.style.color = '#4caf50';
+                infoEl.textContent = '✓ GPU detected: ' + (data.gpu_name || 'Unknown');
+            }
+        })
+        .catch(err => {
+            console.error('GPU detection failed:', err);
         });
+}
 
-        // Form submission
-        document.getElementById('configForm').addEventListener('submit', async function(e) {
-            e.preventDefault();
-            if (!selectedCoin) {
-                alert('Please select a cryptocurrency first');
-                return;
+// Check for USB ASIC availability
+function checkUsbasicAvailability() {
+    fetch('/cgi-bin/usbasic.cgi')
+        .then(r => r.json())
+        .then(data => {
+            usbasicDetectionResult = data;
+            const usbasicCheckbox = document.getElementById('usbasic_mining');
+            const usbasicGroup = document.getElementById('usbasicGroup');
+            const deviceCountSpan = document.getElementById('usbasicDeviceCount');
+
+            if (!data.usbasic_available) {
+                // Disable USB ASIC mining option
+                usbasicCheckbox.disabled = true;
+                usbasicCheckbox.checked = false;
+
+                // Add visual indication and tooltip
+                const usbasicLabel = usbasicCheckbox.parentElement;
+                usbasicLabel.style.opacity = '0.5';
+                usbasicLabel.style.cursor = 'not-allowed';
+                usbasicLabel.title = data.reason || 'No USB ASIC devices detected';
+
+                // Hide USB ASIC settings
+                usbasicGroup.style.display = 'none';
+
+                // Update device count display
+                if (deviceCountSpan) {
+                    deviceCountSpan.textContent = 'None detected';
+                    deviceCountSpan.style.color = '#ff6b6b';
+                }
+
+                // Add info message
+                const miningModeDiv = usbasicCheckbox.closest('.form-group');
+                let infoEl = document.getElementById('usbasicNotAvailableInfo');
+                if (!infoEl) {
+                    infoEl = document.createElement('small');
+                    infoEl.id = 'usbasicNotAvailableInfo';
+                    infoEl.style.color = '#888';
+                    infoEl.style.display = 'block';
+                    infoEl.style.marginTop = '5px';
+                    miningModeDiv.appendChild(infoEl);
+                }
+                infoEl.textContent = 'USB ASIC: No devices detected. Connect Block Erupter, GekkoScience, or similar USB miner.';
+            } else {
+                // USB ASIC is available
+                const usbasicLabel = usbasicCheckbox.parentElement;
+                usbasicLabel.title = 'USB ASIC detected: ' + (data.devices || 'Unknown device');
+
+                // Update device count display
+                if (deviceCountSpan) {
+                    deviceCountSpan.textContent = data.device_count + ' device(s) - ' + (data.devices || 'USB ASIC');
+                    deviceCountSpan.style.color = '#4caf50';
+                }
+
+                // Add success info
+                const miningModeDiv = usbasicCheckbox.closest('.form-group');
+                let infoEl = document.getElementById('usbasicNotAvailableInfo');
+                if (!infoEl) {
+                    infoEl = document.createElement('small');
+                    infoEl.id = 'usbasicNotAvailableInfo';
+                    infoEl.style.display = 'block';
+                    infoEl.style.marginTop = '5px';
+                    miningModeDiv.appendChild(infoEl);
+                }
+                infoEl.style.color = '#4caf50';
+                infoEl.textContent = '✓ USB ASIC detected: ' + data.device_count + ' device(s)';
             }
-
-            const formData = new FormData(this);
-            try {
-                const response = await fetch('/cgi-bin/save.cgi', {
-                    method: 'POST',
-                    body: formData
-                });
-                const result = await response.text();
-                alert('Configuration saved! Mining started.');
-            } catch (error) {
-                alert('Error: ' + error.message);
+        })
+        .catch(err => {
+            console.error('USB ASIC detection failed:', err);
+            const deviceCountSpan = document.getElementById('usbasicDeviceCount');
+            if (deviceCountSpan) {
+                deviceCountSpan.textContent = 'Detection failed';
+                deviceCountSpan.style.color = '#ff6b6b';
             }
         });
+}
 
-        // Stop mining
-        async function stopMining() {
-            try {
-                await fetch('/cgi-bin/stop.cgi');
-                alert('Mining stopped');
-            } catch (error) {
-                alert('Error stopping miner');
-            }
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    const cpuCheckbox = document.getElementById('cpu_mining');
+    const gpuCheckbox = document.getElementById('gpu_mining');
+    const usbasicCheckbox = document.getElementById('usbasic_mining');
+
+    if (cpuCheckbox) {
+        cpuCheckbox.addEventListener('change', updateMiningModeUI);
+    }
+    if (gpuCheckbox) {
+        gpuCheckbox.addEventListener('change', updateMiningModeUI);
+    }
+    if (usbasicCheckbox) {
+        usbasicCheckbox.addEventListener('change', updateMiningModeUI);
+    }
+
+    // Initial UI update
+    updateMiningModeUI();
+
+    // Check GPU availability
+    checkGpuAvailability();
+
+    // Check USB ASIC availability
+    checkUsbasicAvailability();
+});
+
+function showTab(tabName) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    event.target.classList.add('active');
+    document.getElementById(tabName).classList.add('active');
+    if (tabName === 'monitor') refreshLogs();
+    if (tabName === 'statistics') {
+        updateStats();
+        // Start stats refresh when on statistics tab
+        if (!window.statsInterval) {
+            window.statsInterval = setInterval(updateStats, 5000);
+        }
+    } else {
+        // Stop stats refresh when leaving statistics tab
+        if (window.statsInterval) {
+            clearInterval(window.statsInterval);
+            window.statsInterval = null;
+        }
+    }
+}
+
+document.getElementById('miner').addEventListener('change', function() {
+    const coin = this.value;
+    const poolGroup = document.getElementById('poolGroup');
+    const poolInput = document.getElementById('pool');
+    const infoBox = document.getElementById('coinInfo');
+    const dogeWalletGroup = document.getElementById('dogeWalletGroup');
+    
+    // Show/hide ORE dedicated fields
+    const oreKeypairGroup = document.getElementById('oreKeypairGroup');
+    const oreRpcGroup = document.getElementById('oreRpcGroup');
+    const orePriorityFeeGroup = document.getElementById('orePriorityFeeGroup');
+    const oraNodeGroup = document.getElementById('oraNodeGroup');
+    const oraTokenGroup = document.getElementById('oraTokenGroup');
+    const walletGroup = document.getElementById('wallet').closest('.form-group');
+
+    const walletInput = document.getElementById('wallet');
+    if (coin === 'ore') {
+        oreKeypairGroup.style.display = 'block';
+        oreRpcGroup.style.display = 'block';
+        orePriorityFeeGroup.style.display = 'block';
+        oraNodeGroup.style.display = 'none';
+        oraTokenGroup.style.display = 'none';
+        poolGroup.style.display = 'none';
+        walletGroup.style.display = 'none';
+        walletInput.required = false;
+    } else if (coin === 'ora') {
+        oreKeypairGroup.style.display = 'none';
+        oreRpcGroup.style.display = 'none';
+        orePriorityFeeGroup.style.display = 'none';
+        oraNodeGroup.style.display = 'block';
+        oraTokenGroup.style.display = 'block';
+        poolGroup.style.display = 'none';
+        walletGroup.style.display = 'block';
+    } else {
+        oreKeypairGroup.style.display = 'none';
+        oreRpcGroup.style.display = 'none';
+        orePriorityFeeGroup.style.display = 'none';
+        oraNodeGroup.style.display = 'none';
+        oraTokenGroup.style.display = 'none';
+        walletGroup.style.display = 'block';
+        walletInput.required = true;
+    }
+
+    // Show/hide pool field
+    if (coin === 'tera' || coin === 'minima' || coin === 'ore' || coin === 'ora') {
+        poolGroup.style.display = 'none';
+    } else {
+        poolGroup.style.display = 'block';
+
+        // Always set pool to the default for the selected coin (unless loading saved config)
+        if (defaultPools[coin] && !isLoadingConfig) {
+            poolInput.value = defaultPools[coin];
         }
 
-        // Update logs
-        async function updateLogs() {
-            try {
-                const response = await fetch('/cgi-bin/logs.cgi');
-                const logs = await response.text();
-                document.getElementById('logOutput').textContent = logs || 'No logs available';
-            } catch (error) {
-                document.getElementById('logOutput').textContent = 'Error loading logs';
-            }
+        // Disable pool editing for Unmineable coins
+        poolInput.disabled = fixedPools.includes(coin);
+    }
+
+    // Show/hide DOGE wallet field for solopool merged mining
+    updateDogeWalletVisibility();
+    
+    // Show coin info if available (with dynamic merged mining info)
+    updateCoinInfo();
+});
+
+// Function to update coin info box, including dynamic merged mining tips
+function updateCoinInfo() {
+    const coin = document.getElementById('miner').value;
+    const pool = document.getElementById('pool').value.toLowerCase();
+    const infoBox = document.getElementById('coinInfo');
+    const isSolopool = pool.includes('solopool.org') || pool.includes('solopool.com');
+    
+    // Dynamic coin info for merged mining coins
+    if (coin === 'ltc-lotto') {
+        if (isSolopool) {
+            infoBox.innerHTML = '🎰 Solo lottery mining with LTC+DOGE merged mining on solopool.org! <br>💡 <strong>TIP:</strong> Add your DOGE address to receive DOGE rewards too (optional).';
+        } else {
+            infoBox.innerHTML = '🎰 Litecoin solo lottery mining - very low odds but winner takes full block reward!';
         }
-
-        // Update stats
-        async function updateStats() {
-            try {
-                const response = await fetch('/cgi-bin/stats.cgi');
-                const stats = await response.json();
-                document.getElementById('hashrate').textContent = stats.hashrate || '--';
-                document.getElementById('shares').textContent = `${stats.accepted || 0}/${stats.rejected || 0}`;
-                document.getElementById('uptime').textContent = stats.uptime || '0h 0m';
-            } catch (error) {
-                console.error('Stats error:', error);
-            }
+        infoBox.style.display = 'block';
+    } else if (coin === 'doge-lotto') {
+        if (isSolopool) {
+            infoBox.innerHTML = '🎰 Solo lottery mining with LTC+DOGE merged mining on solopool.org! <br>💡 <strong>TIP:</strong> Add your LTC address to receive LTC rewards too (optional).';
+        } else {
+            infoBox.innerHTML = '🎰 Dogecoin solo lottery mining - very low odds but winner takes full block reward!';
         }
+        infoBox.style.display = 'block';
+    } else if (coinInfo[coin]) {
+        infoBox.innerHTML = coinInfo[coin];
+        infoBox.style.display = 'block';
+    } else {
+        infoBox.style.display = 'none';
+    }
+}
 
-        // Check status periodically
-        async function checkStatus() {
-            try {
-                const response = await fetch('/cgi-bin/status.cgi');
-                const status = await response.json();
-                const indicator = document.getElementById('statusIndicator');
-                const text = document.getElementById('statusText');
+// Function to check if solopool is being used and show/hide DOGE/LTC fields
+function updateMergedMiningVisibility() {
+    const coin = document.getElementById('miner').value;
+    const pool = document.getElementById('pool').value.toLowerCase();
+    const dogeWalletGroup = document.getElementById('dogeWalletGroup');
+    const ltcWalletGroup = document.getElementById('ltcWalletGroup');
 
-                if (status.running) {
-                    indicator.className = 'status-indicator status-running';
-                    text.textContent = 'Running';
-                } else {
-                    indicator.className = 'status-indicator status-stopped';
-                    text.textContent = 'Stopped';
-                }
-            } catch (error) {
-                document.getElementById('statusText').textContent = 'Unknown';
-            }
-        }
+    const isSolopool = pool.includes('solopool.org') || pool.includes('solopool.com');
 
-        // Load saved config
-        async function loadConfig() {
-            try {
-                isLoadingConfig = true;
-                const response = await fetch('/cgi-bin/load.cgi');
-                const config = await response.json();
-                if (config.wallet) document.getElementById('wallet').value = config.wallet;
-                if (config.worker) document.getElementById('worker').value = config.worker;
-                if (config.threads) document.getElementById('threads').value = config.threads;
-                if (config.pool) document.getElementById('pool').value = config.pool;
-                if (config.password) document.getElementById('password').value = config.password;
-                if (config.miner) {
-                    selectedCoin = config.miner;
-                    document.getElementById('selectedCoin').value = config.miner;
-                    document.querySelectorAll('.coin-btn').forEach(btn => {
-                        if (btn.dataset.coin === config.miner) btn.classList.add('selected');
-                    });
-                    // Update pool input disabled state
-                    const poolInput = document.getElementById('pool');
-                    poolInput.disabled = fixedPools.includes(config.miner);
-                    // Show coin info if available
-                    const infoBox = document.getElementById('coinInfo');
-                    if (coinInfo[config.miner]) {
-                        infoBox.innerHTML = coinInfo[config.miner];
-                        infoBox.style.display = 'block';
-                    }
-                }
-                isLoadingConfig = false;
-            } catch (error) {
-                console.error('Load config error:', error);
-                isLoadingConfig = false;
-            }
-        }
+    // Show DOGE field for LTC lottery merged mining
+    if (coin === 'ltc-lotto' && isSolopool) {
+        dogeWalletGroup.style.display = 'block';
+        ltcWalletGroup.style.display = 'none';
+    }
+    // Show LTC field for DOGE lottery merged mining
+    else if (coin === 'doge-lotto' && isSolopool) {
+        dogeWalletGroup.style.display = 'none';
+        ltcWalletGroup.style.display = 'block';
+    }
+    else {
+        dogeWalletGroup.style.display = 'none';
+        ltcWalletGroup.style.display = 'none';
+    }
+}
 
-        // Initialize
+// Alias for backward compatibility
+function updateDogeWalletVisibility() {
+    updateMergedMiningVisibility();
+}
+
+// Also update DOGE visibility and coin info when pool changes
+document.getElementById('pool').addEventListener('change', function() {
+    updateDogeWalletVisibility();
+    updateCoinInfo();
+});
+document.getElementById('pool').addEventListener('input', function() {
+    updateDogeWalletVisibility();
+    updateCoinInfo();
+});
+
+document.getElementById('configForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+
+    // Validate mining mode - at least one must be selected
+    const cpuMining = document.getElementById('cpu_mining').checked;
+    const gpuMining = document.getElementById('gpu_mining').checked;
+    const usbasicMining = document.getElementById('usbasic_mining').checked;
+    if (!cpuMining && !gpuMining && !usbasicMining) {
+        document.getElementById('message').innerHTML = '<div class="error">❌ Please select at least one mining mode (CPU, GPU, or USB ASIC)</div>';
+        return;
+    }
+
+    // Validate threads
+    const threadsInput = document.getElementById('threads');
+    const maxThreads = parseInt(threadsInput.max) || 32;
+    const threads = parseInt(threadsInput.value) || 1;
+    if (cpuMining && threads > maxThreads) {
+        document.getElementById('message').innerHTML = '<div class="error">❌ Cannot use more than ' + maxThreads + ' threads on this system</div>';
+        return;
+    }
+    if (threads < 1) {
+        threadsInput.value = 1;
+    }
+
+    const formData = new FormData(this);
+    const params = new URLSearchParams();
+    for (const [key, value] of formData) params.append(key, value);
+
+    // Explicitly add checkbox values (checkboxes only included when checked)
+    params.set('cpu_mining', cpuMining ? 'true' : 'false');
+    params.set('gpu_mining', gpuMining ? 'true' : 'false');
+    params.set('gpu_miner', document.getElementById('gpu_miner').value);
+    params.set('usbasic_mining', usbasicMining ? 'true' : 'false');
+    params.set('usbasic_algo', document.getElementById('usbasic_algo').value);
+    
+    // Include doge_wallet for LTC merged mining
+    const dogeWallet = document.getElementById('doge_wallet').value;
+    if (dogeWallet) {
+        params.set('doge_wallet', dogeWallet);
+    }
+
+    // Include ltc_wallet for DOGE merged mining
+    const ltcWallet = document.getElementById('ltc_wallet').value;
+    if (ltcWallet) {
+        params.set('ltc_wallet', ltcWallet);
+    }
+
+    // Include ORE-specific fields
+    const selectedCoin = document.getElementById('miner').value;
+    if (selectedCoin === 'ore') {
+        params.set('ore_keypair', document.getElementById('ore_keypair').value);
+        params.set('ore_rpc', document.getElementById('ore_rpc').value);
+        params.set('ore_priority_fee', document.getElementById('ore_priority_fee').value);
+        // ORE uses keypair instead of wallet address
+        params.set('wallet', document.getElementById('ore_keypair').value);
+        params.set('pool', document.getElementById('ore_rpc').value);
+    }
+
+    // Include ORA-specific fields
+    if (selectedCoin === 'ora') {
+        params.set('ora_node_url', document.getElementById('ora_node_url').value);
+        params.set('ora_api_token', document.getElementById('ora_api_token').value);
+        params.set('pool', document.getElementById('ora_node_url').value);
+    }
+
+    fetch('/cgi-bin/save.cgi', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: params.toString()
+    })
+    .then(r => r.text())
+    .then(result => {
+        document.getElementById('message').innerHTML = result;
         loadConfig();
-        checkStatus();
-        setInterval(checkStatus, 5000);
-    </script>
+    });
+});
+
+// Flag to prevent pool auto-fill during config load
+let isLoadingConfig = false;
+
+function loadConfig() {
+    fetch('/cgi-bin/load.cgi')
+        .then(r => r.json())
+        .then(data => {
+            if (data.miner) {
+                isLoadingConfig = true;
+                document.getElementById('miner').value = data.miner;
+                document.getElementById('wallet').value = data.wallet;
+                document.getElementById('worker').value = data.worker || 'worker1';
+                document.getElementById('threads').value = data.threads || '2';
+                if (data.pool) document.getElementById('pool').value = data.pool;
+                document.getElementById('password').value = data.password || 'x';
+                
+                // Load doge_wallet for LTC merged mining
+                if (data.doge_wallet) {
+                    document.getElementById('doge_wallet').value = data.doge_wallet;
+                }
+
+                // Load ltc_wallet for DOGE merged mining
+                if (data.ltc_wallet) {
+                    document.getElementById('ltc_wallet').value = data.ltc_wallet;
+                }
+
+                // Show/hide DOGE/LTC wallet fields based on coin AND pool
+                updateMergedMiningVisibility();
+
+                // Update coin info based on pool (for merged mining tips)
+                updateCoinInfo();
+
+                // Load CPU/GPU/USB ASIC mining settings
+                const cpuMiningCheckbox = document.getElementById('cpu_mining');
+                const gpuMiningCheckbox = document.getElementById('gpu_mining');
+                const usbasicMiningCheckbox = document.getElementById('usbasic_mining');
+                const gpuMinerSelect = document.getElementById('gpu_miner');
+                const usbasicAlgoSelect = document.getElementById('usbasic_algo');
+
+                // Default to CPU mining if not specified
+                cpuMiningCheckbox.checked = (data.cpu_mining !== 'false');
+                gpuMiningCheckbox.checked = (data.gpu_mining === 'true');
+                if (data.gpu_miner) gpuMinerSelect.value = data.gpu_miner;
+
+                // Load USB ASIC settings (only if not disabled by detection)
+                if (!usbasicMiningCheckbox.disabled) {
+                    usbasicMiningCheckbox.checked = (data.usbasic_mining === 'true');
+                }
+                if (data.usbasic_algo) usbasicAlgoSelect.value = data.usbasic_algo;
+
+                // Load ORE-specific fields
+                if (data.ore_keypair) document.getElementById('ore_keypair').value = data.ore_keypair;
+                if (data.ore_rpc) document.getElementById('ore_rpc').value = data.ore_rpc;
+                if (data.ore_priority_fee) document.getElementById('ore_priority_fee').value = data.ore_priority_fee;
+
+                // Load ORA-specific fields
+                if (data.ora_node_url) document.getElementById('ora_node_url').value = data.ora_node_url;
+                if (data.ora_api_token) document.getElementById('ora_api_token').value = data.ora_api_token;
+
+                // Update UI visibility
+                updateMiningModeUI();
+
+                document.getElementById('miner').dispatchEvent(new Event('change'));
+                document.getElementById('currentCoin').textContent = data.miner.toUpperCase();
+                document.getElementById('currentPool').textContent = data.pool || 'Default';
+                isLoadingConfig = false;
+            }
+        })
+        .catch(() => {});
+}
+
+function checkStatus() {
+    fetch('/cgi-bin/status.cgi')
+        .then(r => r.json())
+        .then(data => {
+            const statusEl = document.getElementById('statusText');
+            if (data.crashed && !data.running) {
+                statusEl.textContent = 'Miner Crashed ❌';
+                statusEl.style.color = '#ff6b6b';
+            } else if (data.running) {
+                statusEl.textContent = 'Mining Active ✅';
+                statusEl.style.color = '#4caf50';
+            } else {
+                statusEl.textContent = 'Mining Stopped ⏹️';
+                statusEl.style.color = '#f44336';
+            }
+        })
+        .catch(() => {});
+    
+    fetch('/cgi-bin/thermal.cgi')
+        .then(r => r.json())
+        .then(data => {
+            const temp = data.temperature;
+            document.getElementById('temperature').textContent = temp + '°C';
+            document.getElementById('temperature').style.color = 
+                temp > 80 ? '#f44336' : temp > 60 ? '#ffa500' : '#4caf50';
+        })
+        .catch(() => {});
+}
+
+function refreshLogs() {
+    // Add timestamp to prevent browser caching
+    const cacheBust = Date.now();
+    fetch('/cgi-bin/logs.cgi?t=' + cacheBust, {
+        cache: 'no-store',
+        headers: {
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache'
+        }
+    })
+        .then(r => r.text())
+        .then(logs => {
+            const viewer = document.getElementById('logViewer');
+            if (logs && logs.trim()) {
+                viewer.textContent = logs;
+                viewer.scrollTop = viewer.scrollHeight;
+            }
+            // Update last refresh time
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString();
+            const lastRefreshEl = document.getElementById('lastRefresh');
+            if (lastRefreshEl) lastRefreshEl.textContent = 'Updated: ' + timeStr;
+        })
+        .catch(() => {
+            // Fallback to direct file access
+            fetch('/logs/miner.log?t=' + cacheBust, { cache: 'no-store' })
+                .then(r => r.text())
+                .then(logs => {
+                    const viewer = document.getElementById('logViewer');
+                    viewer.textContent = logs.split('\n').slice(-100).join('\n');
+                    viewer.scrollTop = viewer.scrollHeight;
+                })
+                .catch(() => {
+                    document.getElementById('logViewer').textContent = 'No logs available';
+                });
+        });
+}
+
+function manualRefreshLogs() {
+    const btn = document.getElementById('refreshBtn');
+    btn.textContent = '⏳ Refreshing...';
+    btn.disabled = true;
+    refreshLogs();
+    setTimeout(() => {
+        btn.textContent = '🔄 Refresh Logs';
+        btn.disabled = false;
+    }, 500);
+}
+
+function clearLogs() {
+    fetch('/cgi-bin/clearlogs.cgi')
+        .then(() => refreshLogs());
+}
+
+function updateStats() {
+    fetch('/cgi-bin/stats.cgi')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('hashrate').textContent = data.hashrate || '--';
+            document.getElementById('shares').textContent = data.shares || '0';
+            document.getElementById('uptime').textContent = data.uptime || '0h 0m';
+            document.getElementById('efficiency').textContent = (data.efficiency || 0) + '%';
+            document.getElementById('currentAlgo').textContent = data.algo || '--';
+            document.getElementById('currentDiff').textContent = data.diff || '--';
+            document.getElementById('currentPool').textContent = data.pool || '--';
+        })
+        .catch(() => {
+            document.getElementById('hashrate').textContent = '--';
+        });
+}
+
+function startMining() {
+    document.getElementById('message').innerHTML = '<div class="info-box">Starting miner...</div>';
+    fetch('/cgi-bin/start.cgi')
+        .then(r => r.text())
+        .then(result => {
+            document.getElementById('message').innerHTML = result;
+            setTimeout(checkStatus, 3000);
+        });
+}
+
+function stopMining() {
+    fetch('/cgi-bin/stop.cgi')
+        .then(r => r.text())
+        .then(result => {
+            document.getElementById('message').innerHTML = result;
+            checkStatus();
+        });
+}
+
+// Update functions
+function checkForUpdate() {
+    document.getElementById('updateStatus').textContent = 'Checking...';
+    document.getElementById('updateStatus').style.color = '#fff';
+    
+    fetch('/cgi-bin/update.cgi?check')
+        .then(r => r.json())
+        .then(data => {
+            document.getElementById('localVersion').textContent = data.local || 'unknown';
+            document.getElementById('remoteVersion').textContent = data.remote || 'unknown';
+            
+            if (data.status === 'available') {
+                document.getElementById('updateStatus').textContent = '🆕 Update available';
+                document.getElementById('updateStatus').style.color = '#ffff00';
+            } else if (data.status === 'current') {
+                document.getElementById('updateStatus').textContent = '✅ Up to date';
+                document.getElementById('updateStatus').style.color = '#00ff00';
+            } else {
+                document.getElementById('updateStatus').textContent = '⚠️ ' + (data.message || 'Check failed');
+                document.getElementById('updateStatus').style.color = '#ff6b6b';
+            }
+        })
+        .catch(err => {
+            document.getElementById('updateStatus').textContent = '❌ Error checking';
+            document.getElementById('updateStatus').style.color = '#ff6b6b';
+        });
+}
+
+let updateCheckInterval = null;
+
+function pollUpdateStatus() {
+    fetch('/cgi-bin/update.cgi?status')
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'complete') {
+                clearInterval(updateCheckInterval);
+                document.getElementById('updateResult').innerHTML = '<div class="success">✅ Update complete! Reloading...</div>';
+                setTimeout(() => window.location.reload(), 3000);
+            } else if (data.status === 'failed') {
+                clearInterval(updateCheckInterval);
+                let errorMsg = data.error || 'Unknown error';
+                
+                // Check if this is a first-time setup issue
+                if (errorMsg.includes('First-time setup required') || errorMsg.includes('SSH in')) {
+                    document.getElementById('updateResult').innerHTML = 
+                        '<div class="error">' +
+                        '<h3 style="margin-top:0">⚠️ First-Time Setup Required</h3>' +
+                        '<p><strong>' + errorMsg + '</strong></p>' +
+                        '<p>Web-based updates require initial configuration:</p>' +
+                        '<ol style="text-align: left; margin-left: 20px;">' +
+                        '<li>SSH into your system</li>' +
+                        '<li>Run: <code style="background:#333;padding:2px 6px;border-radius:3px;">sudo ./setup_fryminer_web.sh</code></li>' +
+                        '<li>This configures passwordless sudo for web updates</li>' +
+                        '<li>After that, web updates will work!</li>' +
+                        '</ol>' +
+                        '<p style="font-size:0.9em;color:#888;">Check <strong>Monitor</strong> tab for details.</p>' +
+                        '</div>';
+                } else {
+                    document.getElementById('updateResult').innerHTML = 
+                        '<div class="error">❌ Update failed: ' + errorMsg + 
+                        '<br><br>Check the <strong>Monitor</strong> tab for detailed logs.</div>';
+                }
+            } else if (data.status === 'running') {
+                // Still running, keep polling
+                document.getElementById('updateResult').innerHTML = '<div class="info-box">⏳ Update in progress... Check Monitor tab for progress.</div>';
+            }
+        })
+        .catch(() => {
+            // Server might be restarting
+            document.getElementById('updateResult').innerHTML = '<div class="info-box">⏳ Server restarting... Will reload shortly.</div>';
+        });
+}
+
+function forceUpdate() {
+    if (!confirm('Force update now? This will download the latest version and restart mining.')) {
+        return;
+    }
+    
+    document.getElementById('updateResult').innerHTML = '<div class="info-box">⏳ Starting update...</div>';
+    
+    fetch('/cgi-bin/update.cgi?update')
+        .then(r => r.json())
+        .then(data => {
+            if (data.status === 'started') {
+                document.getElementById('updateResult').innerHTML = '<div class="info-box">⏳ Update running... Please wait (this may take a few minutes).</div>';
+                // Start polling for completion
+                updateCheckInterval = setInterval(pollUpdateStatus, 5000);
+                // Also set a timeout to reload after max 3 minutes
+                setTimeout(() => {
+                    if (updateCheckInterval) {
+                        clearInterval(updateCheckInterval);
+                        window.location.reload();
+                    }
+                }, 180000);
+            } else {
+                document.getElementById('updateResult').innerHTML = '<div class="error">❌ ' + (data.message || 'Failed to start update') + '</div>';
+            }
+        })
+        .catch(err => {
+            document.getElementById('updateResult').innerHTML = '<div class="error">❌ Error starting update</div>';
+        });
+}
+
+// Initialize
+loadConfig();
+checkStatus();
+fetchCpuCores();
+checkForUpdate();
+refreshLogs();
+setInterval(checkStatus, 5000);
+setInterval(refreshLogs, 3000);
+
+// Fetch CPU cores and set max threads
+function fetchCpuCores() {
+    fetch('/cgi-bin/cores.cgi')
+        .then(r => r.json())
+        .then(data => {
+            const threadsInput = document.getElementById('threads');
+            threadsInput.max = data.cores;
+            threadsInput.placeholder = '1-' + data.cores;
+            // Add label hint
+            const label = threadsInput.previousElementSibling;
+            if (label && !label.textContent.includes('(')) {
+                label.textContent = 'CPU Threads (max ' + data.cores + '):';
+            }
+        })
+        .catch(() => {});
+}
+</script>
 </body>
 </html>
 '@
@@ -1454,12 +1858,12 @@ function New-WebInterface {
     Write-Log "Web interface created"
 }
 
+
 function Start-WebServer {
     param([int]$Port = 8080)
 
     Write-Log "Starting web server on port $Port..."
 
-    # Create a simple Python CGI server script
     $serverScript = @"
 import http.server
 import socketserver
@@ -1467,6 +1871,7 @@ import os
 import json
 import subprocess
 import urllib.parse
+import re
 
 PORT = $Port
 BASE_DIR = r"$($Script:BASE)"
@@ -1476,21 +1881,36 @@ LOG_FILE = os.path.join(BASE_DIR, "logs", "miner.log")
 STOP_FILE = os.path.join(BASE_DIR, "stopped")
 PID_FILE = os.path.join(BASE_DIR, "miner.pid")
 MINERS_DIR = r"$($Script:MINERS_DIR)"
+VERSION_FILE = os.path.join(BASE_DIR, "version.txt")
 
 os.chdir(WWW_DIR)
 
 class FryMinerHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/cgi-bin/status.cgi":
+        if self.path.startswith("/cgi-bin/status.cgi"):
             self.send_cgi_response(self.get_status())
-        elif self.path == "/cgi-bin/logs.cgi":
+        elif self.path.startswith("/cgi-bin/logs.cgi"):
             self.send_text_response(self.get_logs())
-        elif self.path == "/cgi-bin/stats.cgi":
+        elif self.path.startswith("/cgi-bin/stats.cgi"):
             self.send_cgi_response(self.get_stats())
-        elif self.path == "/cgi-bin/load.cgi":
+        elif self.path.startswith("/cgi-bin/load.cgi"):
             self.send_cgi_response(self.load_config())
-        elif self.path == "/cgi-bin/stop.cgi":
-            self.send_cgi_response(self.stop_mining())
+        elif self.path.startswith("/cgi-bin/stop.cgi"):
+            self.send_text_response(self.stop_mining())
+        elif self.path.startswith("/cgi-bin/start.cgi"):
+            self.send_text_response(self.start_mining())
+        elif self.path.startswith("/cgi-bin/cores.cgi"):
+            self.send_cgi_response({"cores": os.cpu_count() or 4})
+        elif self.path.startswith("/cgi-bin/thermal.cgi"):
+            self.send_cgi_response({"temperature": 45})
+        elif self.path.startswith("/cgi-bin/clearlogs.cgi"):
+            self.send_text_response(self.clear_logs())
+        elif self.path.startswith("/cgi-bin/gpu.cgi"):
+            self.send_cgi_response(self.detect_gpu())
+        elif self.path.startswith("/cgi-bin/usbasic.cgi"):
+            self.send_cgi_response({"usbasic_available": False, "device_count": 0, "devices": "", "reason": "USB ASIC detection requires manual setup on Windows"})
+        elif self.path.startswith("/cgi-bin/update.cgi"):
+            self.handle_update()
         else:
             super().do_GET()
 
@@ -1505,24 +1925,35 @@ class FryMinerHandler(http.server.SimpleHTTPRequestHandler):
     def send_cgi_response(self, data):
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
+        self.send_header('Cache-Control', 'no-cache, no-store')
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
 
     def send_text_response(self, text):
         self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
+        self.send_header('Content-type', 'text/html')
+        self.send_header('Cache-Control', 'no-cache, no-store')
         self.end_headers()
-        self.wfile.write(text.encode())
+        self.wfile.write(str(text).encode())
 
     def get_status(self):
         running = False
+        crashed = False
         try:
             result = subprocess.run(['tasklist'], capture_output=True, text=True)
-            if 'xmrig' in result.stdout.lower() or 'xlarig' in result.stdout.lower() or 'cpuminer' in result.stdout.lower() or 'ccminer' in result.stdout.lower():
+            output = result.stdout.lower()
+            if any(m in output for m in ['xmrig', 'xlarig', 'cpuminer', 'ccminer', 'srbminer', 'lolminer', 't-rex', 'bfgminer', 'ore']):
                 running = True
-        except:
-            pass
-        return {"running": running, "crashed": False}
+        except: pass
+        if not running and os.path.exists(LOG_FILE) and not os.path.exists(STOP_FILE):
+            try:
+                with open(LOG_FILE, 'r') as f:
+                    lines = f.readlines()[-10:]
+                    for line in lines:
+                        if any(x in line.lower() for x in ['fatal error', 'access violation', 'exception']):
+                            crashed = True
+            except: pass
+        return {"running": running, "crashed": crashed}
 
     def get_logs(self):
         try:
@@ -1530,14 +1961,30 @@ class FryMinerHandler(http.server.SimpleHTTPRequestHandler):
                 with open(LOG_FILE, 'r') as f:
                     lines = f.readlines()
                     return ''.join(lines[-100:])
-        except:
-            pass
+        except: pass
         return "No logs available"
 
     def get_stats(self):
-        return {"hashrate": "--", "accepted": 0, "rejected": 0, "uptime": "0h 0m"}
+        stats = {"hashrate": "--", "shares": "0", "uptime": "0h 0m", "efficiency": "100", "algo": "--", "diff": "--", "pool": "--"}
+        try:
+            if os.path.exists(LOG_FILE):
+                with open(LOG_FILE, 'r') as f:
+                    content = f.read()
+                # Parse hashrate from XMRig format
+                hr_matches = re.findall(r'speed\s+\S+\s+([\d.]+)\s+[\d.]+\s+[\d.]+\s+(\S+)', content)
+                if hr_matches:
+                    stats["hashrate"] = f"{hr_matches[-1][0]} {hr_matches[-1][1]}"
+                # Parse accepted shares
+                acc_matches = re.findall(r'accepted\s*\(?(\d+)', content, re.IGNORECASE)
+                if acc_matches:
+                    stats["shares"] = acc_matches[-1]
+                # Get config for pool/algo
+                config = self._read_config()
+                if config.get('pool'): stats["pool"] = config['pool']
+        except: pass
+        return stats
 
-    def load_config(self):
+    def _read_config(self):
         config = {}
         try:
             if os.path.exists(CONFIG_FILE):
@@ -1546,52 +1993,151 @@ class FryMinerHandler(http.server.SimpleHTTPRequestHandler):
                         if '=' in line:
                             key, value = line.strip().split('=', 1)
                             config[key] = value
-        except:
-            pass
+        except: pass
+        return config
+
+    def load_config(self):
+        config = self._read_config()
+        # Set defaults for new fields
+        defaults = {'password': 'x', 'cpu_mining': 'true', 'gpu_mining': 'false', 'gpu_miner': 'srbminer',
+                    'usbasic_mining': 'false', 'usbasic_algo': 'sha256d', 'doge_wallet': '', 'ltc_wallet': '',
+                    'ore_keypair': '', 'ore_rpc': '', 'ore_priority_fee': '', 'ora_node_url': '', 'ora_api_token': ''}
+        for k, v in defaults.items():
+            if k not in config: config[k] = v
         return config
 
     def save_config(self, post_data):
         params = urllib.parse.parse_qs(post_data)
-        miner = params.get('miner', [''])[0]
-        wallet = params.get('wallet', [''])[0]
-        worker = params.get('worker', ['FryWorker'])[0]
-        threads = params.get('threads', ['4'])[0]
-        pool = params.get('pool', [''])[0]
-        password = params.get('password', ['x'])[0]
+        fields = ['miner', 'wallet', 'doge_wallet', 'ltc_wallet', 'worker', 'threads', 'pool', 'password',
+                  'cpu_mining', 'gpu_mining', 'gpu_miner', 'usbasic_mining', 'usbasic_algo',
+                  'ore_keypair', 'ore_rpc', 'ore_priority_fee', 'ora_node_url', 'ora_api_token']
+        defaults = {'worker': 'FryWorker', 'threads': '4', 'password': 'x', 'cpu_mining': 'true',
+                    'gpu_mining': 'false', 'gpu_miner': 'srbminer', 'usbasic_mining': 'false', 'usbasic_algo': 'sha256d'}
+        config = {}
+        for f in fields:
+            config[f] = params.get(f, [defaults.get(f, '')])[0]
 
-        # Save config
+        miner = config['miner']
+        pool = config['pool']
+
+        # Strip protocol prefix
+        for prefix in ['stratum+tcp://', 'stratum+ssl://', 'stratum://', 'https://', 'http://']:
+            if pool.startswith(prefix):
+                pool = pool[len(prefix):]
+        config['pool'] = pool
+
+        # Default pools
+        pool_defaults = {
+            'xmr': 'pool.supportxmr.com:3333', 'scala': 'pool.scalaproject.io:3333',
+            'aeon': 'aeon.herominers.com:10650', 'dero': 'dero-node-sk.mysrv.cloud:10300',
+            'zephyr': 'de.zephyr.herominers.com:1123', 'salvium': 'de.salvium.herominers.com:1228',
+            'yadacoin': 'pool.yadacoin.io:3333', 'verus': 'pool.verus.io:9999',
+            'arionum': 'aropool.com:80', 'btc': 'pool.btc.com:3333',
+            'ltc': 'stratum.aikapool.com:7900', 'doge': 'prohashing.com:3332',
+            'bch': 'pool.btc.com:3333', 'dash': 'dash.suprnova.cc:9989',
+            'dcr': 'dcr.suprnova.cc:3252', 'kda': 'pool.woolypooly.com:3112',
+            'zen': 'zen.suprnova.cc:3618',
+            'ore': 'https://api.mainnet-beta.solana.com', 'ora': 'http://localhost:4001',
+            'btc-lotto': 'eu3.solopool.org:8005', 'bch-lotto': 'eu2.solopool.org:8002',
+            'ltc-lotto': 'eu3.solopool.org:8003', 'doge-lotto': 'eu3.solopool.org:8003',
+            'xmr-lotto': 'eu1.solopool.org:8010', 'etc-lotto': 'eu1.solopool.org:8011',
+            'ethw-lotto': 'eu2.solopool.org:8005', 'kas-lotto': 'eu2.solopool.org:8008',
+            'erg-lotto': 'eu1.solopool.org:8001', 'rvn-lotto': 'eu1.solopool.org:8013',
+            'zeph-lotto': 'eu2.solopool.org:8006', 'dgb-lotto': 'eu1.solopool.org:8004',
+            'xec-lotto': 'eu2.solopool.org:8013', 'fb-lotto': 'eu3.solopool.org:8002',
+            'bc2-lotto': 'eu3.solopool.org:8001', 'xel-lotto': 'eu3.solopool.org:8004',
+            'octa-lotto': 'eu2.solopool.org:8004',
+        }
+        unmineable = ['shib','ada','sol','zec','etc','rvn','trx','vet','xrp','dot','matic','atom','link','xlm','algo','avax','near','ftm','one']
+        if not config['pool']:
+            config['pool'] = pool_defaults.get(miner, 'rx.unmineable.com:3333')
+            if miner in unmineable:
+                config['pool'] = 'rx.unmineable.com:3333'
+
+        # Save config file
         with open(CONFIG_FILE, 'w') as f:
-            f.write(f"miner={miner}\\n")
-            f.write(f"wallet={wallet}\\n")
-            f.write(f"worker={worker}\\n")
-            f.write(f"threads={threads}\\n")
-            f.write(f"pool={pool}\\n")
-            f.write(f"password={password}\\n")
+            for k, v in config.items():
+                f.write(f"{k}={v}\\n")
 
-        # Start mining using PowerShell
-        script_path = os.path.join(BASE_DIR, "output", miner, "start.ps1")
+        # Generate and start mining script
+        self._generate_mining_script(config)
+        return "<div style='color:#4caf50'>Configuration saved for {}!</div>".format(miner)
+
+    def _generate_mining_script(self, config):
+        miner = config['miner']
+        # Stop existing miners
+        for proc in ['xmrig', 'xlarig', 'cpuminer', 'ccminer-verus', 'SRBMiner-MULTI', 'lolMiner', 't-rex', 'bfgminer', 'ore']:
+            subprocess.run(['taskkill', '/F', '/IM', f'{proc}.exe'], capture_output=True)
+
+        script_dir = os.path.join(BASE_DIR, "output", miner)
+        os.makedirs(script_dir, exist_ok=True)
+        script_path = os.path.join(script_dir, "start.ps1")
+
+        # Start mining via existing PS1 script generation
         if os.path.exists(script_path):
-            # Stop existing miners first
-            subprocess.run(['taskkill', '/F', '/IM', 'xmrig.exe'], capture_output=True)
-            subprocess.run(['taskkill', '/F', '/IM', 'xlarig.exe'], capture_output=True)
-            subprocess.run(['taskkill', '/F', '/IM', 'cpuminer.exe'], capture_output=True)
-            subprocess.run(['taskkill', '/F', '/IM', 'ccminer-verus.exe'], capture_output=True)
-            # Start new mining process
             subprocess.Popen(['powershell', '-ExecutionPolicy', 'Bypass', '-File', script_path],
                            creationflags=subprocess.CREATE_NEW_CONSOLE)
 
-        return f"Configuration saved for {miner}!"
-
     def stop_mining(self):
-        # Create stop marker
-        with open(STOP_FILE, 'w') as f:
-            f.write('stopped')
-        # Kill miner processes
-        subprocess.run(['taskkill', '/F', '/IM', 'xmrig.exe'], capture_output=True)
-        subprocess.run(['taskkill', '/F', '/IM', 'xlarig.exe'], capture_output=True)
-        subprocess.run(['taskkill', '/F', '/IM', 'cpuminer.exe'], capture_output=True)
-        subprocess.run(['taskkill', '/F', '/IM', 'ccminer-verus.exe'], capture_output=True)
-        return {"status": "stopped"}
+        with open(STOP_FILE, 'w') as f: f.write('stopped')
+        for proc in ['xmrig', 'xlarig', 'cpuminer', 'ccminer-verus', 'SRBMiner-MULTI', 'lolMiner', 't-rex', 'bfgminer', 'ore']:
+            subprocess.run(['taskkill', '/F', '/IM', f'{proc}.exe'], capture_output=True)
+        return "<div style='color:#4caf50'>Mining stopped</div>"
+
+    def start_mining(self):
+        config = self._read_config()
+        miner = config.get('miner', '')
+        if not miner: return "<div style='color:#f44336'>No configuration found</div>"
+        script_path = os.path.join(BASE_DIR, "output", miner, "start.ps1")
+        if os.path.exists(script_path):
+            if os.path.exists(STOP_FILE): os.remove(STOP_FILE)
+            subprocess.Popen(['powershell', '-ExecutionPolicy', 'Bypass', '-File', script_path],
+                           creationflags=subprocess.CREATE_NEW_CONSOLE)
+            return "<div style='color:#4caf50'>Mining started</div>"
+        return "<div style='color:#f44336'>Start script not found. Save configuration first.</div>"
+
+    def clear_logs(self):
+        try:
+            with open(LOG_FILE, 'w') as f: f.write('')
+        except: pass
+        return "Logs cleared"
+
+    def detect_gpu(self):
+        try:
+            result = subprocess.run(['wmic', 'path', 'win32_videocontroller', 'get', 'name'], capture_output=True, text=True)
+            lines = [l.strip() for l in result.stdout.strip().split('\\n') if l.strip() and l.strip() != 'Name']
+            if lines:
+                gpu_name = lines[0]
+                nvidia = 'nvidia' in gpu_name.lower() or 'geforce' in gpu_name.lower() or 'rtx' in gpu_name.lower() or 'gtx' in gpu_name.lower()
+                amd = 'amd' in gpu_name.lower() or 'radeon' in gpu_name.lower()
+                intel = 'intel' in gpu_name.lower()
+                return {"gpu_available": True, "gpu_name": gpu_name, "nvidia": nvidia, "amd": amd, "intel": intel}
+        except: pass
+        return {"gpu_available": False, "reason": "Could not detect GPU", "nvidia": False, "amd": False, "intel": False}
+
+    def handle_update(self):
+        query = urllib.parse.urlparse(self.path).query
+        if 'check' in query:
+            local_ver = 'unknown'
+            remote_ver = 'unknown'
+            try:
+                if os.path.exists(VERSION_FILE):
+                    with open(VERSION_FILE, 'r') as f: local_ver = f.read().strip()
+                import urllib.request
+                resp = urllib.request.urlopen("https://api.github.com/repos/Fry-Foundation/Fry-PoW-MultiMiner/commits/main", timeout=10)
+                data = json.loads(resp.read())
+                remote_ver = data['sha'][:7]
+            except: pass
+            status = 'current' if local_ver == remote_ver else 'available' if remote_ver != 'unknown' else 'error'
+            self.send_cgi_response({"local": local_ver, "remote": remote_ver, "status": status})
+        elif 'update' in query:
+            self.send_cgi_response({"status": "started", "message": "Update started in background"})
+            subprocess.Popen(['powershell', '-ExecutionPolicy', 'Bypass', '-File', os.path.join(BASE_DIR, 'auto_update.ps1')],
+                           creationflags=subprocess.CREATE_NEW_CONSOLE)
+        elif 'status' in query:
+            self.send_cgi_response({"status": "complete"})
+        else:
+            self.send_cgi_response({"error": "Unknown action"})
 
 with socketserver.TCPServer(("", PORT), FryMinerHandler) as httpd:
     print(f"FryMiner web server running on http://localhost:{PORT}")
@@ -1600,11 +2146,8 @@ with socketserver.TCPServer(("", PORT), FryMinerHandler) as httpd:
 
     $serverScript | Out-File -FilePath "$Script:BASE\webserver.py" -Encoding UTF8 -Force
 
-    # Start the web server
     $pythonPath = (Get-Command python -ErrorAction SilentlyContinue).Source
-    if (-not $pythonPath) {
-        $pythonPath = (Get-Command python3 -ErrorAction SilentlyContinue).Source
-    }
+    if (-not $pythonPath) { $pythonPath = (Get-Command python3 -ErrorAction SilentlyContinue).Source }
 
     if ($pythonPath) {
         Start-Process -FilePath $pythonPath -ArgumentList "`"$Script:BASE\webserver.py`"" -WindowStyle Normal
@@ -1620,6 +2163,240 @@ with socketserver.TCPServer(("", PORT), FryMinerHandler) as httpd:
     }
 }
 
+
+# =============================================================================
+# MINING SCRIPT GENERATION
+# =============================================================================
+
+function New-MiningScript {
+    param(
+        [string]$Coin,
+        [string]$Wallet,
+        [string]$Worker,
+        [int]$Threads,
+        [string]$Pool,
+        [string]$Password = "x"
+    )
+
+    # Algorithm mapping
+    $algoMap = @{
+        "xmr" = @{ Algo = "rx/0"; Miner = "xmrig" }
+        "xmr-lotto" = @{ Algo = "rx/0"; Miner = "xmrig" }
+        "scala" = @{ Algo = "panthera"; Miner = "xlarig" }
+        "aeon" = @{ Algo = "rx/0"; Miner = "xmrig" }
+        "dero" = @{ Algo = "astrobwt"; Miner = "xmrig" }
+        "zephyr" = @{ Algo = "rx/0"; Miner = "xmrig" }
+        "zeph-lotto" = @{ Algo = "rx/0"; Miner = "xmrig" }
+        "salvium" = @{ Algo = "rx/0"; Miner = "xmrig" }
+        "yadacoin" = @{ Algo = "rx/yada"; Miner = "xmrig" }
+        "verus" = @{ Algo = "verushash"; Miner = "ccminer" }
+        "arionum" = @{ Algo = "argon2d4096"; Miner = "cpuminer" }
+        "btc" = @{ Algo = "sha256d"; Miner = "cpuminer" }
+        "btc-lotto" = @{ Algo = "sha256d"; Miner = "cpuminer" }
+        "ltc" = @{ Algo = "scrypt"; Miner = "cpuminer" }
+        "ltc-lotto" = @{ Algo = "scrypt"; Miner = "cpuminer" }
+        "doge" = @{ Algo = "scrypt"; Miner = "cpuminer" }
+        "doge-lotto" = @{ Algo = "scrypt"; Miner = "cpuminer" }
+        "dash" = @{ Algo = "x11"; Miner = "cpuminer" }
+        "dcr" = @{ Algo = "decred"; Miner = "cpuminer" }
+        "kda" = @{ Algo = "blake2s"; Miner = "cpuminer" }
+        "bch" = @{ Algo = "sha256d"; Miner = "cpuminer" }
+        "bch-lotto" = @{ Algo = "sha256d"; Miner = "cpuminer" }
+        "dgb-lotto" = @{ Algo = "sha256d"; Miner = "cpuminer" }
+        "xec-lotto" = @{ Algo = "sha256d"; Miner = "cpuminer" }
+        "fb-lotto" = @{ Algo = "sha256d"; Miner = "cpuminer" }
+        "bc2-lotto" = @{ Algo = "sha256d"; Miner = "cpuminer" }
+        "ore" = @{ Algo = "drillx"; Miner = "ore" }
+        "ora" = @{ Algo = "algorand-tx"; Miner = "ora" }
+    }
+
+    $info = $algoMap[$Coin.ToLower()]
+    if (-not $info) { $info = @{ Algo = "rx/0"; Miner = "xmrig" } }
+    $algo = $info.Algo
+    $minerType = $info.Miner
+
+    # Unmineable coins
+    $unmineableCoins = @('shib','ada','sol','zec','etc','rvn','trx','vet','xrp','dot','matic','atom','link','xlm','algo','avax','near','ftm','one')
+    $isUnmineable = $unmineableCoins -contains $Coin.ToLower()
+    if ($isUnmineable) { $algo = "rx/0"; $minerType = "xmrig" }
+
+    if ([string]::IsNullOrEmpty($Pool)) {
+        $Pool = Get-PoolForCoin -Coin $Coin
+    }
+
+    # Dev wallet routing
+    $devWallet = $Script:DevWallets.SCALA
+    $devPool = "pool.scalaproject.io:3333"
+    $devUseScala = $true
+
+    switch ($Coin.ToLower()) {
+        "ltc" { $devWallet = $Script:DevWallets.LTC; $devUseScala = $false }
+        "btc" { $devWallet = $Script:DevWallets.BTC; $devUseScala = $false }
+        "doge" { $devWallet = $Script:DevWallets.DOGE; $devUseScala = $false }
+        "dash" { $devWallet = $Script:DevWallets.DASH; $devUseScala = $false }
+        "dcr" { $devWallet = $Script:DevWallets.DCR; $devUseScala = $false }
+        "kda" { $devWallet = $Script:DevWallets.KDA; $devUseScala = $false }
+        "bch" { $devWallet = $Script:DevWallets.BCH; $devUseScala = $false }
+        "dero" { $devWallet = $Script:DevWallets.DERO; $devUseScala = $false }
+        "scala" { $devWallet = $Script:DevWallets.SCALA; $devUseScala = $false }
+        "verus" { $devWallet = $Script:DevWallets.VRSC; $devUseScala = $false }
+    }
+
+    # Unmineable wallet formatting
+    $userWalletFormatted = $Wallet
+    if ($isUnmineable -and $Wallet -notmatch ":") {
+        $userWalletFormatted = "$($Coin.ToUpper()):$Wallet"
+    }
+
+    $scriptDir = "$Script:BASE\output\$Coin"
+    if (-not (Test-Path $scriptDir)) { New-Item -ItemType Directory -Path $scriptDir -Force | Out-Null }
+    $scriptPath = "$scriptDir\start.ps1"
+
+    # Build mining script content
+    $scriptContent = @"
+# FryMiner Start Script - $Coin
+# Dev fee: 2% (1 min per 50 min cycle)
+`$ErrorActionPreference = "Continue"
+`$LogFile = "$Script:LOG_FILE"
+`$StopFile = "$Script:STOP_FILE"
+`$PidFile = "$Script:PID_FILE"
+`$MinersDir = "$Script:MINERS_DIR"
+
+`$UserWallet = "$userWalletFormatted"
+`$UserPassword = "$Password"
+`$Worker = "$Worker"
+`$Threads = $Threads
+`$Pool = "$Pool"
+`$Algo = "$algo"
+`$Pool = `$Pool -replace '^stratum\+tcp://', '' -replace '^stratum\+ssl://', '' -replace '^stratum://', '' -replace '^https?://', ''
+
+`$DevWallet = "$devWallet"
+`$DevPool = "$devPool"
+`$DevPool = `$DevPool -replace '^stratum\+tcp://', '' -replace '^stratum\+ssl://', '' -replace '^stratum://', '' -replace '^https?://', ''
+`$DevUseScala = `$$devUseScala
+`$MinerType = "$minerType"
+
+`$UserMinutes = $Script:DEV_FEE_USER_MINUTES
+`$DevMinutes = $Script:DEV_FEE_DEV_MINUTES
+
+function Write-MinerLog {
+    param([string]`$Message)
+    `$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -Path `$LogFile -Value "[`$timestamp] `$Message"
+}
+
+function Stop-AllMiners {
+    Get-Process -Name "xmrig", "xlarig", "cpuminer", "ccminer-verus", "SRBMiner-MULTI", "lolMiner", "t-rex", "bfgminer", "ore" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Seconds 2
+}
+
+function Get-MinerCommand {
+    param([string]`$WalletStr, [string]`$PoolStr, [string]`$PasswordStr)
+    switch (`$MinerType) {
+        "xlarig" { return @{ Path = "`$MinersDir\xlarig.exe"; Args = "-o `$PoolStr -u `$WalletStr -p `$PasswordStr --threads=`$Threads -a panthera --no-color --donate-level=0" } }
+        "ccminer" { return @{ Path = "`$MinersDir\ccminer-verus.exe"; Args = "-a verus -o stratum+tcp://`$PoolStr -u `$WalletStr -p `$PasswordStr -t `$Threads" } }
+        "cpuminer" { return @{ Path = "`$MinersDir\cpuminer.exe"; Args = "--algo=`$Algo -o stratum+tcp://`$PoolStr -u `$WalletStr -p `$PasswordStr --threads=`$Threads" } }
+        default { return @{ Path = "`$MinersDir\xmrig.exe"; Args = "-o `$PoolStr -u `$WalletStr -p `$PasswordStr --threads=`$Threads -a `$Algo --no-color --donate-level=0" } }
+    }
+}
+
+Remove-Item -Path `$StopFile -Force -ErrorAction SilentlyContinue
+Write-MinerLog "========================================"
+Write-MinerLog "Starting mining session - $Coin"
+Write-MinerLog "Pool: $Pool | Algo: $algo | Threads: $Threads"
+Write-MinerLog "Dev fee: 2% (1 min per 50 min cycle)"
+Write-MinerLog "========================================"
+
+while (`$true) {
+    if (Test-Path `$StopFile) { Write-MinerLog "Stopped by user"; Stop-AllMiners; exit 0 }
+
+    # User mining (49 min)
+    Write-MinerLog "Mining for user wallet..."
+    `$cmd = Get-MinerCommand -WalletStr "`$UserWallet.`$Worker" -PoolStr `$Pool -PasswordStr `$UserPassword
+    `$process = Start-Process -FilePath `$cmd.Path -ArgumentList `$cmd.Args -PassThru -NoNewWindow
+    `$process.Id | Out-File -FilePath `$PidFile -Force
+
+    `$waitSeconds = `$UserMinutes * 60
+    `$waited = 0
+    while (`$waited -lt `$waitSeconds) {
+        if (Test-Path `$StopFile) { Stop-AllMiners; exit 0 }
+        if (`$process.HasExited) { Write-MinerLog "Miner died, restarting..."; break }
+        Start-Sleep -Seconds 10
+        `$waited += 10
+    }
+    Stop-AllMiners
+
+    if (Test-Path `$StopFile) { exit 0 }
+
+    # Dev mining (1 min)
+    Write-MinerLog "Dev fee mining (2%)..."
+    if (`$DevUseScala) {
+        `$devCmd = @{ Path = "`$MinersDir\xlarig.exe"; Args = "-o `$DevPool -u `$DevWallet.frydev -p x --threads=`$Threads -a panthera --no-color --donate-level=0" }
+    } else {
+        `$devCmd = Get-MinerCommand -WalletStr "`$DevWallet.frydev" -PoolStr `$Pool -PasswordStr "x"
+    }
+    `$process = Start-Process -FilePath `$devCmd.Path -ArgumentList `$devCmd.Args -PassThru -NoNewWindow
+
+    `$waitSeconds = `$DevMinutes * 60
+    `$waited = 0
+    while (`$waited -lt `$waitSeconds) {
+        if (Test-Path `$StopFile) { Stop-AllMiners; exit 0 }
+        if (`$process.HasExited) { break }
+        Start-Sleep -Seconds 10
+        `$waited += 10
+    }
+    Stop-AllMiners
+}
+"@
+
+    $scriptContent | Out-File -FilePath $scriptPath -Encoding UTF8 -Force
+
+    # Save config
+    @"
+miner=$Coin
+wallet=$Wallet
+worker=$Worker
+threads=$Threads
+pool=$Pool
+password=$Password
+cpu_mining=true
+gpu_mining=false
+gpu_miner=srbminer
+usbasic_mining=false
+usbasic_algo=sha256d
+"@ | Out-File -FilePath $Script:CONFIG_FILE -Encoding UTF8 -Force
+
+    Write-Log "Mining script created: $scriptPath"
+    return $scriptPath
+}
+
+function Get-PoolForCoin {
+    param([string]$Coin)
+    $pools = @{
+        "xmr" = "pool.supportxmr.com:3333"; "scala" = "pool.scalaproject.io:3333"
+        "aeon" = "aeon.herominers.com:10650"; "dero" = "dero-node-sk.mysrv.cloud:10300"
+        "zephyr" = "de.zephyr.herominers.com:1123"; "salvium" = "de.salvium.herominers.com:1228"
+        "yadacoin" = "pool.yadacoin.io:3333"; "verus" = "pool.verus.io:9999"
+        "arionum" = "aropool.com:80"; "btc" = "pool.btc.com:3333"
+        "ltc" = "stratum.aikapool.com:7900"; "doge" = "prohashing.com:3332"
+        "bch" = "pool.btc.com:3333"; "dash" = "dash.suprnova.cc:9989"
+        "dcr" = "dcr.suprnova.cc:3252"; "kda" = "pool.woolypooly.com:3112"
+        "zen" = "zen.suprnova.cc:3618"
+        "ore" = "https://api.mainnet-beta.solana.com"; "ora" = "http://localhost:4001"
+        "btc-lotto" = "eu3.solopool.org:8005"; "bch-lotto" = "eu2.solopool.org:8002"
+        "ltc-lotto" = "eu3.solopool.org:8003"; "doge-lotto" = "eu3.solopool.org:8003"
+        "xmr-lotto" = "eu1.solopool.org:8010"; "etc-lotto" = "eu1.solopool.org:8011"
+        "ethw-lotto" = "eu2.solopool.org:8005"; "kas-lotto" = "eu2.solopool.org:8008"
+        "erg-lotto" = "eu1.solopool.org:8001"; "rvn-lotto" = "eu1.solopool.org:8013"
+        "zeph-lotto" = "eu2.solopool.org:8006"; "dgb-lotto" = "eu1.solopool.org:8004"
+        "xec-lotto" = "eu2.solopool.org:8013"; "fb-lotto" = "eu3.solopool.org:8002"
+        "bc2-lotto" = "eu3.solopool.org:8001"; "xel-lotto" = "eu3.solopool.org:8004"
+        "octa-lotto" = "eu2.solopool.org:8004"
+    }
+    if ($pools.ContainsKey($Coin.ToLower())) { return $pools[$Coin.ToLower()] }
+    return "rx.unmineable.com:3333"
+}
+
 # =============================================================================
 # MAIN EXECUTION
 # =============================================================================
@@ -1628,49 +2405,47 @@ function Start-FryMinerSetup {
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host " FryMiner Setup - Windows Edition" -ForegroundColor Cyan
-    Write-Host " Multi-Coin CPU Miner" -ForegroundColor Cyan
+    Write-Host " Multi-Coin CPU Miner (37+ Coins)" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host ""
 
-    # Check admin
     if (-not (Test-Administrator)) {
         Write-Error-Custom "This script requires Administrator privileges."
-        Write-Host "Please right-click PowerShell and select 'Run as Administrator'" -ForegroundColor Yellow
         exit 1
     }
 
     Write-Log "Starting FryMiner setup..."
-
-    # Detect architecture
     $arch = Get-SystemArchitecture
-
-    # Initialize directories
     Initialize-Directories
-
-    # Install dependencies
     Install-Dependencies
 
     if (-not $SkipInstall) {
-        # Apply optimizations
         Set-MiningOptimizations
 
-        # Install miners
+        # CPU miners
         Install-XMRig
         Install-XLArig
         Install-CPUMiner
         Install-CCMinerVerus
+
+        # GPU miners
+        Install-SRBMiner
+        Install-LolMiner
+        Install-TRex
+
+        # USB ASIC miners
+        Install-BFGMiner
+
+        # ORE miner
+        $oreOk = Install-OREMiner
+
+        # ORA miner
+        $oraOk = Install-ORAMiner
     }
 
-    # Setup auto-update
     Setup-AutoUpdate
-
-    # Create web interface
     New-WebInterface
-
-    # Generate a default mining script for XMR as example
     New-MiningScript -Coin "xmr" -Wallet "YOUR_WALLET_HERE" -Worker "FryWorker" -Threads ([Environment]::ProcessorCount)
-
-    # Start web server
     Start-WebServer -Port $Port
 
     Write-Host ""
@@ -1680,11 +2455,15 @@ function Start-FryMinerSetup {
     Write-Host "1. Open http://localhost:$Port in your browser" -ForegroundColor White
     Write-Host "2. Select a cryptocurrency to mine" -ForegroundColor White
     Write-Host "3. Enter your wallet address" -ForegroundColor White
-    Write-Host "4. Click 'Save & Start Mining'" -ForegroundColor White
+    Write-Host "4. Click 'Save Configuration'" -ForegroundColor White
     Write-Host ""
     Write-Host "Files installed to: $Script:BASE" -ForegroundColor Gray
     Write-Host ""
+    Write-Host "================================================" -ForegroundColor Red
+    Write-Host " DEV FEE: 2% (1 min per 50 min cycle)" -ForegroundColor Red
+    Write-Host " Thank you for supporting development!" -ForegroundColor Red
+    Write-Host "================================================" -ForegroundColor Red
+    Write-Host ""
 }
 
-# Run setup
 Start-FryMinerSetup
